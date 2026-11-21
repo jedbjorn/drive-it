@@ -1,0 +1,13 @@
+node_modules/
+bin/
+obj/
+.vs/
+*.user
+*.suo
+.env
+.env.*
+*.rvt
+*.rfa
+*.rte
+*.rft
+*.ifc
