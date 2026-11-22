@@ -14,6 +14,7 @@ if (-not [IO.File]::Exists($operatorScript)) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'operator-cli.stub') -Destination $operatorScript
 }
 [IO.Directory]::CreateDirectory($FixtureDirectory) | Out-Null
+$FixtureDirectory = (Get-Item -LiteralPath $FixtureDirectory -Force).FullName
 $workspace = Join-Path $FixtureDirectory 'workspace'
 [IO.Directory]::CreateDirectory($workspace) | Out-Null
 $mcpPath = Join-Path $FixtureDirectory 'client.json'
