@@ -33,6 +33,7 @@ $originalDotnetVersion = if ($null -eq $originalDotnet) { $null } else { & $orig
 [IO.File]::WriteAllText($mcpPath, '{"theme":"dark","mcpServers":{"existing":{"command":"existing.exe","args":[]}}}', [Text.UTF8Encoding]::new($false))
 $installer = Join-Path $package 'Install-DriveIt.ps1'
 & $installer -SourcePath $package -InstallRoot $InstallRoot -WorkspaceRoot $workspace -McpConfigPath $mcpPath -NoLaunch | Out-Null
+$InstallRoot = (Get-Item -LiteralPath $InstallRoot -Force).FullName
 
 $node = Join-Path $InstallRoot 'app\runtimes\node\node.exe'
 $python = Join-Path $InstallRoot 'app\runtimes\python\python.exe'
