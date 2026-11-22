@@ -37,8 +37,9 @@ function Invoke-Msiexec {
 }
 
 function Get-ArpEntry {
-    Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'Drive It' }
+    # Per-user (unmanaged) MSI products are published under the user's Installer key.
+    Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Installer\Products\*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSObject.Properties['ProductName'] -and $_.ProductName -eq 'Drive It' }
 }
 
 Invoke-Msiexec -Operation '/i' -Log 'install.log'
