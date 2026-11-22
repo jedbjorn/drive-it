@@ -644,6 +644,62 @@ result = "created"
   assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
 });
 
+test("modules outside the allowlist cannot be imported or loaded by any route", async (t) => {
+  for (const [name, source] of [
+    ["dbm", "import dbm\ndatabase = dbm.open(args[\"path\"], \"c\")\ndatabase[\"key\"] = \"native-escape\"\ndatabase.close()\nresult = \"created\""],
+    ["dbm.gnu", "import dbm.gnu\ndatabase = dbm.gnu.open(args[\"path\"], \"c\")\ndatabase[\"key\"] = \"native-escape\"\ndatabase.close()\nresult = \"created\""],
+    ["import_module", "import sys\nsys.modules[\"importlib\"].import_module(\"dbm.gnu\").open(args[\"path\"], \"c\").close()\nresult = \"created\""],
+    ["pickle", "import pickle\nresult = \"imported\""],
+    ["cached", "import gc\nresult = \"imported\""],
+    ["relative", "from . import worker\nresult = \"imported\""],
+  ]) {
+    const { root, outside, runtime } = await fixture(t);
+    const target = path.join(outside, `${name}.db`);
+    const receipt = await runtime.execute(request(root, { source, arguments: { path: target } }));
+    assert.equal(receipt.status, "failed", `${name}: ${JSON.stringify(receipt)}`);
+    assert.equal(receipt.error.type, "ImportError", name);
+    assert.match(receipt.error.message, /only allowlisted modules/, name);
+    assert.equal(receipt.result, null, name);
+    assert.equal(await exists(target), false, name);
+    assert.deepEqual(receipt.changes, [], name);
+    assert.deepEqual(receipt.policyRequests, [], name);
+    assert.deepEqual(await runtime.decisions.list(), [], name);
+  }
+});
+
+test("every allowlisted module imports from generated code", async (t) => {
+  const { root, runtime } = await fixture(t);
+  const source = `
+import sys
+allowed = sorted(sys.modules["__main__"].ALLOWED_MODULES)
+for name in allowed:
+    __import__(name)
+result = allowed
+`;
+  const receipt = await runtime.execute(request(root, { source }));
+  assert.equal(receipt.status, "succeeded", JSON.stringify(receipt));
+  assert.ok(receipt.result.includes("json") && receipt.result.includes("csv"));
+});
+
+test("Windows native file handles cannot be imported", { skip: process.platform !== "win32" }, async (t) => {
+  const { root, outside, runtime } = await fixture(t);
+  const target = path.join(outside, "winapi-escape.txt");
+  await writeFile(target, "keep");
+  const source = `
+import _winapi
+handle = _winapi.CreateFile(args["path"], 0x40000000, 0, None, 2, 0, None)
+_winapi.WriteFile(handle, b"native-escape")
+_winapi.CloseHandle(handle)
+result = "written"
+`;
+  const receipt = await runtime.execute(request(root, { source, arguments: { path: target } }));
+  assert.equal(receipt.status, "failed", JSON.stringify(receipt));
+  assert.equal(receipt.error.type, "ImportError");
+  assert.equal(await readFile(target, "utf8"), "keep");
+  assert.deepEqual(receipt.changes, []);
+  assert.deepEqual(await runtime.decisions.list(), []);
+});
+
 test("Windows process launches cannot write outside the root or produce success receipts", { skip: process.platform !== "win32" }, async (t) => {
   for (const [name, source] of [
     ["os.startfile", `
@@ -671,7 +727,7 @@ result = "launched"
     await writeFile(target, "keep");
     const receipt = await runtime.execute(request(root, { source, arguments: { path: target } }));
     assert.equal(receipt.status, "failed", JSON.stringify(receipt));
-    assert.match(receipt.error.message, /Process execution is disabled/);
+    assert.match(receipt.error.message, /disabled/);
     assert.equal(await readFile(target, "utf8"), "keep");
     assert.deepEqual(receipt.changes, []);
     assert.deepEqual(receipt.affectedFiles, []);

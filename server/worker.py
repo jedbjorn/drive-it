@@ -27,6 +27,22 @@ _original_unlink = os.unlink
 _request_id = 0
 _checks = []
 
+# Modules generated scripts may import; everything else is denied. Pure-Python
+# modules are low risk to add. A native module must first be checked for file,
+# process, or loader capabilities that bypass the audit hook (as sqlite3 and dbm do).
+ALLOWED_MODULES = frozenset({
+    "sys", "os", "os.path", "types", "io", "abc", "typing", "warnings", "traceback", "contextlib",
+    "json", "csv", "re", "string", "textwrap", "difflib", "unicodedata", "pprint", "html",
+    "math", "cmath", "statistics", "decimal", "fractions", "random", "numbers",
+    "datetime", "time", "calendar",
+    "collections", "collections.abc", "itertools", "functools", "operator", "heapq", "bisect",
+    "array", "copy", "dataclasses", "enum", "struct",
+    "base64", "binascii", "hashlib", "uuid",
+    "pathlib", "fnmatch", "glob",
+})
+IMPORT_DISABLED = "Package installation, process and thread execution, and native loading are disabled in the Drive It worker; only allowlisted modules can be imported."
+SCRIPT_FILENAME = "<drive-it-script>"
+
 
 PolicyPending = RuntimeError
 PolicyDenied = PermissionError
@@ -41,8 +57,8 @@ class RevitError(Exception):
 
 class RuntimeRestriction(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "_ctypes", "sqlite3", "_sqlite3", "threading", "_thread"}:
-            raise ImportError("Package installation, process and thread execution, and native loading are disabled in the Drive It worker.")
+        if fullname not in ALLOWED_MODULES:
+            raise ImportError(IMPORT_DISABLED)
         return None
 
 
@@ -181,12 +197,14 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
         function(path)
         return abspath(fspath(path))
 
-    def importing(*args, **kwargs):
-        return original_import(*args, **kwargs)
+    def importing(name, globals=None, locals=None, fromlist=(), level=0):
+        if getframe(1).f_code.co_filename == SCRIPT_FILENAME and (level or name not in ALLOWED_MODULES):
+            raise ImportError(IMPORT_DISABLED)
+        return original_import(name, globals, locals, fromlist, level)
 
     def audit(event, arguments):
-        if event == "import" and arguments[0].split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "_ctypes", "sqlite3", "_sqlite3", "threading", "_thread"}:
-            raise ImportError("Package installation, process and thread execution, and native loading are disabled in the Drive It worker.")
+        if event == "import" and arguments[0] not in ALLOWED_MODULES:
+            raise ImportError(IMPORT_DISABLED)
         if event in {
             "_winapi.CreateProcess",
             "os.exec",
@@ -378,6 +396,12 @@ def main():
     run = json.loads(_protocol_in.readline())
     policy_pending = RuntimeError
     policy_denied = PermissionError
+    # Load the allowlist (and its dependencies) before the hook freezes further loads.
+    for name in sorted(ALLOWED_MODULES):
+        try:
+            __import__(name)
+        except ImportError:
+            pass
     sys.meta_path.insert(0, RuntimeRestriction())
     policy = _create_file_policy(_protocol_in, _protocol_out, policy_pending, policy_denied)
     builtins.open = policy["open"]
