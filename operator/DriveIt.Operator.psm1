@@ -79,8 +79,12 @@ function Set-DriveItWorkspace {
 }
 
 function Get-DriveItPendingApprovals {
-    return @(Invoke-DriveItOperator -Arguments @('decisions', 'list')) |
-        Where-Object { $_.status -eq 'pending' }
+    $decisions = Invoke-DriveItOperator -Arguments @('decisions', 'list')
+    foreach ($decision in $decisions) {
+        if ($decision.status -eq 'pending') {
+            $decision
+        }
+    }
 }
 
 function Set-DriveItApprovalDecision {
@@ -98,8 +102,15 @@ function Get-DriveItRunHistory {
     [CmdletBinding()]
     param([ValidateRange(1, 1000)][int]$Limit = 100)
 
-    return @(Invoke-DriveItOperator -Arguments @('history', 'list')) |
-        Select-Object -First $Limit
+    $receipts = Invoke-DriveItOperator -Arguments @('history', 'list')
+    $count = 0
+    foreach ($receipt in $receipts) {
+        if ($count -ge $Limit) {
+            break
+        }
+        $receipt
+        $count++
+    }
 }
 
 Export-ModuleMember -Function @(
