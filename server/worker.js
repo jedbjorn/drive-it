@@ -69,8 +69,12 @@ export function runWorker({ source, args, processId, document, runId, pythonPath
     child.on("error", finish);
     child.on("close", code => {
       if (timeoutError) finish(timeoutError);
-      else if (final) finish();
-      else if (!settled) finish(new Error(stderr || `Python worker exited with code ${code}.`));
+      else if (final && code === 0) finish();
+      else if (final) {
+        final.status = "failed";
+        final.error ||= { code: "WORKER_EXIT_FAILED", message: stderr || `Python worker exited with code ${code}.` };
+        finish();
+      } else if (!settled) finish(new Error(stderr || `Python worker exited with code ${code}.`));
     });
     child.stdin.on("error", error => {
       if (!settled && error.code !== "EPIPE") finish(error);

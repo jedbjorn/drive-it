@@ -94,6 +94,7 @@ def _create_file_policy(protocol_in, protocol_out):
     request_id = 0
     mediated_depth = 0
     import_depth = 0
+    call_stack = []
 
     def request(method, params):
         nonlocal request_id
@@ -120,6 +121,19 @@ def _create_file_policy(protocol_in, protocol_out):
 
     def record(operation, paths):
         return request("effect.record", {"operation": operation, "paths": paths})
+
+    def profile(frame, event, arg):
+        if event == "c_call":
+            call_stack.append([arg, None])
+            return
+        if event not in {"c_return", "c_exception"} or not call_stack:
+            return
+        _, effect = call_stack.pop()
+        if event == "c_return" and effect:
+            record(*effect)
+
+    def protected_profile(*args):
+        raise RuntimeError("Execution profiling is managed by the Drive It worker.")
 
     def mediate(function, *args, **kwargs):
         nonlocal mediated_depth
@@ -225,9 +239,12 @@ def _create_file_policy(protocol_in, protocol_out):
         if not operation:
             return
         result = authorize(operation, paths)
-        record(operation, result["requests"][0]["paths"])
+        if call_stack:
+            call_stack[-1][1] = (operation, result["requests"][0]["paths"])
 
     sys.addaudithook(audit)
+    sys.setprofile(profile)
+    sys.setprofile = protected_profile
     return {
         "open": policy_open,
         "os_open": policy_os_open,
@@ -380,6 +397,10 @@ def main():
     except RevitError as error:
         receipt["status"] = error.response.get("status", "failed")
         receipt["error"] = error.response.get("error") or {"code": "REVIT_EXECUTION_FAILED", "message": str(error)}
+    except SystemExit as error:
+        if error.code is not None and (not isinstance(error.code, int) or error.code != 0):
+            receipt["status"] = "failed"
+            receipt["error"] = {"code": "SCRIPT_FAILED", "message": str(error), "type": type(error).__name__}
     except Exception as error:
         receipt["status"] = "failed"
         receipt["error"] = {"code": "SCRIPT_FAILED", "message": str(error), "type": type(error).__name__}

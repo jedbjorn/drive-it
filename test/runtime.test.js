@@ -69,6 +69,24 @@ test("inline execution, checks, history, and completed replay are durable", asyn
   assert.equal(await exists(target), false);
 });
 
+test("nonzero SystemExit is a durable failure and zero exit remains successful", async (t) => {
+  const { root, runtime } = await fixture(t);
+  const input = request(root, { source: "import sys\nsys.exit(1)" });
+  const failed = await runtime.execute(input);
+  assert.equal(failed.status, "failed");
+  assert.deepEqual(failed.error, { code: "SCRIPT_FAILED", message: "1", type: "SystemExit" });
+  assert.deepEqual(failed.changes, []);
+  assert.deepEqual(await runtime.history.get(failed.runId), failed);
+  assert.deepEqual(await runtime.execute(input), failed);
+
+  const succeeded = await runtime.execute(request(root, {
+    source: "import sys\nsys.exit(0)",
+    idempotencyKey: "zero-exit",
+  }));
+  assert.equal(succeeded.status, "succeeded", JSON.stringify(succeeded));
+  assert.equal(succeeded.error, null);
+});
+
 test("saved references resolve exact revisions and ambiguous calls are rejected", async (t) => {
   const { root, runtime } = await fixture(t, {
     scriptResolver: async script => {
@@ -139,6 +157,7 @@ test("outside-root denial leaves the target unchanged", async (t) => {
 test("direct stdlib effects and saved-original escapes require decisions and record approved effects", async (t) => {
   for (const [name, source, expected] of [
     ["unwrapped-os-truncate", "import os\nos.truncate(args[\"path\"], 0)", ""],
+    ["profile-tamper-os-truncate", "import os\nimport sys\ntry:\n    sys.setprofile(None)\nexcept RuntimeError:\n    pass\nos.truncate(args[\"path\"], 0)", ""],
     ["saved-original-open", "import sys\nsys.modules[\"__main__\"]._original_open(args[\"path\"], \"w\").write(\"escaped\")", "escaped"],
   ]) {
     const deniedFixture = await fixture(t);
@@ -171,6 +190,35 @@ test("direct stdlib effects and saved-original escapes require decisions and rec
     assert.equal(await readFile(approvedTarget, "utf8"), expected);
     assert.deepEqual(approved.affectedFiles, [{ operation: "write_file", paths: [approvedTarget] }]);
   }
+});
+
+test("failed direct stdlib attempts record no effects, including saved originals and caught errors", async (t) => {
+  for (const [name, source] of [
+    ["unwrapped-os-truncate", "import os\nos.truncate(args[\"path\"], 0)"],
+    ["saved-original-open", "import sys\nsys.modules[\"__main__\"]._original_open(args[\"path\"], \"w\").write(\"not written\")"],
+  ]) {
+    const { root, runtime } = await fixture(t);
+    const target = path.join(root, "missing-parent", `${name}.txt`);
+    const receipt = await runtime.execute(request(root, { source, arguments: { path: target } }));
+    assert.equal(receipt.status, "failed", JSON.stringify(receipt));
+    assert.equal(receipt.error.type, "FileNotFoundError");
+    assert.deepEqual(receipt.changes, []);
+    assert.deepEqual(receipt.affectedFiles, []);
+    assert.equal(await exists(target), false);
+    assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
+  }
+
+  const { root, runtime } = await fixture(t);
+  const target = path.join(root, "still-missing.txt");
+  const caught = await runtime.execute(request(root, {
+    source: "import os\ntry:\n    os.truncate(args[\"path\"], 0)\nexcept FileNotFoundError:\n    result = \"caught\"",
+    arguments: { path: target },
+  }));
+  assert.equal(caught.status, "succeeded", JSON.stringify(caught));
+  assert.equal(caught.result, "caught");
+  assert.deepEqual(caught.changes, []);
+  assert.deepEqual(caught.affectedFiles, []);
+  assert.equal(await exists(target), false);
 });
 
 test("an outside-root approval is consumed once and replay does not repeat writes", async (t) => {
