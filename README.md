@@ -28,7 +28,7 @@ purpose: MCP server and Revit add-in
 
 Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit through a small Node.js server and a native Revit add-in. Its first tool, `get_revit_session`, returns the process ID, version, and build of a running Revit instance. It works with the Revit home screen or an open model.
 
-Drive It is in early development. The current `main` branch provides Revit session discovery; it does not yet execute modeling operations or ship a dedicated installer. The source build and release bundle below are the supported setup paths for this stage.
+Drive It is in early development. The current `main` branch provides Revit session discovery and a Windows alpha installer; it does not yet execute modeling operations. The Windows alpha installer, source build, and release bundle below are the supported setup paths for this stage.
 
 ## How it works
 
@@ -43,6 +43,10 @@ graph LR
 
 ## Requirements
 
+The Windows alpha installer requires Windows and Autodesk Revit 2026. It provisions private Node.js and Python runtimes and reuses a suitable existing .NET runtime or provisions .NET 8 in Drive It's private runtime directory. No administrator account, development checkout, global Node.js/npm, or global Python is required.
+
+For a source build, install:
+
 - Windows
 - Autodesk Revit 2026
 - .NET 8 SDK
@@ -51,6 +55,28 @@ graph LR
 Revit is required to use the add-in, but not to run the Node.js tests or compile the project. Revit API references resolve from NuGet.
 
 ## Build and install
+
+### Windows alpha
+
+Download and extract `drive-it-windows-alpha.zip`, then run `Install-DriveIt.ps1` in PowerShell.
+
+```powershell
+.\Install-DriveIt.ps1 -WorkspaceRoot "C:\DriveIt"
+```
+
+The installer places the application, private Node.js/Python runtimes, and local data in `%LOCALAPPDATA%\DriveIt`, and writes a ready-to-use stdio configuration to `%LOCALAPPDATA%\DriveIt\mcp.json`. The MCP environment points `DRIVE_IT_DATA_DIR` at that data directory and `DRIVE_IT_PYTHON` at the bundled Python executable. The installer verifies the runtimes and starts the installed MCP server before registering the current-user Revit 2026 add-in. Existing toolchains are not replaced.
+
+To merge the same entry into a selected MCP client configuration while preserving its other servers, pass `-McpConfigPath <path>`. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
+
+Drive It opens from the Start Menu for first-run root selection. The same surface changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests.
+
+The operator surface uses the installed private Node runtime to call `server/operator.js` directly: `workspace get|set`, `decisions list|approve|deny`, and `history list`. These commands are not MCP tools. The shared local state contract is:
+
+- `workspace.json`: the selected root used for future operations.
+- `decisions/<id>.json`: pending, approved, denied, or consumed requests with canonical `operation` and `paths` details. Approval is consumed once and never reused for another request.
+- `runs/<run-id>.json`: retained receipts displayed independently of the current root.
+
+### Source build
 
 From a source checkout, run these commands in PowerShell with Revit closed:
 
@@ -98,10 +124,13 @@ If the connection fails, check that the process ID belongs to Revit and that the
 
 ## Development
 
+Build the self-contained installer package on a development machine with `installer/Build-DriveItPackage.ps1`. The builder runs npm and dotnet only while packaging, downloads the fixed official Node.js/Python runtimes, bundles production dependencies, and creates `artifacts/DriveIt-alpha.zip`.
+
 - `server/index.js` registers the MCP tool and reads session metadata from the named pipe.
 - `src/DriveIt.Revit/App.cs` captures version information during Revit startup and serves that snapshot over the pipe.
-- `npm test` starts the MCP server, discovers the tool, and checks the disconnected response. On Windows it also calls the tool against a test pipe.
+- `npm test` starts the MCP server, discovers the tool, and checks the disconnected response. On Windows it also calls the tool against a test pipe and verifies operator state, approvals, and run history.
 - `dotnet build src/DriveIt.Revit -c Release` compiles the Revit 2026 add-in.
+- CI builds the Windows alpha installer and performs an installed-server smoke test. To verify the add-in inside Revit, follow the local setup above.
 
 GitHub Actions runs the tests and build on `windows-latest` for pull requests and pushes to `main`. It uses only GitHub-hosted runners; no local runner or Revit installation is required. Live Revit verification is a separate manual check.
 

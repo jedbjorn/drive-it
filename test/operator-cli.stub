@@ -1,0 +1,50 @@
+import fs from "node:fs";
+import path from "node:path";
+
+const dataDirectory = process.env.DRIVE_IT_DATA_DIR;
+const stateFile = path.join(dataDirectory, "operator-stub.json");
+const state = fs.existsSync(stateFile)
+  ? JSON.parse(fs.readFileSync(stateFile, "utf8"))
+  : { decisions: [], history: [] };
+const [area, action, value] = process.argv.slice(2);
+
+function save() {
+  fs.mkdirSync(dataDirectory, { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+}
+
+function print(result) {
+  console.log(JSON.stringify(result, null, 2));
+}
+
+try {
+  if (area === "workspace" && action === "get") {
+    if (!state.root) throw new Error("WORKSPACE_NOT_SELECTED: Select a workspace root.");
+    print({ root: state.root });
+  } else if (area === "workspace" && action === "set" && value) {
+    const root = fs.realpathSync(value);
+    if (!fs.statSync(root).isDirectory()) throw new Error("The root must be a directory.");
+    state.root = root;
+    save();
+    print({ root });
+  } else if (area === "decisions" && action === "list") {
+    print(state.decisions);
+  } else if (area === "decisions" && ["approve", "deny"].includes(action) && value) {
+    const decision = state.decisions.find(row => row.id === value);
+    if (!decision) throw new Error(`Unknown outside-root decision: ${value}`);
+    if (decision.status !== "pending") throw new Error(`Decision ${value} is ${decision.status}.`);
+    decision.status = action === "approve" ? "approved" : "denied";
+    decision.updatedAt = new Date().toISOString();
+    save();
+    print(decision);
+  } else if (area === "history" && action === "list") {
+    print([...state.history].sort((a, b) => b.startedAt.localeCompare(a.startedAt)));
+  } else if (area === "history" && action === "get" && value) {
+    print(state.history.find(row => row.runId === value) || null);
+  } else {
+    throw new Error("Invalid operator command.");
+  }
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 1;
+}
