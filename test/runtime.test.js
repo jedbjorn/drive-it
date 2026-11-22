@@ -103,22 +103,23 @@ test("ordinary runtime and permission errors remain script failures", async (t) 
 
 test("saved references resolve exact revisions and ambiguous calls are rejected", async (t) => {
   const { root, runtime } = await fixture(t, {
-    scriptResolver: async script => {
-      assert.deepEqual(script, { id: "area", revision: 7 });
-      return { source: "result = args[\"value\"] * 2" };
+    scriptResolver: async (script, resolvedRoot) => {
+      assert.deepEqual(script, { scriptId: "area", revision: 7 });
+      assert.equal(resolvedRoot, root);
+      return { scriptId: "area", revision: 7, state: "draft", source: "result = args[\"value\"] * 2" };
     },
   });
   const receipt = await runtime.execute(request(root, {
     source: undefined,
-    script: { id: "area", revision: 7 },
+    script: { scriptId: "area", revision: 7 },
     arguments: { value: 4 },
   }));
   assert.equal(receipt.status, "succeeded", receipt.error?.message);
   assert.equal(receipt.result, 8);
-  assert.deepEqual(receipt.savedScript, { id: "area", revision: 7, codeHash: receipt.codeHash });
+  assert.deepEqual(receipt.savedScript, { scriptId: "area", revision: 7, codeHash: receipt.codeHash, state: "draft", requested: 7 });
   await assert.rejects(runtime.execute(request(root, {
     source: "result = 1",
-    script: { id: "area", revision: 7 },
+    script: { scriptId: "area", revision: 7 },
   })), error => error.code === "AMBIGUOUS_SCRIPT");
 });
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DecisionStore } from "./decisions.js";
 import { HistoryStore } from "./history.js";
+import { ScriptCatalog, validateArguments } from "./library.js";
 import { executeBroker, readSession } from "./session.js";
 import { defaultDataDir } from "./store.js";
 import { runWorker } from "./worker.js";
@@ -24,7 +25,7 @@ function append(target, values) {
 }
 
 export class Runtime {
-  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, sessionReader = readSession, workerRunner = runWorker, scriptResolver } = {}) {
+  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, sessionReader = readSession, workerRunner = runWorker, scriptResolver, scripts } = {}) {
     this.workspace = new WorkspaceStore(dataDir);
     this.decisions = new DecisionStore(dataDir);
     this.history = new HistoryStore(dataDir);
@@ -33,7 +34,8 @@ export class Runtime {
     this.brokerExecutor = brokerExecutor;
     this.sessionReader = sessionReader;
     this.workerRunner = workerRunner;
-    this.scriptResolver = scriptResolver;
+    this.scripts = scripts || new ScriptCatalog({ workspace: this.workspace, history: this.history });
+    this.scriptResolver = scriptResolver || ((reference, root) => this.scripts.resolve(reference, root));
     this.inFlight = new Map();
   }
 
@@ -54,24 +56,12 @@ export class Runtime {
       throw error;
     }
 
-    let source = input.source;
-    let savedScript = null;
-    if (hasScript) {
-      if (!this.scriptResolver) {
-        const error = new Error("Saved script execution requires the script library integration.");
-        error.code = "SCRIPT_LIBRARY_UNAVAILABLE";
-        throw error;
-      }
-      const resolved = await this.scriptResolver(input.script);
-      source = resolved.source;
-      savedScript = { id: input.script.id, revision: input.script.revision, codeHash: hash(source) };
-    }
-
     const idempotencyKey = input.idempotencyKey || randomUUID();
-    const codeHash = hash(source);
+    // Saved references fingerprint the request as made, so a completed run replays even
+    // after its revision is retired or "latest" moves on.
     const fingerprint = JSON.stringify({
-      codeHash,
-      savedScript,
+      codeHash: hasSource ? hash(input.source) : null,
+      script: hasScript ? { scriptId: input.script.scriptId, revision: input.script.revision } : null,
       arguments: input.arguments || {},
       processId: input.processId,
       document: input.document || null,
@@ -83,6 +73,26 @@ export class Runtime {
       throw error;
     }
     if (previous && previous.status !== "pending") return previous;
+
+    let source = input.source;
+    let savedScript = null;
+    let args = input.arguments || {};
+    let workspaceRoot = null;
+    if (hasScript) {
+      // Resolve against the same root snapshot the run will use for every authorization.
+      workspaceRoot = await this.workspace.getRoot();
+      const resolved = await this.scriptResolver(input.script, workspaceRoot);
+      source = resolved.source;
+      if (resolved.inputSchema) args = validateArguments(resolved, args);
+      savedScript = {
+        scriptId: resolved.scriptId,
+        revision: resolved.revision,
+        codeHash: hash(source),
+        state: resolved.state,
+        requested: input.script.revision,
+      };
+    }
+    const codeHash = hash(source);
 
     const runId = previous?.runId || randomUUID();
     const startedAt = new Date().toISOString();
@@ -96,7 +106,7 @@ export class Runtime {
       session: null,
       document: documentWithKind(input.document),
       workspaceRoot: null,
-      arguments: input.arguments || {},
+      arguments: args,
       changes: [],
       affectedFiles: [],
       affectedElements: [],
@@ -120,12 +130,12 @@ export class Runtime {
     let temporary;
 
     try {
-      receipt.workspaceRoot = await this.workspace.getRoot();
+      receipt.workspaceRoot = workspaceRoot || await this.workspace.getRoot();
       receipt.session = await this.sessionReader(input.processId);
       temporary = await mkdtemp(path.join(tmpdir(), "drive-it-"));
       const workerReceipt = await this.workerRunner({
         source,
-        args: input.arguments || {},
+        args,
         processId: input.processId,
         document: input.document || null,
         runId,
