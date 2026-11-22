@@ -215,6 +215,22 @@ try {
     Write-JsonAtomic -Value $configuration -Path $McpConfigPath
     $env:DRIVE_IT_MCP_CONFIG_PATH = $McpConfigPath
 
+    # Add the same entry to the Claude Desktop, Claude Code, and Codex configurations found for this user.
+    $clientArguments = @(
+        (Join-Path $app 'server\clients.js'), 'register', $McpConfigPath,
+        [Environment]::GetFolderPath('UserProfile'), [Environment]::GetFolderPath('ApplicationData')
+    )
+    if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+        $clientArguments += $env:CODEX_HOME
+    }
+    $clientOutput = & $installedNode @clientArguments | Out-String
+    $clients = $null
+    if ($LASTEXITCODE -eq 0) {
+        $clients = $clientOutput | ConvertFrom-Json
+    } else {
+        Write-Warning "Drive It could not update MCP client configurations; add the entry from $McpConfigPath manually."
+    }
+
     Import-Module (Join-Path $app 'operator\DriveIt.Operator.psm1') -Force -DisableNameChecking
     if (-not [string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
         Set-DriveItWorkspace -Root $WorkspaceRoot | Out-Null
@@ -225,7 +241,7 @@ try {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $app 'operator\DriveIt.Operator.ps1') + '"'
+    $shortcut.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $app 'operator\DriveIt.Operator.ps1') + '"'
     $shortcut.WorkingDirectory = $app
     $shortcut.Save()
 
@@ -235,7 +251,7 @@ try {
 
     if (-not $NoLaunch) {
         Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '"' + (Join-Path $app 'operator\DriveIt.Operator.ps1') + '"'
+            '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', '"' + (Join-Path $app 'operator\DriveIt.Operator.ps1') + '"'
         )
     }
 
@@ -244,6 +260,7 @@ try {
         application = $app
         addin = $addinPath
         mcpConfiguration = $McpConfigPath
+        mcpClients = $clients
         dataDirectory = $dataDirectory
     } | ConvertTo-Json -Depth 10
 } catch {

@@ -34,7 +34,7 @@ Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 t
 
 Generated Python receives `args`, `files`, `revit`, and `checks`. It does not receive raw Revit objects. Typed model operations use the Drive It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt. Scripts can import only the modules in `ALLOWED_MODULES` in `server/worker.py` (in-memory data, text, math, and date utilities plus `os`/`pathlib` for mediated file access); every other import or module load is denied. This is a guardrail for generated code, not an operating-system sandbox.
 
-Drive It is in early development. The Windows alpha installer, source build, and release bundle below are the supported setup paths for this stage.
+Drive It is in early development. The Windows alpha MSI is the recommended way to install it; the script installer, source build, and release bundle below remain available.
 
 ## How it works
 
@@ -91,21 +91,36 @@ Revit is required to use the add-in, but not to run the Node.js tests or compile
 
 ## Build and install
 
-### Windows alpha
+### Windows alpha (MSI)
 
-Download `DriveIt-<version>-x64.msi` from a release (or the `drive-it-msi` CI artifact) and run it. It is a per-user MSI and needs no administrator account. The alpha MSI is unsigned, so Windows SmartScreen may ask you to confirm before it runs. Uninstall it from Settings > Apps; uninstalling removes the application, the Revit add-in registration, the Start Menu shortcut, and the `drive-it` MCP entry, and keeps your workspace selection and run receipts.
+1. Download `DriveIt-<version>-x64.msi` from the [latest release](https://github.com/jedbjorn/drive-it/releases) and run it. It is a per-user install and needs no administrator account. The alpha MSI is unsigned, so Windows SmartScreen may warn you first: choose **More info**, then **Run anyway**.
+2. Start Revit 2026. Revit asks about the unsigned Drive It add-in the first time; choose **Always Load**.
+3. Open **Drive It** from the Start Menu and select your workspace folder.
+4. Restart Claude or Codex so it picks up the new `drive-it` MCP server.
 
-For an unattended install, use `msiexec /i DriveIt-<version>-x64.msi /qn`. Then select the workspace root from the Drive It Start Menu entry.
+The MSI registers Drive It with every supported MCP client it finds for your Windows user, and leaves everything else in their configuration unchanged:
 
-The script installer is still available: extract `drive-it-windows-alpha.zip` and run `Install-DriveIt.ps1` in PowerShell.
+| Client | Detected by | Configuration written |
+|---|---|---|
+| Claude Desktop | `%APPDATA%\Claude` exists | `mcpServers.drive-it` in `%APPDATA%\Claude\claude_desktop_config.json` |
+| Claude Code | `%USERPROFILE%\.claude.json` exists | user-scope `mcpServers.drive-it` in `%USERPROFILE%\.claude.json` |
+| Codex (CLI and app) | `%USERPROFILE%\.codex` exists | a marked `[mcp_servers.drive-it]` block in `%USERPROFILE%\.codex\config.toml`, with a 150-second tool timeout |
+
+Before changing a client file, the installer saves a copy next to it as `<file>.drive-it.bak`. If a client configuration cannot be read, or Codex already has its own `[mcp_servers.drive-it]` table, that client is skipped and its file is left untouched. If you install a client after Drive It, repair Drive It from the folder that holds the MSI with `msiexec /fa DriveIt-<version>-x64.msi` to register it. You can also copy the entry from `%LOCALAPPDATA%\DriveIt\mcp.json` into any other stdio MCP client.
+
+To remove Drive It, uninstall it from Settings > Apps. This removes the application, the Revit add-in registration, the Start Menu shortcut, and the `drive-it` entries it added to Claude and Codex. Your workspace selection and run receipts in `%LOCALAPPDATA%\DriveIt` are kept. For an unattended install or removal, use `msiexec /i DriveIt-<version>-x64.msi /qn` or `msiexec /x DriveIt-<version>-x64.msi /qn`.
+
+### Windows alpha (script installer)
+
+The script installer is still available: extract `drive-it-windows-alpha.zip` from a CI build and run `Install-DriveIt.ps1` in PowerShell.
 
 ```powershell
 .\Install-DriveIt.ps1 -WorkspaceRoot "C:\DriveIt"
 ```
 
-Both installers place the application, private Node.js/Python runtimes, and local data in `%LOCALAPPDATA%\DriveIt`, and writes a ready-to-use stdio configuration to `%LOCALAPPDATA%\DriveIt\mcp.json`. The MCP environment points `DRIVE_IT_DATA_DIR` at that data directory and `DRIVE_IT_PYTHON` at the bundled Python executable. The installer verifies the runtimes and starts the installed MCP server before registering the current-user Revit 2026 add-in. Existing toolchains are not replaced.
+Both installers place the application, private Node.js/Python runtimes, and local data in `%LOCALAPPDATA%\DriveIt`, write a ready-to-use stdio configuration to `%LOCALAPPDATA%\DriveIt\mcp.json`, and register the detected clients above. The MCP environment points `DRIVE_IT_DATA_DIR` at that data directory and `DRIVE_IT_PYTHON` at the bundled Python executable. The installer verifies the runtimes and starts the installed MCP server before registering the current-user Revit 2026 add-in. Existing toolchains are not replaced.
 
-With the script installer, pass `-McpConfigPath <path>` to merge the same entry into a selected MCP client configuration while preserving its other servers. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
+With the script installer, pass `-McpConfigPath <path>` to merge the same entry into another MCP client configuration while preserving its other servers. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
 
 Drive It opens from the Start Menu for first-run root selection. The same surface changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests.
 
@@ -130,7 +145,7 @@ Copy-Item "$build/DriveIt.Revit.dll" "$addins/DriveIt/"
 Copy-Item "$build/DriveIt.addin" "$addins/"
 ```
 
-Tagged releases provide the same compiled add-in and MCP server as `DriveIt-<version>.zip`, together with `SHA256SUMS.txt`. Extract the bundle, run `npm ci` in its directory, then copy `DriveIt.addin` and the `DriveIt` folder into `%APPDATA%\Autodesk\Revit\Addins\2026` as above.
+Tagged releases also provide the compiled add-in and MCP server as `DriveIt-<version>.zip`, with checksums for every asset in `SHA256SUMS.txt`. Extract the bundle, run `npm ci` in its directory, then copy `DriveIt.addin` and the `DriveIt` folder into `%APPDATA%\Autodesk\Revit\Addins\2026` as above.
 
 Start Revit and allow the add-in to load. Configure your MCP client to launch the server over stdio, replacing the example path with your checkout or extracted release bundle:
 
@@ -149,7 +164,7 @@ The installed alpha supplies its own Node and fixed Python runtime. `DRIVE_IT_PY
 
 ## Use
 
-Run `Get-Process Revit | Select-Object Id, MainWindowTitle` in PowerShell and pass the desired `processId` to `get_revit_session` or `execute_script`.
+Both tools need the Windows process ID of the Revit instance to drive. Run `Get-Process Revit | Select-Object Id, MainWindowTitle` in PowerShell and give the ID to your agent, or let an agent that can run shell commands find it. Pass it as `processId` to `get_revit_session` or `execute_script`.
 
 A successful session response contains the selected Revit process and its version information:
 
@@ -203,14 +218,15 @@ Build the self-contained installer package on a development machine with `instal
 - `src/DriveIt.Revit/App.cs` serves the session greeting and typed requests. `Broker/RevitBroker.cs` raises an external event, and `Broker/DocumentDispatcher.cs` executes document and model operations in Revit's API context.
 - `npm test` exercises real stdio discovery, isolated Python execution, policy and failure paths, replay, operator commands, and temporary-file cleanup. Windows runs also exercise the named-pipe session, newline-JSON broker contract, operator state, approvals, and run history.
 - `dotnet build src/DriveIt.Revit -c Release` compiles the Revit 2026 add-in.
-- CI builds the Windows alpha installer and performs an installed-server smoke test.
+- CI builds the Windows alpha package and MSI, runs the script installer tests, then installs and uninstalls the MSI silently and checks the add-in, Claude/Codex registrations, and preserved user data.
+- `test/clients.test.js` covers the Claude Desktop, Claude Code, and Codex configuration merges and their removal.
 - `test/revit-broker.integration.ps1` exercises the live broker against a running Revit process. Copy a project template to `C:\DriveIt\broker-fixtures\broker-project.rte` and a family template to `broker-family.rft`, then run `powershell -ExecutionPolicy Bypass -File test/revit-broker.integration.ps1 -ProcessId <pid>`. It writes JSONL receipts to that workspace and uses only disposable model files.
 
 GitHub Actions runs the tests and build on `windows-latest` for pull requests and pushes to `main`. It uses only GitHub-hosted runners; no local runner or Revit installation is required. Live Revit verification is a separate manual check.
 
 Live RVT/RFA behavior still requires the installed-alpha Revit fixtures and acceptance environment; local mocks and pipe tests do not establish live model proof.
 
-To release, push a `v<major>.<minor>.<patch>` tag for a commit on `main`, optionally with a prerelease suffix such as `-rc.1`. The release workflow runs the same build, packages the add-in and server, verifies a SHA-256 checksum, and creates a GitHub Release.
+To release, push a `v<major>.<minor>.<patch>` tag for a commit on `main`, optionally with a prerelease suffix such as `-rc.1`. The release workflow runs the same build, attaches `DriveIt-<version>-x64.msi` and the add-in/server bundle with SHA-256 checksums, and creates a GitHub Release (marked as a prerelease when the tag has a suffix). The MSI product version drops the prerelease suffix, because Windows Installer versions are numeric.
 
 ## Contributing
 

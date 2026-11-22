@@ -42,6 +42,20 @@ function Get-ArpEntry {
         Where-Object { $_.PSObject.Properties['ProductName'] -and $_.ProductName -eq 'Drive It' }
 }
 
+# Stand-in client configurations so install and uninstall register with all three clients.
+$userProfile = [Environment]::GetFolderPath('UserProfile')
+$claudeDesktop = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Claude\claude_desktop_config.json'
+$claudeCode = Join-Path $userProfile '.claude.json'
+$codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { Join-Path $userProfile '.codex' } else { $env:CODEX_HOME }
+$codex = Join-Path $codexHome 'config.toml'
+foreach ($file in @($claudeDesktop, $claudeCode, $codex)) {
+    Assert-MsiTest (-not [IO.File]::Exists($file)) "Refusing to overwrite an existing client configuration: $file"
+}
+[IO.Directory]::CreateDirectory((Split-Path -Parent $claudeDesktop)) | Out-Null
+[IO.Directory]::CreateDirectory($codexHome) | Out-Null
+[IO.File]::WriteAllText($claudeCode, '{"numStartups":1,"mcpServers":{"other":{"type":"stdio","command":"other.exe","args":[]}}}')
+[IO.File]::WriteAllText($codex, "model = `"gpt-5`"`r`n")
+
 Invoke-Msiexec -Operation '/i' -Log 'install.log'
 
 $node = Join-Path $app 'runtimes\node\node.exe'
@@ -60,6 +74,13 @@ Assert-MsiTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_PYTHON -eq $py
 Assert-MsiTest ([IO.File]::Exists($shortcutPath)) 'The operator shortcut was not created.'
 Assert-MsiTest (-not (Get-ChildItem -LiteralPath $install -Filter '.staging-*' -Force)) 'The in-place registration left a staging directory.'
 
+Assert-MsiTest ((Get-Content -LiteralPath $claudeDesktop -Raw | ConvertFrom-Json).mcpServers.'drive-it'.command -eq $node) 'Claude Desktop was not registered.'
+$codeConfig = Get-Content -LiteralPath $claudeCode -Raw | ConvertFrom-Json
+Assert-MsiTest ($codeConfig.mcpServers.'drive-it'.type -eq 'stdio' -and $codeConfig.mcpServers.'drive-it'.command -eq $node) 'Claude Code was not registered.'
+Assert-MsiTest ($codeConfig.mcpServers.other.command -eq 'other.exe') 'Claude Code lost another MCP server.'
+$codexText = Get-Content -LiteralPath $codex -Raw
+Assert-MsiTest ($codexText.Contains('[mcp_servers.drive-it]') -and $codexText.Contains($node.Replace('\', '\\'))) 'Codex was not registered.'
+
 $userData = Join-Path $install 'user-data.sentinel'
 [IO.File]::WriteAllText($userData, 'keep')
 
@@ -72,6 +93,11 @@ Assert-MsiTest (-not [IO.File]::Exists($addinPath)) 'Uninstall left the Revit ad
 Assert-MsiTest (-not [IO.File]::Exists($shortcutPath)) 'Uninstall left the operator shortcut.'
 Assert-MsiTest (-not [IO.File]::Exists($mcpPath)) 'Uninstall left the Drive It MCP configuration.'
 Assert-MsiTest ([IO.File]::Exists($userData)) 'Uninstall removed user data.'
+Assert-MsiTest ($null -eq (Get-Content -LiteralPath $claudeDesktop -Raw | ConvertFrom-Json).mcpServers.PSObject.Properties['drive-it']) 'Uninstall left Drive It in Claude Desktop.'
+$codeConfig = Get-Content -LiteralPath $claudeCode -Raw | ConvertFrom-Json
+Assert-MsiTest ($null -eq $codeConfig.mcpServers.PSObject.Properties['drive-it']) 'Uninstall left Drive It in Claude Code.'
+Assert-MsiTest ($codeConfig.mcpServers.other.command -eq 'other.exe' -and $codeConfig.numStartups -eq 1) 'Uninstall changed other Claude Code settings.'
+Assert-MsiTest ((Get-Content -LiteralPath $codex -Raw) -eq "model = `"gpt-5`"`r`n") 'Uninstall did not restore the Codex configuration.'
 if ([IO.Directory]::Exists($app)) {
     $leftovers = Get-ChildItem -LiteralPath $app -Recurse -File -Force | Select-Object -First 20 -ExpandProperty FullName
     Assert-MsiTest (-not $leftovers) ("Uninstall left application files:`n" + ($leftovers -join "`n"))

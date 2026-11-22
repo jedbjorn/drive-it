@@ -12,6 +12,19 @@ Set-StrictMode -Version Latest
 $install = [IO.Path]::GetFullPath($InstallRoot)
 $app = Join-Path $install 'app'
 
+$node = Join-Path $app 'runtimes\node\node.exe'
+$clientScript = Join-Path $app 'server\clients.js'
+if ([IO.File]::Exists($node) -and [IO.File]::Exists($clientScript)) {
+    $clientArguments = @(
+        $clientScript, 'unregister',
+        [Environment]::GetFolderPath('UserProfile'), [Environment]::GetFolderPath('ApplicationData')
+    )
+    if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+        $clientArguments += $env:CODEX_HOME
+    }
+    & $node @clientArguments
+}
+
 $addinPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026\DriveIt.addin'
 if ([IO.File]::Exists($addinPath)) {
     $addin = [xml](Get-Content -LiteralPath $addinPath -Raw)
