@@ -49,11 +49,16 @@ export function createDriveItServer(options = {}) {
       idempotencyKey: z.string().min(1).max(200).optional().describe("Replay key; completed runs return their original receipt"),
       timeoutMs: z.number().int().positive().max(120000).optional().describe("Worker timeout, default 30000 ms"),
     },
+    // Must list every receipt field: MCP clients reject structured content with undeclared properties.
     outputSchema: {
       runId: z.string(),
       idempotencyKey: z.string(),
+      fingerprint: z.string(),
       codeHash: z.string(),
+      savedScript: z.unknown().nullable(),
       status: receiptStatus,
+      session: z.record(z.string(), z.unknown()).nullable(),
+      document: z.record(z.string(), z.unknown()).nullable(),
       workspaceRoot: z.string().nullable(),
       arguments: z.record(z.string(), z.unknown()),
       changes: z.array(z.unknown()),
@@ -61,7 +66,12 @@ export function createDriveItServer(options = {}) {
       affectedElements: z.array(z.unknown()),
       checks: z.array(z.unknown()),
       policyDecisionIds: z.array(z.string()),
+      policyRequests: z.array(z.unknown()),
+      result: z.unknown().nullable(),
+      logs: z.string(),
       error: z.unknown().nullable(),
+      startedAt: z.string(),
+      completedAt: z.string().nullable(),
     },
   }, async input => {
     try {
