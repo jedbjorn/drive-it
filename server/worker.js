@@ -25,16 +25,13 @@ export function runWorker({ source, args, processId, document, runId, pythonPath
     });
     let settled = false;
     let final = null;
+    let timeoutError = null;
     let stderr = "";
     const lines = createInterface({ input: child.stdout });
     const timeout = setTimeout(() => {
-      const error = new Error(`Script exceeded ${timeoutMs} ms and was stopped.`);
-      error.code = "RUN_TIMEOUT";
+      timeoutError = new Error(`Script exceeded ${timeoutMs} ms and was stopped.`);
+      timeoutError.code = "RUN_TIMEOUT";
       child.kill();
-      if (!settled) {
-        settled = true;
-        reject(error);
-      }
     }, timeoutMs);
 
     function finish(error) {
@@ -71,7 +68,8 @@ export function runWorker({ source, args, processId, document, runId, pythonPath
     });
     child.on("error", finish);
     child.on("close", code => {
-      if (final) finish();
+      if (timeoutError) finish(timeoutError);
+      else if (final) finish();
       else if (!settled) finish(new Error(stderr || `Python worker exited with code ${code}.`));
     });
     child.stdin.on("error", error => {

@@ -155,7 +155,7 @@ export class Runtime {
       receipt.status = error.code === "RUN_TIMEOUT" ? "timed_out" : "failed";
       receipt.error = { code: error.code || "EXECUTION_FAILED", message: error.message };
     } finally {
-      if (temporary) await rm(temporary, { recursive: true, force: true });
+      if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
 
     receipt.policyDecisionIds = [...context.decisionIds];
