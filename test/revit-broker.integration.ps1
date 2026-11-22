@@ -27,6 +27,25 @@ function Read-Line($Reader, [int]$TimeoutMilliseconds = 120000) {
     return $task.Result
 }
 
+function Read-BrokerSession {
+    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
+        ".", "drive-it-$ProcessId",
+        [System.IO.Pipes.PipeDirection]::InOut,
+        [System.IO.Pipes.PipeOptions]::Asynchronous)
+    $reader = $null
+    try {
+        $pipe.Connect(10000)
+        $reader = [System.IO.StreamReader]::new($pipe, [System.Text.Encoding]::UTF8, $false, 8192, $true)
+        $session = (Read-Line $reader 10000) | ConvertFrom-Json
+        Assert-True ($session.processId -eq $ProcessId) "A session-only connection received the wrong process id."
+        return $session
+    }
+    finally {
+        if ($reader -ne $null) { $reader.Dispose() }
+        $pipe.Dispose()
+    }
+}
+
 $runId = [guid]::NewGuid().ToString("N")
 $receiptLog = Join-Path $WorkspaceRoot "broker-receipts-$runId.jsonl"
 $projectTemplate = Join-Path $WorkspaceRoot "broker-project.rte"
@@ -90,6 +109,11 @@ Assert-True (Test-Path $projectTemplate -PathType Leaf) "Missing in-root project
 Assert-True (Test-Path $familyTemplate -PathType Leaf) "Missing in-root family template $familyTemplate"
 
 try {
+    1..3 | ForEach-Object {
+        Read-BrokerSession | Out-Null
+        Start-Sleep -Milliseconds 250
+    }
+
     $outsideRequest = @{
         document = $null
         operations = @(
@@ -277,7 +301,7 @@ try {
 }
 finally {
     if (Test-Path $junction) {
-        Remove-Item $junction -Force
+        [System.IO.Directory]::Delete($junction)
     }
     if (Test-Path $outsideDirectory) {
         Remove-Item $outsideDirectory -Recurse -Force

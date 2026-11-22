@@ -210,7 +210,7 @@ public sealed class DocumentDispatcher
         var document = arguments.Kind == "rvt"
             ? application.Application.NewProjectDocument(template)
             : application.Application.NewFamilyDocument(template);
-        var state = Register(document);
+        var state = Register(document, true);
         response.Document = Snapshot(state);
         response.Changes.Add($"Created unsaved {arguments.Kind} document {document.Title}.");
         response.Checks.Add(new CheckReceipt
@@ -452,8 +452,14 @@ public sealed class DocumentDispatcher
     {
         if (target is null || string.IsNullOrWhiteSpace(target.UniqueId))
             throw new RequestRejectedException("document_identity_required", "A broker-issued document.uniqueId is required for this operation.");
-        if (!documents.TryGetValue(target.UniqueId, out var state) || !IsOpen(application, state.Document))
+        if (!documents.TryGetValue(target.UniqueId, out var state))
             throw new RequestRejectedException("stale_document_identity", "The selected document identity is no longer open in this Revit session.");
+        var matches = OpenDocuments(application).Where(document => SameDocument(state.Document, document)).ToList();
+        if (matches.Count == 0)
+            throw new RequestRejectedException("stale_document_identity", "The selected document identity is no longer open in this Revit session.");
+        if (matches.Count > 1)
+            throw new RequestRejectedException("ambiguous_document_identity", "More than one open document matches the selected identity.");
+        state.Document = matches[0];
         if (!string.IsNullOrWhiteSpace(target.Path))
         {
             var path = WorkspacePolicy.Canonicalize(target.Path, "document.path");
@@ -466,11 +472,19 @@ public sealed class DocumentDispatcher
     private static DocumentState RequireDocument(DocumentState? state) => state ??
         throw new RequestRejectedException("document_not_open", "The requested operation requires an open selected document.");
 
-    private DocumentState Register(Document document)
+    private DocumentState Register(Document document, bool created = false)
     {
-        var existing = documents.Values.FirstOrDefault(state => ReferenceEquals(state.Document, document));
-        if (existing is not null)
-            return existing;
+        if (!created)
+        {
+            var matches = documents.Values.Where(state => SameDocument(state.Document, document)).ToList();
+            if (matches.Count > 1)
+                throw new RequestRejectedException("ambiguous_document_identity", "More than one registered document matches this Revit document.");
+            if (matches.Count == 1)
+            {
+                matches[0].Document = document;
+                return matches[0];
+            }
+        }
 
         var state = new DocumentState(Guid.NewGuid().ToString("N"), document);
         documents.Add(state.Id, state);
@@ -548,8 +562,23 @@ public sealed class DocumentDispatcher
             yield return document;
     }
 
-    private static bool IsOpen(UIApplication application, Document expected) =>
-        OpenDocuments(application).Any(document => ReferenceEquals(document, expected));
+    private static bool SameDocument(Document expected, Document candidate)
+    {
+        if (ReferenceEquals(expected, candidate))
+            return true;
+        try
+        {
+            if (expected.Title != candidate.Title || DocumentKind(expected) != DocumentKind(candidate))
+                return false;
+            if (string.IsNullOrWhiteSpace(expected.PathName) || string.IsNullOrWhiteSpace(candidate.PathName))
+                return string.IsNullOrWhiteSpace(expected.PathName) && string.IsNullOrWhiteSpace(candidate.PathName);
+            return PathsEqual(expected.PathName, WorkspacePolicy.Canonicalize(candidate.PathName, "document.path"));
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
 
     private static string? CanonicalDocumentPath(Document document) => string.IsNullOrWhiteSpace(document.PathName)
         ? null
@@ -609,5 +638,9 @@ public sealed class DocumentDispatcher
         public List<string> PolicyPaths { get; } = [];
     }
 
-    private sealed record DocumentState(string Id, Document Document);
+    private sealed class DocumentState(string id, Document document)
+    {
+        public string Id { get; } = id;
+        public Document Document { get; set; } = document;
+    }
 }

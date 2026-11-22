@@ -22,52 +22,58 @@ public sealed class App : IExternalApplication
             build = application.ControlledApplication.VersionBuild
         };
         var message = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(session) + "\n");
-        var pipe = new NamedPipeServerStream($"drive-it-{session.processId}", PipeDirection.InOut,
-            1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         var broker = new RevitBroker(application);
 
         stopping = new CancellationTokenSource();
-        listener = ServeAsync(pipe, message, broker, stopping.Token);
+        listener = ServeAsync($"drive-it-{session.processId}", message, broker, stopping.Token);
         return Result.Succeeded;
     }
 
-    private static async Task ServeAsync(NamedPipeServerStream pipe, byte[] session, RevitBroker broker,
+    private static async Task ServeAsync(string pipeName, byte[] session, RevitBroker broker,
         CancellationToken token)
     {
-        using (pipe)
+        while (true)
         {
-            while (true)
+            using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut,
+                1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
+            try
             {
-                await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
+                using var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+                await pipe.WriteAsync(session, handshakeTimeout.Token).ConfigureAwait(false);
+                var request = await ReadRequestAsync(pipe, handshakeTimeout.Token).ConfigureAwait(false);
+                if (request is null)
+                    continue;
+
+                var response = await broker.ExecuteAsync(request, token).ConfigureAwait(false);
+                var bytes = Encoding.UTF8.GetBytes(response + "\n");
+                await pipe.WriteAsync(bytes, token).ConfigureAwait(false);
+            }
+            catch (InvalidDataException exception)
+            {
+                var response = RevitBroker.InvalidRequest("", "invalid_request", exception.Message);
+                var bytes = Encoding.UTF8.GetBytes(response + "\n");
+                await pipe.WriteAsync(bytes, token).ConfigureAwait(false);
+            }
+            catch (IOException)
+            {
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+            }
+            finally
+            {
                 try
                 {
-                    using var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                    handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(5));
-                    await pipe.WriteAsync(session, handshakeTimeout.Token).ConfigureAwait(false);
-                    var request = await ReadRequestAsync(pipe, handshakeTimeout.Token).ConfigureAwait(false);
-                    if (request is null)
-                        continue;
-
-                    var response = await broker.ExecuteAsync(request, token).ConfigureAwait(false);
-                    var bytes = Encoding.UTF8.GetBytes(response + "\n");
-                    await pipe.WriteAsync(bytes, token).ConfigureAwait(false);
-                }
-                catch (InvalidDataException exception)
-                {
-                    var response = RevitBroker.InvalidRequest("", "invalid_request", exception.Message);
-                    var bytes = Encoding.UTF8.GetBytes(response + "\n");
-                    await pipe.WriteAsync(bytes, token).ConfigureAwait(false);
+                    if (pipe.IsConnected)
+                        pipe.Disconnect();
                 }
                 catch (IOException)
                 {
                 }
-                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                catch (InvalidOperationException)
                 {
-                }
-                finally
-                {
-                    if (pipe.IsConnected)
-                        pipe.Disconnect();
                 }
             }
         }
