@@ -372,7 +372,10 @@ class Revit:
             raise error
         if status != "succeeded":
             raise RevitError(response)
-        if response.get("document"):
+        if normalized and normalized[-1]["type"] in ("close_document", "delete_document"):
+            # The closed document's handle is stale; later calls must open or create another.
+            self.document = None
+        elif response.get("document"):
             self.document = response["document"]
         return response
 
