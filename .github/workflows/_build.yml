@@ -46,6 +46,22 @@ jobs:
           }
           dotnet build @buildArgs
 
+      - name: Build the Windows alpha package
+        shell: pwsh
+        run: installer/Build-DriveItPackage.ps1
+
+      - name: Verify current-user installation
+        shell: pwsh
+        run: test/installer.Tests.ps1 -PackagePath "$PWD/artifacts/DriveIt-alpha" -InstallRoot "$env:TEMP/DriveIt-installed" -FixtureDirectory "$env:TEMP/DriveIt-installer-test"
+
+      - name: Publish the Windows alpha installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: drive-it-windows-alpha
+          path: artifacts/DriveIt-alpha.zip
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Stage add-in and MCP server
         shell: pwsh
         run: |
