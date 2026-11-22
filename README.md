@@ -93,15 +93,19 @@ Revit is required to use the add-in, but not to run the Node.js tests or compile
 
 ### Windows alpha
 
-Download and extract `drive-it-windows-alpha.zip`, then run `Install-DriveIt.ps1` in PowerShell.
+Download `DriveIt-<version>-x64.msi` from a release (or the `drive-it-msi` CI artifact) and run it. It is a per-user MSI and needs no administrator account. The alpha MSI is unsigned, so Windows SmartScreen may ask you to confirm before it runs. Uninstall it from Settings > Apps; uninstalling removes the application, the Revit add-in registration, the Start Menu shortcut, and the `drive-it` MCP entry, and keeps your workspace selection and run receipts.
+
+For an unattended install, use `msiexec /i DriveIt-<version>-x64.msi /qn`. Then select the workspace root from the Drive It Start Menu entry.
+
+The script installer is still available: extract `drive-it-windows-alpha.zip` and run `Install-DriveIt.ps1` in PowerShell.
 
 ```powershell
 .\Install-DriveIt.ps1 -WorkspaceRoot "C:\DriveIt"
 ```
 
-The installer places the application, private Node.js/Python runtimes, and local data in `%LOCALAPPDATA%\DriveIt`, and writes a ready-to-use stdio configuration to `%LOCALAPPDATA%\DriveIt\mcp.json`. The MCP environment points `DRIVE_IT_DATA_DIR` at that data directory and `DRIVE_IT_PYTHON` at the bundled Python executable. The installer verifies the runtimes and starts the installed MCP server before registering the current-user Revit 2026 add-in. Existing toolchains are not replaced.
+Both installers place the application, private Node.js/Python runtimes, and local data in `%LOCALAPPDATA%\DriveIt`, and writes a ready-to-use stdio configuration to `%LOCALAPPDATA%\DriveIt\mcp.json`. The MCP environment points `DRIVE_IT_DATA_DIR` at that data directory and `DRIVE_IT_PYTHON` at the bundled Python executable. The installer verifies the runtimes and starts the installed MCP server before registering the current-user Revit 2026 add-in. Existing toolchains are not replaced.
 
-To merge the same entry into a selected MCP client configuration while preserving its other servers, pass `-McpConfigPath <path>`. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
+With the script installer, pass `-McpConfigPath <path>` to merge the same entry into a selected MCP client configuration while preserving its other servers. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
 
 Drive It opens from the Start Menu for first-run root selection. The same surface changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests.
 
@@ -190,7 +194,7 @@ Only the Node broker client may attach this payload; generated Python cannot app
 
 ## Development
 
-Build the self-contained installer package on a development machine with `installer/Build-DriveItPackage.ps1`. The builder runs npm and dotnet only while packaging, downloads the fixed official Node.js/Python runtimes, bundles production dependencies, and creates `artifacts/DriveIt-alpha.zip`.
+Build the self-contained installer package on a development machine with `installer/Build-DriveItPackage.ps1`. The builder runs npm and dotnet only while packaging, downloads the fixed official Node.js/Python runtimes, bundles production dependencies, and creates `artifacts/DriveIt-alpha.zip`. Then `installer/Build-DriveItMsi.ps1` (PowerShell 7.3+) wraps that package in `artifacts/DriveIt-alpha.msi` with WiX Toolset v5, which it installs as a .NET global tool if it is missing.
 
 - `server/app.js` registers the MCP tools and their schemas.
 - `server/runtime.js` owns execution, broker policy retries, receipts, and idempotent replay.
