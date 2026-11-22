@@ -367,6 +367,40 @@ test("package installation and process execution fail inside the fixed worker", 
   }
 });
 
+test("Windows process launches cannot write outside the root or produce success receipts", { skip: process.platform !== "win32" }, async (t) => {
+  for (const [name, source] of [
+    ["os.startfile", `
+import os
+import time
+os.startfile(r"C:\\Windows\\System32\\cmd.exe", arguments='/c echo escaped > "' + args["path"] + '"')
+time.sleep(1)
+result = "launched"
+`],
+    ["_winapi.CreateProcess", `
+import _winapi
+import time
+command = r"C:\\Windows\\System32\\cmd.exe" + ' /c echo escaped > "' + args["path"] + '"'
+process, thread, _, _ = _winapi.CreateProcess(None, command, None, None, 0, 0, None, None, _winapi.STARTUPINFO())
+_winapi.CloseHandle(thread)
+_winapi.CloseHandle(process)
+time.sleep(1)
+result = "launched"
+`],
+  ]) {
+    const { root, outside, runtime } = await fixture(t);
+    const target = path.join(outside, `${name}.txt`);
+    await writeFile(target, "keep");
+    const receipt = await runtime.execute(request(root, { source, arguments: { path: target } }));
+    assert.equal(receipt.status, "failed", JSON.stringify(receipt));
+    assert.match(receipt.error.message, /Process execution is disabled/);
+    assert.equal(await readFile(target, "utf8"), "keep");
+    assert.deepEqual(receipt.changes, []);
+    assert.deepEqual(receipt.affectedFiles, []);
+    assert.deepEqual(await runtime.decisions.list(), []);
+    assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
+  }
+});
+
 test("timeout stops the worker, retains observed effects, and removes temporary files", async (t) => {
   let temporary;
   const { root, runtime } = await fixture(t, {

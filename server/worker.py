@@ -158,6 +158,20 @@ def _create_file_policy(protocol_in, protocol_out):
         return original_import(*args, **kwargs)
 
     def audit(event, arguments):
+        if event in {
+            "_winapi.CreateProcess",
+            "os.exec",
+            "os.fork",
+            "os.forkpty",
+            "os.posix_spawn",
+            "os.posix_spawnp",
+            "os.spawn",
+            "os.startfile",
+            "os.system",
+            "pty.spawn",
+            "subprocess.Popen",
+        }:
+            raise RuntimeError("Process execution is disabled in the Drive It worker.")
         if event in {"open", "os.listdir", "os.scandir"}:
             frame = getframe(1)
             if frame.f_code.co_filename.startswith("<frozen importlib"):
@@ -338,6 +352,8 @@ def main():
     os.scandir = policy["scandir"]
     os.system = _disabled
     os.popen = _disabled
+    if hasattr(os, "startfile"):
+        os.startfile = _disabled
     for name in dir(os):
         if name.startswith(("spawn", "exec")):
             setattr(os, name, _disabled)
