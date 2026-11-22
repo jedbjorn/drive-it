@@ -551,13 +551,40 @@ test("a later local failure reports partial effects instead of claiming rollback
 });
 
 test("package installation and process or thread execution fail inside the fixed worker", async (t) => {
-  for (const source of ["import ensurepip", "import subprocess", "import threading", "import _thread\n_thread.start_new_thread(lambda: None, ())", "os.system(\"echo no\")"]) {
+  for (const source of ["import ensurepip", "import subprocess", "import ctypes", "import threading", "import _thread\n_thread.start_new_thread(lambda: None, ())", "os.system(\"echo no\")"]) {
     const { root, runtime } = await fixture(t);
     const receipt = await runtime.execute(request(root, { source: source === "os.system(\"echo no\")" ? `import os\n${source}` : source }));
     assert.equal(receipt.status, "failed", JSON.stringify(receipt));
     assert.ok(receipt.error, JSON.stringify(receipt));
     assert.match(`${receipt.error.message}${receipt.error.traceback || ""}`, /disabled/);
   }
+});
+
+test("native library calls cannot write outside the root or produce success receipts", async (t) => {
+  const { root, outside, runtime } = await fixture(t);
+  const target = path.join(outside, "native-escape.txt");
+  await writeFile(target, "keep");
+  const source = `
+import os
+import _ctypes
+library = "msvcrt.dll" if os.name == "nt" else "libc.so.6"
+libc = _ctypes.dlopen(library)
+system = _ctypes.dlsym(libc, "system")
+command = 'echo native-escape> "' + args["path"] + '"' if os.name == "nt" else 'printf native-escape > "' + args["path"] + '"'
+result = _ctypes.call_function(system, (command.encode(),))
+`;
+  const receipt = await runtime.execute(request(root, { source, arguments: { path: target } }));
+  assert.equal(receipt.status, "failed", JSON.stringify(receipt));
+  assert.equal(receipt.error.type, "ImportError");
+  assert.match(receipt.error.message, /native loading are disabled/);
+  assert.equal(receipt.result, null);
+  assert.equal(await readFile(target, "utf8"), "keep");
+  assert.deepEqual(receipt.changes, []);
+  assert.deepEqual(receipt.affectedFiles, []);
+  assert.deepEqual(receipt.policyRequests, []);
+  assert.deepEqual(receipt.policyDecisionIds, []);
+  assert.deepEqual(await runtime.decisions.list(), []);
+  assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
 });
 
 test("Windows process launches cannot write outside the root or produce success receipts", { skip: process.platform !== "win32" }, async (t) => {

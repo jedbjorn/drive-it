@@ -41,7 +41,7 @@ class RevitError(Exception):
 
 class RuntimeRestriction(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "threading", "_thread"}:
+        if fullname.split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "_ctypes", "threading", "_thread"}:
             raise ImportError("Package installation, process and thread execution, and native loading are disabled in the Drive It worker.")
         return None
 
