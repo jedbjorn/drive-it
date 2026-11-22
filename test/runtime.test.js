@@ -618,6 +618,32 @@ result = _ctypes.call_function(system, (command.encode(),))
   assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
 });
 
+test("SQLite cannot create unmediated database files outside the root", async (t) => {
+  const { root, outside, runtime } = await fixture(t);
+  const target = path.join(outside, "native-escape.sqlite3");
+  const source = `
+import sqlite3
+connection = sqlite3.connect(args["path"])
+connection.execute("CREATE TABLE native_escape (value TEXT)")
+connection.execute("INSERT INTO native_escape VALUES ('native-escape')")
+connection.commit()
+connection.close()
+result = "created"
+`;
+  const receipt = await runtime.execute(request(root, { source, arguments: { path: target } }));
+  assert.equal(receipt.status, "failed", JSON.stringify(receipt));
+  assert.equal(receipt.error.type, "ImportError", JSON.stringify(receipt));
+  assert.match(receipt.error.message, /native loading are disabled/);
+  assert.equal(receipt.result, null);
+  assert.equal(await exists(target), false);
+  assert.deepEqual(receipt.changes, []);
+  assert.deepEqual(receipt.affectedFiles, []);
+  assert.deepEqual(receipt.policyRequests, []);
+  assert.deepEqual(receipt.policyDecisionIds, []);
+  assert.deepEqual(await runtime.decisions.list(), []);
+  assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
+});
+
 test("Windows process launches cannot write outside the root or produce success receipts", { skip: process.platform !== "win32" }, async (t) => {
   for (const [name, source] of [
     ["os.startfile", `

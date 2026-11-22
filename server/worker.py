@@ -41,7 +41,7 @@ class RevitError(Exception):
 
 class RuntimeRestriction(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "_ctypes", "threading", "_thread"}:
+        if fullname.split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "_ctypes", "sqlite3", "_sqlite3", "threading", "_thread"}:
             raise ImportError("Package installation, process and thread execution, and native loading are disabled in the Drive It worker.")
         return None
 
@@ -185,7 +185,7 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
         return original_import(*args, **kwargs)
 
     def audit(event, arguments):
-        if event == "import" and arguments[0].split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "_ctypes", "threading", "_thread"}:
+        if event == "import" and arguments[0].split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "_ctypes", "sqlite3", "_sqlite3", "threading", "_thread"}:
             raise ImportError("Package installation, process and thread execution, and native loading are disabled in the Drive It worker.")
         if event in {
             "_winapi.CreateProcess",
