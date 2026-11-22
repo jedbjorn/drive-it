@@ -28,16 +28,8 @@ _request_id = 0
 _checks = []
 
 
-class PolicyPending(Exception):
-    def __init__(self, detail):
-        super().__init__("Outside-root access is awaiting an operator decision.")
-        self.detail = detail
-
-
-class PolicyDenied(Exception):
-    def __init__(self, detail):
-        super().__init__("Outside-root access was denied by the operator.")
-        self.detail = detail
+PolicyPending = RuntimeError
+PolicyDenied = PermissionError
 
 
 class RevitError(Exception):
@@ -68,7 +60,7 @@ def _request(method, params):
     return response["result"]
 
 
-def _create_file_policy(protocol_in, protocol_out):
+def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied):
     original_open = builtins.open
     original_import = builtins.__import__
     original_os_open = os.open
@@ -128,9 +120,13 @@ def _create_file_policy(protocol_in, protocol_out):
         result = request("workspace.authorize", {"operation": operation, "paths": absolute})
         status = result["status"]
         if status == "pending":
-            raise PolicyPending(result)
+            error = policy_pending("Outside-root access is awaiting an operator decision.")
+            error.detail = result
+            raise error
         if status == "denied":
-            raise PolicyDenied(result)
+            error = policy_denied("Outside-root access was denied by the operator.")
+            error.detail = result
+            raise error
         return result
 
     def record(operation, paths):
@@ -326,9 +322,11 @@ class Revit:
         "create_wall", "create_family_type", "delete_element",
     }
 
-    def __init__(self, process_id, document):
+    def __init__(self, process_id, document, policy_pending, policy_denied):
         self.process_id = process_id
         self.document = document
+        self._policy_pending = policy_pending
+        self._policy_denied = policy_denied
 
     def execute(self, operations, document=None):
         normalized = []
@@ -345,9 +343,13 @@ class Revit:
         })
         status = response.get("status")
         if status == "pending":
-            raise PolicyPending(response)
+            error = self._policy_pending("Outside-root access is awaiting an operator decision.")
+            error.detail = response
+            raise error
         if status == "denied":
-            raise PolicyDenied(response)
+            error = self._policy_denied("Outside-root access was denied by the operator.")
+            error.detail = response
+            raise error
         if status != "succeeded":
             raise RevitError(response)
         if response.get("document"):
@@ -372,8 +374,10 @@ def _serializable(value):
 
 def main():
     run = json.loads(_protocol_in.readline())
+    policy_pending = RuntimeError
+    policy_denied = PermissionError
     sys.meta_path.insert(0, RuntimeRestriction())
-    policy = _create_file_policy(_protocol_in, _protocol_out)
+    policy = _create_file_policy(_protocol_in, _protocol_out, policy_pending, policy_denied)
     builtins.open = policy["open"]
     builtins.__import__ = policy["import"]
     io.open = policy["open"]
@@ -411,19 +415,27 @@ def main():
             "__name__": "__main__",
             "args": run.get("arguments") or {},
             "files": Files(policy),
-            "revit": Revit(run["processId"], run.get("document")),
+            "revit": Revit(run["processId"], run.get("document"), policy_pending, policy_denied),
             "checks": Checks(),
             "result": None,
         }
         exec(compile(run["source"], "<drive-it-script>", "exec"), scope)
         receipt["result"] = _serializable(scope.get("result"))
-    except PolicyPending as error:
-        receipt["status"] = "pending"
-        receipt["policy"] = error.detail
-    except PolicyDenied as error:
-        receipt["status"] = "denied"
-        receipt["policy"] = error.detail
-        receipt["error"] = {"code": "OUTSIDE_ROOT_DENIED", "message": str(error)}
+    except policy_pending as error:
+        if hasattr(error, "detail"):
+            receipt["status"] = "pending"
+            receipt["policy"] = error.detail
+        else:
+            receipt["status"] = "failed"
+            receipt["error"] = {"code": "SCRIPT_FAILED", "message": str(error), "type": type(error).__name__}
+    except policy_denied as error:
+        if hasattr(error, "detail"):
+            receipt["status"] = "denied"
+            receipt["policy"] = error.detail
+            receipt["error"] = {"code": "OUTSIDE_ROOT_DENIED", "message": str(error)}
+        else:
+            receipt["status"] = "failed"
+            receipt["error"] = {"code": "SCRIPT_FAILED", "message": str(error), "type": type(error).__name__}
     except RevitError as error:
         receipt["status"] = error.response.get("status", "failed")
         receipt["error"] = error.response.get("error") or {"code": "REVIT_EXECUTION_FAILED", "message": str(error)}

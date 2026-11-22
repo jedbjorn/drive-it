@@ -87,6 +87,19 @@ test("nonzero SystemExit is a durable failure and zero exit remains successful",
   assert.equal(succeeded.error, null);
 });
 
+test("ordinary runtime and permission errors remain script failures", async (t) => {
+  for (const [source, type] of [
+    ["raise RuntimeError(\"boom\")", "RuntimeError"],
+    ["raise PermissionError(\"no\")", "PermissionError"],
+  ]) {
+    const { root, runtime } = await fixture(t);
+    const receipt = await runtime.execute(request(root, { source }));
+    assert.equal(receipt.status, "failed", JSON.stringify(receipt));
+    assert.equal(receipt.error.code, "SCRIPT_FAILED");
+    assert.equal(receipt.error.type, type);
+  }
+});
+
 test("saved references resolve exact revisions and ambiguous calls are rejected", async (t) => {
   const { root, runtime } = await fixture(t, {
     scriptResolver: async script => {
@@ -235,6 +248,86 @@ files.write(args["target"], "tampered")
   assert.equal(approvedWrite.status, "succeeded", JSON.stringify(approvedWrite));
   assert.equal(approvedWrite.runId, awaitingWriteApproval.runId);
   assert.equal(await readFile(approvedTarget, "utf8"), "tampered");
+});
+
+test("mutable policy exception globals cannot forge authorization", async (t) => {
+  const replacement = `
+import json
+import sys
+
+class FakeInput:
+    def readline(self):
+        return json.dumps({"result": {"status": "approved", "requests": [{"paths": []}]}})
+
+def forge_approval(frame):
+    request = frame.f_locals.get("request")
+    for cell in getattr(request, "__closure__", None) or ():
+        if cell.cell_contents is sys.stdin:
+            cell.cell_contents = FakeInput()
+
+worker = sys.modules["__main__"]
+class MaliciousPending(worker.PolicyPending):
+    def __init__(self, detail):
+        super().__init__("Outside-root access is awaiting an operator decision.")
+        self.detail = detail
+        forge_approval(sys._getframe(1))
+
+class MaliciousDenied(worker.PolicyDenied):
+    def __init__(self, detail):
+        super().__init__("Outside-root access was denied by the operator.")
+        self.detail = detail
+        forge_approval(sys._getframe(1))
+
+worker.PolicyPending = MaliciousPending
+worker.PolicyDenied = MaliciousDenied
+`;
+  const source = `${replacement}
+try:
+    files.read(args["secret"])
+except Exception:
+    pass
+result = files.read(args["secret"])
+files.write(args["target"], "tampered")
+`;
+  const { root, outside, runtime } = await fixture(t);
+  const secret = path.join(outside, "secret.txt");
+  const target = path.join(outside, "target.txt");
+  await writeFile(secret, "outside-secret");
+  await writeFile(target, "unchanged");
+  const input = request(root, { source, arguments: { secret, target } });
+  const pending = await runtime.execute(input);
+  assert.equal(pending.status, "pending", JSON.stringify(pending));
+  assert.equal(await readFile(target, "utf8"), "unchanged");
+  assert.deepEqual(pending.affectedFiles, []);
+  assert.deepEqual(pending.changes, []);
+  assert.equal((await runtime.decisions.list())[0].status, "pending");
+
+  const decision = (await runtime.decisions.list())[0];
+  await runtime.decisions.decide(decision.id, false);
+  const denied = await runtime.execute(input);
+  assert.equal(denied.status, "denied", JSON.stringify(denied));
+  assert.equal(await readFile(target, "utf8"), "unchanged");
+  assert.deepEqual(denied.affectedFiles, []);
+  assert.deepEqual(denied.changes, []);
+
+  const approvedFixture = await fixture(t);
+  const approvedTarget = path.join(approvedFixture.outside, "approved.txt");
+  await writeFile(approvedTarget, "unchanged");
+  const approvedInput = request(approvedFixture.root, {
+    source: `${replacement}\nfiles.write(args["target"], "approved")`,
+    arguments: { target: approvedTarget },
+  });
+  const awaitingApproval = await approvedFixture.runtime.execute(approvedInput);
+  assert.equal(awaitingApproval.status, "pending", JSON.stringify(awaitingApproval));
+  const approval = (await approvedFixture.runtime.decisions.list())[0];
+  await approvedFixture.runtime.decisions.decide(approval.id, true);
+  const approved = await approvedFixture.runtime.execute(approvedInput);
+  assert.equal(approved.status, "succeeded", JSON.stringify(approved));
+  assert.equal(approved.runId, awaitingApproval.runId);
+  assert.equal(await readFile(approvedTarget, "utf8"), "approved");
+  assert.deepEqual(approved.policyDecisionIds, [approval.id]);
+  assert.deepEqual(approved.changes, [{ operation: "write_file", paths: [approvedTarget] }]);
+  assert.equal((await approvedFixture.runtime.decisions.get(approval.id)).status, "consumed");
 });
 
 test("direct stdlib effects and saved-original escapes require decisions and record approved effects", async (t) => {
