@@ -44,7 +44,7 @@ Assert-InstallerTest ([version](& $node --version).TrimStart('v') -ge [version]'
 $configuration = Get-Content -LiteralPath $mcpPath -Raw | ConvertFrom-Json
 Assert-InstallerTest ($configuration.theme -eq 'dark') 'Existing client configuration was not preserved.'
 Assert-InstallerTest ($configuration.mcpServers.existing.command -eq 'existing.exe') 'Another MCP server was removed.'
-Assert-InstallerTest ($configuration.mcpServers.'drive-it'.command -eq $node) 'MCP configuration does not use private Node.js.'
+Assert-InstallerTest ($configuration.mcpServers.'drive-it'.command -eq $node) "MCP configuration does not use private Node.js. Expected [$node], actual [$($configuration.mcpServers.'drive-it'.command)]."
 Assert-InstallerTest ($configuration.mcpServers.'drive-it'.args[0] -eq $server) 'MCP configuration does not use the installed server.'
 Assert-InstallerTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_DATA_DIR -eq $InstallRoot) 'MCP configuration has the wrong data directory.'
 Assert-InstallerTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_PYTHON -eq $python) 'MCP configuration does not use private Python.'
