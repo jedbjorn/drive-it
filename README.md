@@ -26,9 +26,15 @@ purpose: MCP server and Revit add-in
 
 ## Overview
 
-Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit through a small Node.js server and a native Revit add-in. Its first tool, `get_revit_session`, returns the process ID, version, and build of a running Revit instance. It works with the Revit home screen or an open model.
+Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes three stdio MCP tools:
 
-Drive It is in early development. The current `main` branch provides Revit session discovery and a Windows alpha installer; it does not yet execute modeling operations. The Windows alpha installer, source build, and release bundle below are the supported setup paths for this stage.
+- `get_revit_session` returns the selected process ID, version, build, and current-user named-pipe identity.
+- `execute_script` runs inline Python, or an exact saved revision when the script library integration is installed, in an isolated fixed Python worker.
+- `get_api_reference` returns local, versioned references for the callable Drive It file, check, and Revit operations. `get_guidance` is not registered.
+
+Generated Python receives `args`, `files`, `revit`, and `checks`. It does not receive raw Revit objects. Typed model operations use the Drive It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt.
+
+Drive It is in early development. The Windows alpha installer, source build, and release bundle below are the supported setup paths for this stage.
 
 ## How it works
 
@@ -41,6 +47,34 @@ graph LR
   PIPE --> REVIT["Drive It add-in in Revit"]:::class3
 ```
 
+## Workspace and outside-root decisions
+
+Select the persistent workspace through the operator surface. During development, the equivalent direct commands are:
+
+```powershell
+node server/operator.js workspace set C:\DriveIt
+node server/operator.js workspace get
+```
+
+Reads, creates, overwrites, renames, moves, and deletes inside the canonical root do not produce a Drive It prompt. Links and junctions are resolved at the point of use. An outside-root request returns a `pending` receipt and changes nothing in the requested batch. List the request and make a one-time decision:
+
+```powershell
+node server/operator.js decisions list
+node server/operator.js decisions approve <decision-id>
+node server/operator.js decisions deny <decision-id>
+```
+
+After approval, retry the same execution with the same idempotency key. The grant is consumed by that execution and is not reused. Denial returns a `denied` receipt. Changing the workspace affects future operations; existing receipts retain their originating root.
+
+Run history remains local to the Windows user and is available after a root change:
+
+```powershell
+node server/operator.js history list
+node server/operator.js history get <run-id>
+```
+
+Completed idempotent requests return their original receipt without repeating effects. Receipts distinguish pending, denied, failed, timed-out, partially applied, and succeeded runs.
+
 ## Requirements
 
 The Windows alpha installer requires Windows and Autodesk Revit 2026. It provisions private Node.js and Python runtimes and reuses a suitable existing .NET runtime or provisions .NET 8 in Drive It's private runtime directory. No administrator account, development checkout, global Node.js/npm, or global Python is required.
@@ -51,6 +85,7 @@ For a source build, install:
 - Autodesk Revit 2026
 - .NET 8 SDK
 - Node.js 22 or newer
+- Python 3 for source builds
 
 Revit is required to use the add-in, but not to run the Node.js tests or compile the project. Revit API references resolve from NuGet.
 
@@ -106,11 +141,13 @@ Start Revit and allow the add-in to load. Configure your MCP client to launch th
 }
 ```
 
+The installed alpha supplies its own Node and fixed Python runtime. `DRIVE_IT_PYTHON` selects the Python executable during development or installed setup. Runtime state defaults to `%LOCALAPPDATA%\DriveIt`; `DRIVE_IT_DATA_DIR` overrides it for isolated development tests.
+
 ## Use
 
-Run `Get-Process Revit | Select-Object Id, MainWindowTitle` in PowerShell. Ask your MCP client to call `get_revit_session` with the desired `processId`.
+Run `Get-Process Revit | Select-Object Id, MainWindowTitle` in PowerShell and pass the desired `processId` to `get_revit_session` or `execute_script`.
 
-A successful response contains the selected Revit process and its version information:
+A successful session response contains the selected Revit process and its version information:
 
 ```json
 {
@@ -155,14 +192,19 @@ Only the Node broker client may attach this payload; generated Python cannot app
 
 Build the self-contained installer package on a development machine with `installer/Build-DriveItPackage.ps1`. The builder runs npm and dotnet only while packaging, downloads the fixed official Node.js/Python runtimes, bundles production dependencies, and creates `artifacts/DriveIt-alpha.zip`.
 
-- `server/index.js` registers the MCP tool and reads session metadata from the named pipe.
+- `server/app.js` registers the MCP tools and their schemas.
+- `server/runtime.js` owns execution, broker policy retries, receipts, and idempotent replay.
+- `server/worker.py` mediates Python file and typed Revit operations and blocks package/process installation paths.
+- `server/workspace.js`, `server/decisions.js`, and `server/history.js` persist policy and run evidence outside the selected workspace.
 - `src/DriveIt.Revit/App.cs` serves the session greeting and typed requests. `Broker/RevitBroker.cs` raises an external event, and `Broker/DocumentDispatcher.cs` executes document and model operations in Revit's API context.
-- `npm test` starts the MCP server, discovers the tool, and checks the disconnected response. On Windows it also calls the tool against a test pipe and verifies operator state, approvals, and run history.
+- `npm test` exercises real stdio discovery, isolated Python execution, policy and failure paths, replay, operator commands, and temporary-file cleanup. Windows runs also exercise the named-pipe session, newline-JSON broker contract, operator state, approvals, and run history.
 - `dotnet build src/DriveIt.Revit -c Release` compiles the Revit 2026 add-in.
 - CI builds the Windows alpha installer and performs an installed-server smoke test.
 - `test/revit-broker.integration.ps1` exercises the live broker against a running Revit process. Copy a project template to `C:\DriveIt\broker-fixtures\broker-project.rte` and a family template to `broker-family.rft`, then run `powershell -ExecutionPolicy Bypass -File test/revit-broker.integration.ps1 -ProcessId <pid>`. It writes JSONL receipts to that workspace and uses only disposable model files.
 
 GitHub Actions runs the tests and build on `windows-latest` for pull requests and pushes to `main`. It uses only GitHub-hosted runners; no local runner or Revit installation is required. Live Revit verification is a separate manual check.
+
+Live RVT/RFA behavior still requires the installed-alpha Revit fixtures and acceptance environment; local mocks and pipe tests do not establish live model proof.
 
 To release, push a `v<major>.<minor>.<patch>` tag for a commit on `main`, optionally with a prerelease suffix such as `-rc.1`. The release workflow runs the same build, packages the add-in and server, verifies a SHA-256 checksum, and creates a GitHub Release.
 

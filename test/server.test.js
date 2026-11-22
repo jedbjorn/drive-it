@@ -1,37 +1,126 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { WorkspaceStore } from "../server/workspace.js";
 
-test("discover and call get_revit_session over stdio", async (t) => {
+async function clientFor(t, dataDir) {
   const client = new Client({ name: "drive-it-test", version: "1" });
   await client.connect(new StdioClientTransport({
     command: process.execPath,
     args: [fileURLToPath(new URL("../server/index.js", import.meta.url))],
+    env: { ...process.env, DRIVE_IT_DATA_DIR: dataDir },
   }));
   t.after(() => client.close());
+  return client;
+}
+
+test("discover the Unguided tools and schemas over stdio", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "drive-it-protocol-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const client = await clientFor(t, dataDir);
 
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name), ["get_revit_session"]);
-  const call = () => client.callTool({
-    name: "get_revit_session", arguments: { processId: process.pid },
+  assert.deepEqual(tools.map(tool => tool.name), ["get_revit_session", "execute_script", "get_api_reference"]);
+  assert.ok(!tools.some(tool => tool.name === "get_guidance"));
+  const execute = tools.find(tool => tool.name === "execute_script");
+  assert.ok(execute.inputSchema.properties.source);
+  assert.ok(execute.inputSchema.properties.script);
+  assert.ok(execute.inputSchema.properties.idempotencyKey);
+
+  const reference = await client.callTool({ name: "get_api_reference", arguments: { name: "revit.create_level" } });
+  assert.equal(reference.structuredContent.version, "revit-2026-alpha.1");
+  assert.equal(reference.structuredContent.entries.length, 1);
+  assert.equal(reference.structuredContent.entries[0].name, "revit.create_level");
+  assert.ok(reference.structuredContent.entries[0].example.includes("revit.create_level"));
+
+  const ambiguous = await client.callTool({
+    name: "execute_script",
+    arguments: { processId: 123, source: "result = 1", script: { id: "saved", revision: 1 } },
   });
+  assert.equal(ambiguous.isError, true);
+  assert.match(ambiguous.content[0].text, /exactly one/);
+});
+
+test("get_revit_session reports disconnect and validates a Windows pipe", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "drive-it-session-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const client = await clientFor(t, dataDir);
+  const processId = process.pid;
+  const call = () => client.callTool({ name: "get_revit_session", arguments: { processId } });
   const disconnected = await call();
   assert.equal(disconnected.isError, true);
   assert.match(disconnected.content[0].text, /Revit/);
 
   if (process.platform === "win32") {
-    const info = { processId: process.pid, version: "2026", build: "test" };
-    const bridge = createServer(socket => socket.end(JSON.stringify(info) + "\n"));
-    bridge.listen(String.raw`\\.\pipe\drive-it-${process.pid}`);
+    const info = { processId, version: "2026", build: "test" };
+    const bridge = createServer(socket => socket.end(`${JSON.stringify(info)}\n`));
+    bridge.listen(String.raw`\\.\pipe\drive-it-${processId}`);
     await once(bridge, "listening");
     t.after(() => new Promise(resolve => bridge.close(resolve)));
 
     const result = await call();
     assert.ok(!result.isError, result.content[0].text);
-    assert.deepEqual(result.structuredContent, info);
+    assert.deepEqual(result.structuredContent, {
+      ...info,
+      connectionIdentity: `current-user:named-pipe:drive-it-${processId}`,
+    });
   }
+});
+
+test("execute_script uses the greeting and newline JSON broker contract", { skip: process.platform !== "win32" }, async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "drive-it-data-"));
+  const root = await mkdtemp(path.join(tmpdir(), "drive-it-root-"));
+  t.after(() => Promise.all([
+    rm(dataDir, { recursive: true, force: true }),
+    rm(root, { recursive: true, force: true }),
+  ]));
+  await new WorkspaceStore(dataDir).setRoot(root);
+  const processId = 424242;
+  const envelopes = [];
+  const bridge = createServer(socket => {
+    socket.setEncoding("utf8");
+    socket.write(`${JSON.stringify({ processId, version: "2026", build: "test" })}\n`);
+    let input = "";
+    socket.on("data", chunk => {
+      input += chunk;
+      if (!input.includes("\n")) return;
+      const envelope = JSON.parse(input.split("\n")[0]);
+      envelopes.push(envelope);
+      socket.end(`${JSON.stringify({
+        id: envelope.id,
+        status: "succeeded",
+        document: { path: null, uniqueId: "document-handle", kind: "rvt" },
+        changes: [{ type: "create_level", name: "L2" }],
+        affectedFiles: [],
+        affectedElements: [{ elementId: 100 }],
+        checks: [{ name: "transaction committed", passed: true }],
+      })}\n`);
+    });
+  });
+  bridge.listen(String.raw`\\.\pipe\drive-it-${processId}`);
+  await once(bridge, "listening");
+  t.after(() => new Promise(resolve => bridge.close(resolve)));
+  const client = await clientFor(t, dataDir);
+  const result = await client.callTool({
+    name: "execute_script",
+    arguments: {
+      processId,
+      source: "result = revit.create_level(name=\"L2\", elevation=4.0)",
+      idempotencyKey: "windows-broker-contract",
+    },
+  });
+  assert.ok(!result.isError, result.content[0].text);
+  assert.equal(result.structuredContent.status, "succeeded");
+  assert.equal(result.structuredContent.document.uniqueId, "document-handle");
+  assert.equal(envelopes.length, 1);
+  assert.equal(envelopes[0].type, "model.execute");
+  assert.equal(envelopes[0].operations[0].type, "create_level");
+  assert.equal(envelopes[0].outsideRootApproval, undefined);
 });
