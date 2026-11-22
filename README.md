@@ -32,7 +32,7 @@ Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 t
 - `execute_script` runs inline Python, or an exact saved revision when the script library integration is installed, in an isolated fixed Python worker.
 - `get_api_reference` returns local, versioned references for the callable Drive It file, check, and Revit operations. `get_guidance` is not registered.
 
-Generated Python receives `args`, `files`, `revit`, and `checks`. It does not receive raw Revit objects. Typed model operations use the Drive It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, has no package installer or subprocess access, and records observed effects and checks in a durable run receipt.
+Generated Python receives `args`, `files`, `revit`, and `checks`. It does not receive raw Revit objects. Typed model operations use the Drive It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt.
 
 Drive It is in early development. The Windows alpha installer, source build, and release bundle below are the supported setup paths for this stage.
 

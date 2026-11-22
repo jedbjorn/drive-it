@@ -5,6 +5,7 @@ import json
 import os
 import stat as stat_module
 import sys
+import _thread
 
 _protocol_in = sys.stdin
 _protocol_out = sys.stdout
@@ -48,8 +49,8 @@ class RevitError(Exception):
 
 class RuntimeRestriction(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes"}:
-            raise ImportError("Package installation, process execution, and native loading are disabled in the Drive It worker.")
+        if fullname.split(".")[0] in {"pip", "ensurepip", "setuptools", "subprocess", "ctypes", "threading", "_thread"}:
+            raise ImportError("Package installation, process and thread execution, and native loading are disabled in the Drive It worker.")
         return None
 
 
@@ -91,6 +92,14 @@ def _create_file_policy(protocol_in, protocol_out):
     abspath = os.path.abspath
     fspath = os.fspath
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+    is_instance = builtins.isinstance
+    string_type = str
+    bytes_type = bytes
+    string_value = str.__str__
+    bytes_value = bytes.__bytes__
+    integer_and = int.__and__
+    exception_setattr = BaseException.__setattr__
+    trusted_filename = __file__
     request_id = 0
     call_stack = []
 
@@ -107,8 +116,15 @@ def _create_file_policy(protocol_in, protocol_out):
             raise RuntimeError(response["error"].get("message", "Drive It request failed."))
         return response["result"]
 
+    def absolute_path(path):
+        if is_instance(path, string_type):
+            return abspath(string_value(path))
+        if is_instance(path, bytes_type):
+            return abspath(bytes_value(path))
+        raise TypeError("File paths must resolve to text or bytes.")
+
     def authorize(operation, paths):
-        absolute = [abspath(fspath(item)) for item in paths]
+        absolute = [absolute_path(item) for item in paths]
         result = request("workspace.authorize", {"operation": operation, "paths": absolute})
         status = result["status"]
         if status == "pending":
@@ -130,10 +146,25 @@ def _create_file_policy(protocol_in, protocol_out):
         if event == "c_return" and effect:
             record(*effect)
 
+    def trace(frame, event, arg):
+        if event == "call":
+            return trace if frame.f_code.co_filename == trusted_filename else None
+        if event == "exception":
+            exception_setattr(arg[1], "__traceback__", None)
+            exception_setattr(arg[1], "__context__", None)
+            exception_setattr(arg[1], "__cause__", None)
+        return trace
+
     def protected_profile(*args):
         raise RuntimeError("Execution profiling is managed by the Drive It worker.")
 
     def protected_getprofile():
+        return None
+
+    def protected_trace(*args):
+        raise RuntimeError("Execution tracing is managed by the Drive It worker.")
+
+    def protected_gettrace():
         return None
 
     def file_rename(source, destination):
@@ -183,9 +214,11 @@ def _create_file_policy(protocol_in, protocol_out):
         paths = []
         if event == "open":
             file, mode, flags = arguments
-            if isinstance(file, int):
+            if is_instance(file, int):
                 return
-            operation = "write_file" if (mode and any(flag in mode for flag in "wax+")) or flags & write_flags else "read_file"
+            if is_instance(mode, string_type):
+                mode = string_value(mode)
+            operation = "write_file" if (mode and any(flag in mode for flag in "wax+")) or integer_and(flags, write_flags) else "read_file"
             paths = [file]
         elif event in {"os.rename", "os.link", "os.symlink"}:
             operation = "rename_file" if event == "os.rename" else "link_file"
@@ -231,6 +264,9 @@ def _create_file_policy(protocol_in, protocol_out):
     sys.setprofile(profile)
     sys.setprofile = protected_profile
     sys.getprofile = protected_getprofile
+    sys.settrace(trace)
+    sys.settrace = protected_trace
+    sys.gettrace = protected_gettrace
     return {
         "open": original_open,
         "os_open": original_os_open,
@@ -246,6 +282,10 @@ def _create_file_policy(protocol_in, protocol_out):
 
 def _disabled(*args, **kwargs):
     raise RuntimeError("Process execution is disabled in the Drive It worker.")
+
+
+def _disabled_thread(*args, **kwargs):
+    raise RuntimeError("Thread execution is disabled in the Drive It worker.")
 
 
 class Files:
@@ -357,6 +397,9 @@ def main():
     for name in dir(os):
         if name.startswith(("spawn", "exec")):
             setattr(os, name, _disabled)
+    for name in dir(_thread):
+        if name.startswith(("start", "_start")):
+            setattr(_thread, name, _disabled_thread)
 
     receipt = {"status": "succeeded", "result": None, "error": None, "checks": _checks}
     stdout = io.StringIO()

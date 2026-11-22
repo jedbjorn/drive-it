@@ -155,12 +155,112 @@ test("outside-root denial leaves the target unchanged", async (t) => {
   assert.equal(await exists(target), false);
 });
 
+test("caught policy exceptions cannot expose authorization channels through tracebacks", async (t) => {
+  const source = `
+import json
+import sys
+
+class FakeInput:
+    def readline(self):
+        return json.dumps({"result": {"status": "approved", "requests": [{"paths": []}]}})
+
+def forge_approval(error):
+    try:
+        sys.settrace(None)
+    except RuntimeError:
+        pass
+    traceback = error.__traceback__
+    while traceback:
+        request = traceback.tb_frame.f_locals.get("request")
+        for cell in getattr(request, "__closure__", None) or ():
+            if hasattr(cell.cell_contents, "readline"):
+                cell.cell_contents = FakeInput()
+                return
+        traceback = traceback.tb_next
+
+try:
+    files.read(args["secret"])
+except Exception as error:
+    forge_approval(error)
+result = files.read(args["secret"])
+files.write(args["target"], "tampered")
+`;
+  const { root, outside, runtime } = await fixture(t);
+  const secret = path.join(outside, "secret.txt");
+  const target = path.join(outside, "target.txt");
+  await writeFile(secret, "outside-secret");
+  await writeFile(target, "unchanged");
+  const input = request(root, { source, arguments: { secret, target } });
+  const pending = await runtime.execute(input);
+  assert.equal(pending.status, "pending", JSON.stringify(pending));
+  assert.equal(await readFile(target, "utf8"), "unchanged");
+  assert.deepEqual(pending.affectedFiles, []);
+  assert.deepEqual(pending.changes, []);
+  assert.equal((await runtime.decisions.list())[0].status, "pending");
+
+  const decision = (await runtime.decisions.list())[0];
+  await runtime.decisions.decide(decision.id, false);
+  const denied = await runtime.execute(input);
+  assert.equal(denied.status, "denied", JSON.stringify(denied));
+  assert.equal(await readFile(target, "utf8"), "unchanged");
+  assert.deepEqual(denied.affectedFiles, []);
+  assert.deepEqual(denied.changes, []);
+
+  const approvedReadFixture = await fixture(t);
+  const approvedSecret = path.join(approvedReadFixture.outside, "secret.txt");
+  await writeFile(approvedSecret, "outside-secret");
+  const approvedReadInput = request(approvedReadFixture.root, {
+    source: "result = files.read(args[\"secret\"])",
+    arguments: { secret: approvedSecret },
+  });
+  const awaitingReadApproval = await approvedReadFixture.runtime.execute(approvedReadInput);
+  const readApproval = (await approvedReadFixture.runtime.decisions.list())[0];
+  await approvedReadFixture.runtime.decisions.decide(readApproval.id, true);
+  const approvedRead = await approvedReadFixture.runtime.execute(approvedReadInput);
+  assert.equal(approvedRead.status, "succeeded", JSON.stringify(approvedRead));
+  assert.equal(approvedRead.runId, awaitingReadApproval.runId);
+  assert.equal(approvedRead.result, "outside-secret");
+
+  const approvedWriteFixture = await fixture(t);
+  const approvedTarget = path.join(approvedWriteFixture.outside, "target.txt");
+  await writeFile(approvedTarget, "unchanged");
+  const approvedWriteInput = request(approvedWriteFixture.root, {
+    source: "files.write(args[\"target\"], \"tampered\")",
+    arguments: { target: approvedTarget },
+  });
+  const awaitingWriteApproval = await approvedWriteFixture.runtime.execute(approvedWriteInput);
+  const writeApproval = (await approvedWriteFixture.runtime.decisions.list())[0];
+  await approvedWriteFixture.runtime.decisions.decide(writeApproval.id, true);
+  const approvedWrite = await approvedWriteFixture.runtime.execute(approvedWriteInput);
+  assert.equal(approvedWrite.status, "succeeded", JSON.stringify(approvedWrite));
+  assert.equal(approvedWrite.runId, awaitingWriteApproval.runId);
+  assert.equal(await readFile(approvedTarget, "utf8"), "tampered");
+});
+
 test("direct stdlib effects and saved-original escapes require decisions and record approved effects", async (t) => {
   for (const [name, source, expected] of [
     ["unwrapped-os-truncate", "import os\nos.truncate(args[\"path\"], 0)", ""],
     ["profile-tamper-os-truncate", "import os\nimport sys\ntry:\n    sys.setprofile(None)\nexcept RuntimeError:\n    pass\nos.truncate(args[\"path\"], 0)", ""],
     ["profile-state-tamper-os-truncate", "import os\nimport sys\nclass DisabledStack:\n    def append(self, item):\n        pass\n    def __bool__(self):\n        return False\ntry:\n    profile = sys.getprofile()\n    for cell in profile.__closure__ or ():\n        if isinstance(cell.cell_contents, list):\n            cell.cell_contents = DisabledStack()\nexcept (AttributeError, TypeError):\n    pass\nos.truncate(args[\"path\"], 0)", ""],
     ["closure-tamper-open", "import sys\ntry:\n    mediate = next(cell.cell_contents for cell in files.policy[\"open\"].__closure__ if getattr(cell.cell_contents, \"__name__\", \"\") == \"mediate\")\n    for cell in mediate.__closure__ or ():\n        if type(cell.cell_contents) is int:\n            cell.cell_contents = 1\nexcept (AttributeError, TypeError, StopIteration):\n    pass\nsys.modules[\"__main__\"]._original_open(args[\"path\"], \"w\").write(\"escaped\")", "escaped"],
+    ["path-callback-open", `
+import json
+import sys
+class FakeInput:
+    def readline(self):
+        return json.dumps({"result": {"status": "approved", "requests": [{"paths": []}]}})
+class CallbackPath(str):
+    def startswith(self, *args):
+        frame = sys._getframe(1)
+        while frame:
+            request = frame.f_locals.get("request")
+            for cell in getattr(request, "__closure__", None) or ():
+                if cell.cell_contents is sys.stdin:
+                    cell.cell_contents = FakeInput()
+            frame = frame.f_back
+        return str.startswith(self, *args)
+sys.modules["__main__"]._original_open(CallbackPath(args["path"]), "w").write("escaped")
+`, "escaped"],
     ["saved-original-open", "import sys\nsys.modules[\"__main__\"]._original_open(args[\"path\"], \"w\").write(\"escaped\")", "escaped"],
   ]) {
     const deniedFixture = await fixture(t);
@@ -357,8 +457,8 @@ test("a later local failure reports partial effects instead of claiming rollback
   assert.equal(await readFile(target, "utf8"), "completed");
 });
 
-test("package installation and process execution fail inside the fixed worker", async (t) => {
-  for (const source of ["import ensurepip", "import subprocess", "os.system(\"echo no\")"]) {
+test("package installation and process or thread execution fail inside the fixed worker", async (t) => {
+  for (const source of ["import ensurepip", "import subprocess", "import threading", "import _thread\n_thread.start_new_thread(lambda: None, ())", "os.system(\"echo no\")"]) {
     const { root, runtime } = await fixture(t);
     const receipt = await runtime.execute(request(root, { source: source === "os.system(\"echo no\")" ? `import os\n${source}` : source }));
     assert.equal(receipt.status, "failed", JSON.stringify(receipt));
