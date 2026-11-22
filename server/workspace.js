@@ -50,13 +50,11 @@ export class WorkspaceStore {
 }
 
 export class WorkspacePolicy {
-  constructor(workspace, decisions) {
-    this.workspace = workspace;
+  constructor(decisions) {
     this.decisions = decisions;
   }
 
-  async authorize(runId, requests) {
-    const root = await this.workspace.getRoot();
+  async authorize(runId, requests, root) {
     const canonical = [];
     for (const request of requests) {
       const paths = [];

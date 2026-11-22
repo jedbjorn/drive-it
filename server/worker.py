@@ -334,7 +334,7 @@ class Revit:
         normalized = []
         for operation in operations:
             arguments = dict(operation.get("arguments") or {})
-            for key in ("path", "templatePath"):
+            for key in ("path", "destinationPath", "templatePath"):
                 if isinstance(arguments.get(key), str):
                     arguments[key] = os.path.abspath(arguments[key])
             normalized.append({"type": operation["type"], "arguments": arguments})

@@ -3,6 +3,7 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } fr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { apiReference } from "../server/reference.js";
 import { Runtime } from "../server/runtime.js";
 import { runWorker } from "../server/worker.js";
 
@@ -463,6 +464,86 @@ test("deleting the root entry is an outside-root operation", async (t) => {
   assert.equal(await exists(root), true);
 });
 
+test("every published Revit example matches the typed broker contract and executes", async (t) => {
+  const cases = {
+    open_document: {
+      arguments: { path: String.raw`C:\DriveIt\model.rvt` },
+      optional: ["kind"],
+      effect: /Opens an existing RVT or RFA document/,
+    },
+    create_document: {
+      arguments: { templatePath: String.raw`C:\DriveIt\template.rte`, kind: "rvt" },
+      optional: [],
+      effect: /unsaved.*save_as_document/,
+    },
+    read_document: { arguments: {}, optional: [], effect: /without model changes/ },
+    save_document: { arguments: {}, optional: [], effect: /existing path.*unsaved documents require save_as_document/ },
+    save_as_document: {
+      arguments: { destinationPath: String.raw`C:\DriveIt\model.rvt` },
+      optional: ["overwrite"],
+      effect: /destinationPath.*retains its identity/,
+    },
+    close_document: { arguments: {}, optional: [], effect: /without saving additional changes/ },
+    delete_document: { arguments: {}, optional: [], effect: /selected saved document.*current file/ },
+    create_level: {
+      arguments: { name: "L2", elevation: 4 },
+      optional: [],
+      effect: /RVT model transaction/,
+    },
+    create_wall: {
+      arguments: {
+        start: { x: 0, y: 0, z: 0 },
+        end: { x: 3, y: 0, z: 0 },
+        baseLevelId: 123,
+        height: 3,
+      },
+      optional: [],
+      effect: /RVT model transaction/,
+    },
+    create_family_type: { arguments: { name: "Type 1" }, optional: [], effect: /RFA.*parameter values are not changed/ },
+    delete_element: { arguments: { elementId: 123 }, optional: [], effect: /dependent elements/ },
+  };
+
+  for (const [name, contract] of Object.entries(cases)) {
+    const documented = apiReference(`revit.${name}`)[0];
+    assert.ok(documented, name);
+    const required = Object.keys(contract.arguments);
+    assert.deepEqual(
+      Object.keys(documented.arguments).sort(),
+      [...required, ...contract.optional, "document"].sort(),
+      name,
+    );
+    for (const key of required) assert.match(documented.arguments[key], /^Required:/, `${name}.${key}`);
+    for (const key of [...contract.optional, "document"]) assert.match(documented.arguments[key], /^Optional:/, `${name}.${key}`);
+    assert.match(documented.effects, contract.effect, name);
+
+    const envelopes = [];
+    const { root, runtime } = await fixture(t, {
+      brokerExecutor: async (processId, envelope) => {
+        envelopes.push(envelope);
+        return { id: envelope.id, status: "succeeded", changes: [], affectedFiles: [], affectedElements: [], checks: [] };
+      },
+    });
+    const receipt = await runtime.execute(request(root, {
+      source: documented.example,
+      idempotencyKey: `reference-${name}`,
+    }));
+    assert.equal(receipt.status, "succeeded", `${name}: ${JSON.stringify(receipt.error)}`);
+    assert.equal(envelopes.length, 1, name);
+    assert.equal(envelopes[0].operations.length, 1, name);
+    const operation = envelopes[0].operations[0];
+    assert.equal(operation.type, name);
+    assert.deepEqual(Object.keys(operation.arguments).sort(), required.sort(), name);
+    for (const [key, expected] of Object.entries(contract.arguments)) {
+      if (["path", "destinationPath", "templatePath"].includes(key)) {
+        assert.equal(path.win32.basename(operation.arguments[key]), path.win32.basename(expected), `${name}.${key}`);
+      } else {
+        assert.deepEqual(operation.arguments[key], expected, `${name}.${key}`);
+      }
+    }
+  }
+});
+
 test("typed Revit calls preserve the broker envelope and observed effects", async (t) => {
   const envelopes = [];
   const { root, runtime } = await fixture(t, {
@@ -505,7 +586,7 @@ test("broker policy preflight attaches only a Node-generated one-time grant", as
     },
   });
   const target = path.join(outside, "model.rvt");
-  const source = "result = revit.save_as_document(path=args[\"path\"])";
+  const source = "result = revit.save_as_document(destinationPath=args[\"path\"])";
   const pending = await runtimeWithBroker.execute(request(root, { source, arguments: { path: target } }));
   assert.equal(pending.status, "pending");
   const decision = (await runtimeWithBroker.decisions.list())[0];
@@ -699,6 +780,51 @@ test("timeout stops the worker, retains observed effects, and removes temporary 
   assert.deepEqual(receipt.changes, [{ operation: "write_file", paths: [target] }]);
   assert.equal(await readFile(target, "utf8"), "completed");
   assert.equal(await exists(temporary), false);
+});
+
+test("a real worker keeps its original root when the operator root changes mid-run", async (t) => {
+  let runtime;
+  let secondRoot;
+  let changed = false;
+  const envelopes = [];
+  const { base, root, runtime: configuredRuntime } = await fixture(t, {
+    brokerExecutor: async (processId, envelope) => {
+      envelopes.push(envelope);
+      return { id: envelope.id, status: "succeeded", changes: [], affectedFiles: [], affectedElements: [], checks: [] };
+    },
+    workerRunner: options => runWorker({
+      ...options,
+      onRequest: async (method, params) => {
+        const response = await options.onRequest(method, params);
+        if (!changed && method === "effect.record" && params.operation === "write_file") {
+          await runtime.workspace.setRoot(secondRoot);
+          changed = true;
+        }
+        return response;
+      },
+    }),
+  });
+  runtime = configuredRuntime;
+  secondRoot = path.join(base, "second-root");
+  await mkdir(secondRoot);
+  const firstPath = path.join(root, "first.txt");
+  const secondPath = path.join(root, "second.txt");
+  const receipt = await runtime.execute(request(root, {
+    source: "files.write(args[\"first\"], \"one\")\nfiles.write(args[\"second\"], \"two\")\nresult = revit.read_document()",
+    arguments: { first: firstPath, second: secondPath },
+  }));
+
+  assert.equal(receipt.status, "succeeded", JSON.stringify(receipt));
+  assert.equal(changed, true);
+  assert.equal(receipt.workspaceRoot, root);
+  assert.equal(await runtime.workspace.getRoot(), secondRoot);
+  assert.equal(await readFile(firstPath, "utf8"), "one");
+  assert.equal(await readFile(secondPath, "utf8"), "two");
+  assert.deepEqual(await runtime.decisions.list(), []);
+  assert.deepEqual(receipt.policyRequests, []);
+  assert.deepEqual(receipt.policyDecisionIds, []);
+  assert.equal(envelopes.length, 1);
+  assert.equal(envelopes[0].workspaceRoot, root);
 });
 
 test("history survives a persistent root change and idempotency conflicts are rejected", async (t) => {
