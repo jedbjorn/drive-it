@@ -28,7 +28,7 @@ export class Runtime {
     this.workspace = new WorkspaceStore(dataDir);
     this.decisions = new DecisionStore(dataDir);
     this.history = new HistoryStore(dataDir);
-    this.policy = new WorkspacePolicy(this.workspace, this.decisions);
+    this.policy = new WorkspacePolicy(this.decisions);
     this.pythonPath = pythonPath;
     this.brokerExecutor = brokerExecutor;
     this.sessionReader = sessionReader;
@@ -186,7 +186,7 @@ export class Runtime {
       return { recorded: true };
     }
     if (method === "workspace.authorize") {
-      const result = await this.policy.authorize(context.runId, [{ operation: params.operation, paths: params.paths }]);
+      const result = await this.policy.authorize(context.runId, [{ operation: params.operation, paths: params.paths }], context.workspaceRoot);
       this.recordPolicy(context.receipt, context, result);
       return result;
     }
@@ -195,7 +195,7 @@ export class Runtime {
     const operations = [];
     for (const operation of params.operations) {
       const args = { ...operation.arguments };
-      for (const key of ["path", "templatePath"]) {
+      for (const key of ["path", "destinationPath", "templatePath"]) {
         if (typeof args[key] === "string") args[key] = await canonicalPath(args[key]);
       }
       operations.push({ type: operation.type, arguments: args });
@@ -211,7 +211,7 @@ export class Runtime {
     let response = await this.brokerExecutor(context.processId, envelope, { timeoutMs: context.timeoutMs });
     if (response.status === "policy_required") {
       this.observeBroker(response, context);
-      const decision = await this.policy.authorize(context.runId, response.policyRequests || []);
+      const decision = await this.policy.authorize(context.runId, response.policyRequests || [], context.workspaceRoot);
       this.recordPolicy(context.receipt, context, decision);
       if (decision.status === "approved") {
         const approvedEnvelope = {

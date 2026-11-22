@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { apiReference } from "../server/reference.js";
 import { WorkspaceStore } from "../server/workspace.js";
 
 async function clientFor(t, dataDir) {
@@ -33,6 +34,9 @@ test("discover the Unguided tools and schemas over stdio", async (t) => {
   assert.ok(execute.inputSchema.properties.source);
   assert.ok(execute.inputSchema.properties.script);
   assert.ok(execute.inputSchema.properties.idempotencyKey);
+
+  const allReferences = await client.callTool({ name: "get_api_reference", arguments: {} });
+  assert.deepEqual(allReferences.structuredContent.entries, apiReference());
 
   const reference = await client.callTool({ name: "get_api_reference", arguments: { name: "revit.create_level" } });
   assert.equal(reference.structuredContent.version, "revit-2026-alpha.1");
