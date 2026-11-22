@@ -136,6 +136,43 @@ test("outside-root denial leaves the target unchanged", async (t) => {
   assert.equal(await exists(target), false);
 });
 
+test("direct stdlib effects and saved-original escapes require decisions and record approved effects", async (t) => {
+  for (const [name, source, expected] of [
+    ["unwrapped-os-truncate", "import os\nos.truncate(args[\"path\"], 0)", ""],
+    ["saved-original-open", "import sys\nsys.modules[\"__main__\"]._original_open(args[\"path\"], \"w\").write(\"escaped\")", "escaped"],
+  ]) {
+    const deniedFixture = await fixture(t);
+    const deniedTarget = path.join(deniedFixture.outside, `${name}-denied.txt`);
+    await writeFile(deniedTarget, "keep");
+    const input = request(deniedFixture.root, { source, arguments: { path: deniedTarget } });
+    const pending = await deniedFixture.runtime.execute(input);
+    assert.equal(pending.status, "pending", JSON.stringify(pending));
+    assert.equal((await deniedFixture.runtime.decisions.list()).length, 1);
+    assert.equal(await readFile(deniedTarget, "utf8"), "keep");
+    assert.deepEqual(pending.affectedFiles, []);
+
+    const decision = (await deniedFixture.runtime.decisions.list())[0];
+    await deniedFixture.runtime.decisions.decide(decision.id, false);
+    const denied = await deniedFixture.runtime.execute(input);
+    assert.equal(denied.status, "denied", JSON.stringify(denied));
+    assert.equal(await readFile(deniedTarget, "utf8"), "keep");
+    assert.deepEqual(denied.affectedFiles, []);
+
+    const approvedFixture = await fixture(t);
+    const approvedTarget = path.join(approvedFixture.outside, `${name}-approved.txt`);
+    await writeFile(approvedTarget, "keep");
+    const approvedInput = request(approvedFixture.root, { source, arguments: { path: approvedTarget } });
+    const awaitingApproval = await approvedFixture.runtime.execute(approvedInput);
+    const approval = (await approvedFixture.runtime.decisions.list())[0];
+    await approvedFixture.runtime.decisions.decide(approval.id, true);
+    const approved = await approvedFixture.runtime.execute(approvedInput);
+    assert.equal(approved.status, "succeeded", JSON.stringify(approved));
+    assert.equal(approved.runId, awaitingApproval.runId);
+    assert.equal(await readFile(approvedTarget, "utf8"), expected);
+    assert.deepEqual(approved.affectedFiles, [{ operation: "write_file", paths: [approvedTarget] }]);
+  }
+});
+
 test("an outside-root approval is consumed once and replay does not repeat writes", async (t) => {
   const { root, outside, runtime } = await fixture(t);
   const target = path.join(outside, "approved.txt");
