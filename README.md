@@ -122,15 +122,45 @@ A successful response contains the selected Revit process and its version inform
 
 If the connection fails, check that the process ID belongs to Revit and that the Drive It add-in loaded successfully.
 
+## Revit broker
+
+The current-user named pipe `\\.\pipe\drive-it-<pid>` retains its session greeting. After reading the greeting, an execution client sends one newline-delimited JSON request and reads one JSON response on that connection:
+
+```json
+{
+  "id": "<run uuid>",
+  "type": "model.execute",
+  "document": { "path": "<canonical path or null>", "uniqueId": "<broker-issued identity or null>" },
+  "workspaceRoot": "<canonical root>",
+  "operations": [{ "type": "read_document", "arguments": {} }]
+}
+```
+
+Document operations are `open_document`, `create_document`, `read_document`, `save_document`, `save_as_document`, `close_document`, and `delete_document`. Typed model changes are `create_level`, `create_wall`, `create_family_type`, and `delete_element`. Consecutive model changes run in one Revit transaction through `ExternalEvent`. The response's `document.uniqueId` remains bound to the same Revit document across save-as.
+
+Responses have `succeeded`, `failed`, `partially_applied`, or `policy_required` status and list observed `changes`, `affectedFiles`, `affectedElements`, and `checks`. Before any mutation, the broker canonicalizes the complete batch, including links and junctions. An uncovered outside-root read or effect returns `policy_required` with `policyRequests`. Node can retry with an operator decision:
+
+```json
+{
+  "outsideRootApproval": {
+    "decisionId": "<node-generated decision>",
+    "grants": [{ "operation": "save_as_document", "paths": ["<resolved path>"] }]
+  }
+}
+```
+
+Only the Node broker client may attach this payload; generated Python cannot approve its own request. Grants cover only the matching operation and canonical paths in that execution and are not persisted.
+
 ## Development
 
 Build the self-contained installer package on a development machine with `installer/Build-DriveItPackage.ps1`. The builder runs npm and dotnet only while packaging, downloads the fixed official Node.js/Python runtimes, bundles production dependencies, and creates `artifacts/DriveIt-alpha.zip`.
 
 - `server/index.js` registers the MCP tool and reads session metadata from the named pipe.
-- `src/DriveIt.Revit/App.cs` captures version information during Revit startup and serves that snapshot over the pipe.
+- `src/DriveIt.Revit/App.cs` serves the session greeting and typed requests. `Broker/RevitBroker.cs` raises an external event, and `Broker/DocumentDispatcher.cs` executes document and model operations in Revit's API context.
 - `npm test` starts the MCP server, discovers the tool, and checks the disconnected response. On Windows it also calls the tool against a test pipe and verifies operator state, approvals, and run history.
 - `dotnet build src/DriveIt.Revit -c Release` compiles the Revit 2026 add-in.
-- CI builds the Windows alpha installer and performs an installed-server smoke test. To verify the add-in inside Revit, follow the local setup above.
+- CI builds the Windows alpha installer and performs an installed-server smoke test.
+- `test/revit-broker.integration.ps1` exercises the live broker against a running Revit process. Copy a project template to `C:\DriveIt\broker-fixtures\broker-project.rte` and a family template to `broker-family.rft`, then run `powershell -ExecutionPolicy Bypass -File test/revit-broker.integration.ps1 -ProcessId <pid>`. It writes JSONL receipts to that workspace and uses only disposable model files.
 
 GitHub Actions runs the tests and build on `windows-latest` for pull requests and pushes to `main`. It uses only GitHub-hosted runners; no local runner or Revit installation is required. Live Revit verification is a separate manual check.
 
