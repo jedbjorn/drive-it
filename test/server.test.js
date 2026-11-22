@@ -8,7 +8,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createDriveItServer } from "../server/app.js";
 import { apiReference } from "../server/reference.js";
+import { Runtime } from "../server/runtime.js";
 import { WorkspaceStore } from "../server/workspace.js";
 
 async function clientFor(t, dataDir) {
@@ -75,6 +78,29 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
       ...info,
       connectionIdentity: `current-user:named-pipe:drive-it-${processId}`,
     });
+  }
+});
+
+test("execute_script receipts validate against the advertised output schema", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "drive-it-schema-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const runtime = new Runtime({
+    dataDir: base,
+    sessionReader: async processId => ({ processId, version: "2026", build: "test", connectionIdentity: "test-session" }),
+  });
+  await runtime.workspace.setRoot(base);
+  const { server } = createDriveItServer({ runtime });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "drive-it-schema-test", version: "1" });
+  await client.connect(clientTransport);
+  t.after(() => client.close());
+
+  // listTools caches the output schemas the SDK client then enforces on every call.
+  await client.listTools();
+  for (const source of ["result = {'answer': 42}", "raise ValueError('expected failure')"]) {
+    const result = await client.callTool({ name: "execute_script", arguments: { processId: 123, source } });
+    assert.ok(result.structuredContent.runId, result.content[0].text);
   }
 });
 
