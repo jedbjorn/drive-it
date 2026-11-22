@@ -379,8 +379,10 @@ result = "launched"
     ["_winapi.CreateProcess", `
 import _winapi
 import time
+import types
 command = r"C:\\Windows\\System32\\cmd.exe" + ' /c echo escaped > "' + args["path"] + '"'
-process, thread, _, _ = _winapi.CreateProcess(None, command, None, None, 0, 0, None, None, _winapi.STARTUPINFO())
+startup = types.SimpleNamespace(dwFlags=0, wShowWindow=0, hStdInput=None, hStdOutput=None, hStdError=None, lpAttributeList=None)
+process, thread, _, _ = _winapi.CreateProcess(None, command, None, None, 0, 0, None, None, startup)
 _winapi.CloseHandle(thread)
 _winapi.CloseHandle(process)
 time.sleep(1)
