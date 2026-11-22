@@ -587,6 +587,37 @@ result = _ctypes.call_function(system, (command.encode(),))
   assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
 });
 
+test("direct extension loaders cannot bypass native loading policy or receipt effects", async (t) => {
+  const { root, outside, runtime } = await fixture(t);
+  const target = path.join(outside, "extension-loader-escape.txt");
+  await writeFile(target, "keep");
+  const source = `
+import importlib.machinery
+import os
+directory = os.path.join(os.path.dirname(os.__file__), "DLLs" if os.name == "nt" else "lib-dynload")
+extension = os.path.join(directory, "_ctypes" + importlib.machinery.EXTENSION_SUFFIXES[0])
+loader = importlib.machinery.ExtensionFileLoader("_ctypes", extension)
+_ctypes = loader.load_module()
+library = "msvcrt.dll" if os.name == "nt" else "libc.so.6"
+libc = _ctypes.dlopen(library)
+system = _ctypes.dlsym(libc, "system")
+command = 'echo native-escape> "' + args["path"] + '"' if os.name == "nt" else 'printf native-escape > "' + args["path"] + '"'
+result = _ctypes.call_function(system, (command.encode(),))
+`;
+  const receipt = await runtime.execute(request(root, { source, arguments: { path: target } }));
+  assert.equal(receipt.status, "failed", JSON.stringify(receipt));
+  assert.equal(receipt.error.type, "ImportError");
+  assert.match(receipt.error.message, /native loading are disabled/);
+  assert.equal(receipt.result, null);
+  assert.equal(await readFile(target, "utf8"), "keep");
+  assert.deepEqual(receipt.changes, []);
+  assert.deepEqual(receipt.affectedFiles, []);
+  assert.deepEqual(receipt.policyRequests, []);
+  assert.deepEqual(receipt.policyDecisionIds, []);
+  assert.deepEqual(await runtime.decisions.list(), []);
+  assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
+});
+
 test("Windows process launches cannot write outside the root or produce success receipts", { skip: process.platform !== "win32" }, async (t) => {
   for (const [name, source] of [
     ["os.startfile", `
