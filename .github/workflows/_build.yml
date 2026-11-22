@@ -1,0 +1,67 @@
+name: _build (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version without the leading v; empty for push and pull request builds.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Test and build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Stamp release version
+        if: inputs.version != ''
+        shell: pwsh
+        run: npm version "${{ inputs.version }}" --no-git-tag-version
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Run Node.js tests
+        run: npm test
+
+      - name: Build Revit add-in
+        shell: pwsh
+        run: |
+          $buildArgs = @("src/DriveIt.Revit", "-c", "Release", "--nologo")
+          if ("${{ inputs.version }}") {
+            $buildArgs += "-p:Version=${{ inputs.version }}"
+          }
+          dotnet build @buildArgs
+
+      - name: Stage add-in and MCP server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = "src/DriveIt.Revit/bin/Release/net8.0-windows"
+          $stage = "stage/DriveIt"
+          New-Item -ItemType Directory -Force "$stage/DriveIt", "$stage/server" | Out-Null
+          Copy-Item "$build/DriveIt.Revit.dll" "$stage/DriveIt/"
+          Copy-Item "$build/DriveIt.addin" "$stage/"
+          Copy-Item "server/index.js" "$stage/server/"
+          Copy-Item "package.json", "package-lock.json", "README.md", "LICENSE" "$stage/"
+          Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DriveIt
+          path: stage/
+          if-no-files-found: error
+          retention-days: 7
