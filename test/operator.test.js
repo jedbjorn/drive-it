@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -27,7 +27,7 @@ test("operator persists roots, binds one-time decisions, and retains run history
 });
 
 test("direct operator commands persist the root, decide requests, and read history", async (t) => {
-  const base = await mkdtemp(path.join(tmpdir(), "drive-it-operator-"));
+  const base = await realpath(await mkdtemp(path.join(tmpdir(), "drive-it-operator-")));
   const root = path.join(base, "workspace");
   const dataDir = path.join(base, "data");
   await mkdir(root);

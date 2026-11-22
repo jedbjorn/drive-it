@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,7 +7,7 @@ import { Runtime } from "../server/runtime.js";
 import { runWorker } from "../server/worker.js";
 
 async function fixture(t, options = {}) {
-  const base = await mkdtemp(path.join(tmpdir(), "drive-it-test-"));
+  const base = await realpath(await mkdtemp(path.join(tmpdir(), "drive-it-test-")));
   const root = path.join(base, "workspace");
   const outside = path.join(base, "outside");
   const dataDir = path.join(base, "data");
