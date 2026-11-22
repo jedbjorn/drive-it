@@ -92,8 +92,6 @@ def _create_file_policy(protocol_in, protocol_out):
     fspath = os.fspath
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
     request_id = 0
-    mediated_depth = 0
-    import_depth = 0
     call_stack = []
 
     def request(method, params):
@@ -135,79 +133,38 @@ def _create_file_policy(protocol_in, protocol_out):
     def protected_profile(*args):
         raise RuntimeError("Execution profiling is managed by the Drive It worker.")
 
-    def mediate(function, *args, **kwargs):
-        nonlocal mediated_depth
-        mediated_depth += 1
-        try:
-            return function(*args, **kwargs)
-        finally:
-            mediated_depth -= 1
+    def protected_getprofile():
+        return None
 
-    def policy_open(file, mode="r", *args, **kwargs):
-        operation = "read_file" if all(flag not in mode for flag in "wax+") else "write_file"
-        result = authorize(operation, [file])
-        canonical = result["requests"][0]["paths"][0]
-        handle = mediate(original_open, canonical, mode, *args, **kwargs)
-        record(operation, [canonical])
-        return handle
+    def file_rename(source, destination):
+        original_functions["rename"](source, destination)
+        return abspath(fspath(destination))
 
-    def policy_os_open(file, flags, *args, **kwargs):
-        operation = "write_file" if flags & write_flags else "read_file"
-        result = authorize(operation, [file])
-        canonical = result["requests"][0]["paths"][0]
-        descriptor = mediate(original_os_open, canonical, flags, *args, **kwargs)
-        record(operation, [canonical])
-        return descriptor
+    def file_move(source, destination):
+        original_functions["rename"](source, destination)
+        return abspath(fspath(destination))
 
-    def one(operation, function):
-        def wrapped(path, *args, **kwargs):
-            result = authorize(operation, [path])
-            canonical = result["requests"][0]["paths"][0]
-            observed = mediate(function, canonical, *args, **kwargs)
-            record(operation, [canonical])
-            return observed
-        return wrapped
-
-    def two(operation, function):
-        def wrapped(source, destination, *args, **kwargs):
-            result = authorize(operation, [source, destination])
-            canonical = result["requests"][0]["paths"]
-            observed = mediate(function, canonical[0], canonical[1], *args, **kwargs)
-            record(operation, canonical)
-            return observed
-        return wrapped
-
-    def file_rename(operation, source, destination):
-        result = authorize(operation, [source, destination])
-        canonical = result["requests"][0]["paths"]
-        mediate(original_functions["rename"], canonical[0], canonical[1])
-        record(operation, canonical)
-        return canonical[1]
+    def file_replace(source, destination):
+        original_functions["replace"](source, destination)
+        return abspath(fspath(destination))
 
     def file_delete(path):
-        result = authorize("delete_file", [path])
-        canonical = result["requests"][0]["paths"][0]
-        is_directory = stat_module.S_ISDIR(mediate(original_functions["stat"], canonical).st_mode)
+        is_directory = stat_module.S_ISDIR(original_functions["stat"](path).st_mode)
         function = original_functions["rmdir"] if is_directory else original_functions["remove"]
-        mediate(function, canonical)
-        record("delete_file", [canonical])
-        return canonical
+        function(path)
+        return abspath(fspath(path))
 
     def importing(*args, **kwargs):
-        nonlocal import_depth
-        import_depth += 1
-        try:
-            return original_import(*args, **kwargs)
-        finally:
-            import_depth -= 1
+        return original_import(*args, **kwargs)
 
     def audit(event, arguments):
-        if mediated_depth:
-            return
-        if import_depth and event in {"open", "os.listdir", "os.scandir"}:
+        if event in {"open", "os.listdir", "os.scandir"}:
             frame = getframe(1)
             if frame.f_code.co_filename.startswith("<frozen importlib"):
-                return
+                while frame:
+                    if frame.f_code is importing.__code__:
+                        return
+                    frame = frame.f_back
 
         paths = []
         if event == "open":
@@ -218,6 +175,13 @@ def _create_file_policy(protocol_in, protocol_out):
             paths = [file]
         elif event in {"os.rename", "os.link", "os.symlink"}:
             operation = "rename_file" if event == "os.rename" else "link_file"
+            if event == "os.rename":
+                frame = getframe(1)
+                while frame:
+                    if frame.f_code in {file_move.__code__, file_replace.__code__}:
+                        operation = "move_file"
+                        break
+                    frame = frame.f_back
             paths = list(arguments[:2])
         else:
             operations = {
@@ -234,6 +198,13 @@ def _create_file_policy(protocol_in, protocol_out):
                 "os.scandir": "read_directory",
             }
             operation = operations.get(event)
+            if event == "os.rmdir":
+                frame = getframe(1)
+                while frame:
+                    if frame.f_code is file_delete.__code__:
+                        operation = "delete_file"
+                        break
+                    frame = frame.f_back
             if operation:
                 paths = [arguments[0]]
         if not operation:
@@ -245,17 +216,17 @@ def _create_file_policy(protocol_in, protocol_out):
     sys.addaudithook(audit)
     sys.setprofile(profile)
     sys.setprofile = protected_profile
+    sys.getprofile = protected_getprofile
     return {
-        "open": policy_open,
-        "os_open": policy_os_open,
+        "open": original_open,
+        "os_open": original_os_open,
         "import": importing,
-        "rename": lambda source, destination: file_rename("rename_file", source, destination),
-        "move": lambda source, destination: file_rename("move_file", source, destination),
+        "rename": file_rename,
+        "move": file_move,
         "delete": file_delete,
-        **{name: one("read_metadata" if name in {"stat", "lstat", "access"} else "read_directory" if name in {"listdir", "scandir"} else "write_directory" if name in {"mkdir", "makedirs"} else "delete_directory" if name == "rmdir" else "delete_file", function)
-           for name, function in original_functions.items() if name not in {"rename", "replace"}},
-        "rename_os": two("rename_file", original_functions["rename"]),
-        "replace": two("move_file", original_functions["replace"]),
+        **{name: function for name, function in original_functions.items() if name not in {"rename", "replace"}},
+        "rename_os": original_functions["rename"],
+        "replace": file_replace,
     }
 
 

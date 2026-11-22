@@ -135,6 +135,7 @@ files.delete(args["c"])
   assert.equal(receipt.status, "succeeded", receipt.error?.message);
   assert.equal(receipt.result, "two");
   assert.equal(await exists(path.join(root, "c.txt")), false);
+  assert.deepEqual(receipt.changes.map(effect => effect.operation), ["write_file", "write_file", "rename_file", "move_file", "delete_file"]);
   assert.deepEqual(await runtime.decisions.list(), []);
 });
 
@@ -158,6 +159,8 @@ test("direct stdlib effects and saved-original escapes require decisions and rec
   for (const [name, source, expected] of [
     ["unwrapped-os-truncate", "import os\nos.truncate(args[\"path\"], 0)", ""],
     ["profile-tamper-os-truncate", "import os\nimport sys\ntry:\n    sys.setprofile(None)\nexcept RuntimeError:\n    pass\nos.truncate(args[\"path\"], 0)", ""],
+    ["profile-state-tamper-os-truncate", "import os\nimport sys\nclass DisabledStack:\n    def append(self, item):\n        pass\n    def __bool__(self):\n        return False\ntry:\n    profile = sys.getprofile()\n    for cell in profile.__closure__ or ():\n        if isinstance(cell.cell_contents, list):\n            cell.cell_contents = DisabledStack()\nexcept (AttributeError, TypeError):\n    pass\nos.truncate(args[\"path\"], 0)", ""],
+    ["closure-tamper-open", "import sys\ntry:\n    mediate = next(cell.cell_contents for cell in files.policy[\"open\"].__closure__ if getattr(cell.cell_contents, \"__name__\", \"\") == \"mediate\")\n    for cell in mediate.__closure__ or ():\n        if type(cell.cell_contents) is int:\n            cell.cell_contents = 1\nexcept (AttributeError, TypeError, StopIteration):\n    pass\nsys.modules[\"__main__\"]._original_open(args[\"path\"], \"w\").write(\"escaped\")", "escaped"],
     ["saved-original-open", "import sys\nsys.modules[\"__main__\"]._original_open(args[\"path\"], \"w\").write(\"escaped\")", "escaped"],
   ]) {
     const deniedFixture = await fixture(t);
@@ -169,6 +172,7 @@ test("direct stdlib effects and saved-original escapes require decisions and rec
     assert.equal((await deniedFixture.runtime.decisions.list()).length, 1);
     assert.equal(await readFile(deniedTarget, "utf8"), "keep");
     assert.deepEqual(pending.affectedFiles, []);
+    assert.deepEqual(pending.changes, []);
 
     const decision = (await deniedFixture.runtime.decisions.list())[0];
     await deniedFixture.runtime.decisions.decide(decision.id, false);
@@ -176,6 +180,7 @@ test("direct stdlib effects and saved-original escapes require decisions and rec
     assert.equal(denied.status, "denied", JSON.stringify(denied));
     assert.equal(await readFile(deniedTarget, "utf8"), "keep");
     assert.deepEqual(denied.affectedFiles, []);
+    assert.deepEqual(denied.changes, []);
 
     const approvedFixture = await fixture(t);
     const approvedTarget = path.join(approvedFixture.outside, `${name}-approved.txt`);
@@ -189,6 +194,7 @@ test("direct stdlib effects and saved-original escapes require decisions and rec
     assert.equal(approved.runId, awaitingApproval.runId);
     assert.equal(await readFile(approvedTarget, "utf8"), expected);
     assert.deepEqual(approved.affectedFiles, [{ operation: "write_file", paths: [approvedTarget] }]);
+    assert.deepEqual(approved.changes, [{ operation: "write_file", paths: [approvedTarget] }]);
   }
 });
 
