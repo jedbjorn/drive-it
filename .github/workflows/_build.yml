@@ -62,6 +62,31 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Build the Windows alpha MSI
+        shell: pwsh
+        run: installer/Build-DriveItMsi.ps1
+
+      - name: Verify MSI install and uninstall
+        shell: pwsh
+        run: test/msi.Tests.ps1 -MsiPath artifacts/DriveIt-alpha.msi -LogDirectory "$env:RUNNER_TEMP/msi-logs"
+
+      - name: Publish MSI logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drive-it-msi-logs
+          path: ${{ runner.temp }}/msi-logs
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish the Windows alpha MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: drive-it-msi
+          path: artifacts/DriveIt-alpha.msi
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Stage add-in and MCP server
         shell: pwsh
         run: |

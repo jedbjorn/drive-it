@@ -117,10 +117,16 @@ $staging = Join-Path $install ('.staging-' + [Guid]::NewGuid().ToString('N'))
 $backup = Join-Path $install ('.backup-' + [Guid]::NewGuid().ToString('N'))
 $stagedApp = Join-Path $staging 'app'
 $hadExistingApp = $false
+# The MSI lays the package out in the install root itself; register those files in place.
+$inPlace = [IO.Path]::GetFullPath((Join-Path $source 'app')).TrimEnd('\') -ieq $app.TrimEnd('\')
 
 try {
-    [IO.Directory]::CreateDirectory($staging) | Out-Null
-    Copy-Item -LiteralPath (Join-Path $source 'app') -Destination $stagedApp -Recurse
+    if ($inPlace) {
+        $stagedApp = $app
+    } else {
+        [IO.Directory]::CreateDirectory($staging) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $source 'app') -Destination $stagedApp -Recurse
+    }
 
     $node = Join-Path $stagedApp 'runtimes\node\node.exe'
     $python = Join-Path $stagedApp 'runtimes\python\python.exe'
@@ -150,11 +156,13 @@ try {
         throw 'The installed MCP server failed its stdio discovery check.'
     }
 
-    if ([IO.Directory]::Exists($app)) {
-        Move-Item -LiteralPath $app -Destination $backup
-        $hadExistingApp = $true
+    if (-not $inPlace) {
+        if ([IO.Directory]::Exists($app)) {
+            Move-Item -LiteralPath $app -Destination $backup
+            $hadExistingApp = $true
+        }
+        Move-Item -LiteralPath $stagedApp -Destination $app
     }
-    Move-Item -LiteralPath $stagedApp -Destination $app
 
     $installedNode = Join-Path $app 'runtimes\node\node.exe'
     $installedPython = Join-Path $app 'runtimes\python\python.exe'
