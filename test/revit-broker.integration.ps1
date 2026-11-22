@@ -56,6 +56,8 @@ $outsideDirectory = Join-Path $env:TEMP "drive-it-outside-$runId"
 $junction = Join-Path $WorkspaceRoot "broker-link-$runId"
 $outsideRvt = Join-Path $junction "broker-outside.rvt"
 $canonicalOutsideRvt = Join-Path $outsideDirectory "broker-outside.rvt"
+$danglingLink = Join-Path $WorkspaceRoot "broker-dangling-$runId.rvt"
+$canonicalDanglingOutsideRvt = Join-Path $outsideDirectory "broker-dangling-outside.rvt"
 
 function Invoke-Broker([hashtable]$Request) {
     if (-not $Request.ContainsKey("id")) {
@@ -105,6 +107,11 @@ function Document-Target([string]$UniqueId) {
 
 New-Item -ItemType Directory -Force $outsideDirectory | Out-Null
 New-Item -ItemType Junction -Path $junction -Target $outsideDirectory | Out-Null
+& cmd.exe /c mklink $danglingLink $canonicalDanglingOutsideRvt | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to create the dangling file symbolic link."
+}
+Assert-True (([System.IO.File]::GetAttributes($danglingLink) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) "The dangling destination is not a reparse point."
 Assert-True (Test-Path $projectTemplate -PathType Leaf) "Missing in-root project template $projectTemplate"
 Assert-True (Test-Path $familyTemplate -PathType Leaf) "Missing in-root family template $familyTemplate"
 
@@ -148,6 +155,36 @@ try {
     $outsideDeleted = Invoke-Broker $outsideDelete
     Assert-Status $outsideDeleted "succeeded"
     Assert-True (-not (Test-Path $canonicalOutsideRvt)) "The approved outside-root delete did not remove the file."
+
+    $danglingRequest = @{
+        document = $null
+        operations = @(
+            @{ type = "create_document"; arguments = @{ kind = "rvt"; templatePath = $projectTemplate } },
+            @{ type = "save_as_document"; arguments = @{ destinationPath = $danglingLink; overwrite = $true } }
+        )
+    }
+    $danglingPolicy = Invoke-Broker $danglingRequest
+    Assert-Status $danglingPolicy "policy_required"
+    Assert-True ($danglingPolicy.changes.Count -eq 0) "The dangling-link policy denial reported changes."
+    Assert-True (-not (Test-Path $canonicalDanglingOutsideRvt)) "The dangling-link policy denial created the outside-root file."
+    $danglingSavePolicy = $danglingPolicy.policyRequests | Where-Object { $_.operation -eq "save_as_document" } | Select-Object -First 1
+    Assert-True ($null -ne $danglingSavePolicy) "The dangling-link save was not included in policyRequests."
+    Assert-True ($danglingSavePolicy.paths[0] -eq $canonicalDanglingOutsideRvt) "The dangling-link destination was not resolved outside the root."
+
+    $danglingRequest.outsideRootApproval = @{
+        decisionId = "integration-dangling-$runId"
+        grants = @(@{ operation = "save_as_document"; paths = @($canonicalDanglingOutsideRvt) })
+    }
+    $danglingSaved = Invoke-Broker $danglingRequest
+    Assert-Status $danglingSaved "succeeded"
+    Assert-True (Test-Path $canonicalDanglingOutsideRvt -PathType Leaf) "The approved dangling-link save did not create the resolved file."
+    Assert-True ($danglingSaved.affectedFiles -contains $canonicalDanglingOutsideRvt) "The dangling-link receipt omitted the resolved affected path."
+    Assert-True ($danglingSaved.document.path -eq $canonicalDanglingOutsideRvt) "The dangling-link document receipt did not retain the resolved path."
+    $danglingClosed = Invoke-Broker @{
+        document = Document-Target $danglingSaved.document.uniqueId
+        operations = @(@{ type = "close_document"; arguments = @{} })
+    }
+    Assert-Status $danglingClosed "succeeded"
 
     $created = Invoke-Broker @{
         document = $null
@@ -290,6 +327,7 @@ try {
         checks = @(
             "policy_required_preflight_and_junction_resolution",
             "approved_outside_root_save_and_delete",
+            "dangling_file_symlink_denial_and_exact_grant",
             "rvt_create_read_identity_save_as",
             "model_rejection_commit_and_rollback",
             "rvt_save_close_reopen_observed_effects",
@@ -300,6 +338,7 @@ try {
     } | ConvertTo-Json -Depth 6
 }
 finally {
+    [System.IO.File]::Delete($danglingLink)
     if (Test-Path $junction) {
         [System.IO.Directory]::Delete($junction)
     }

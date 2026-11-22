@@ -79,7 +79,21 @@ public static class WorkspacePolicy
 
     private static string? ResolveLink(string path)
     {
-        FileSystemInfo? info = Directory.Exists(path) ? new DirectoryInfo(path) : File.Exists(path) ? new FileInfo(path) : null;
-        return info?.ResolveLinkTarget(true)?.FullName;
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) == 0)
+            return null;
+        FileSystemInfo info = (attributes & FileAttributes.Directory) != 0
+            ? new DirectoryInfo(path)
+            : new FileInfo(path);
+        return info.ResolveLinkTarget(true)?.FullName;
     }
 }
