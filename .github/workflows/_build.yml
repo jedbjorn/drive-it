@@ -68,7 +68,7 @@ jobs:
       - name: Stamp release version
         if: inputs.version != ''
         shell: pwsh
-        run: npm version "${{ inputs.version }}" --no-git-tag-version
+        run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
 
       - name: Install Node.js dependencies
         run: npm ci
