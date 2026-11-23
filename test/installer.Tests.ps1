@@ -96,6 +96,8 @@ $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
 Assert-InstallerTest ($shortcut.TargetPath -eq $operatorExe) "The shortcut does not open the operator window: [$($shortcut.TargetPath) $($shortcut.Arguments)]."
 $addin = [xml](Get-Content -LiteralPath $addinPath -Raw)
 Assert-InstallerTest ($addin.RevitAddIns.AddIn.Assembly -eq (Join-Path $InstallRoot 'app\addin\DriveIt.Revit.dll')) 'The add-in manifest points to the wrong assembly.'
+$addinName = $addin.RevitAddIns.AddIn.SelectSingleNode('Name').InnerText
+Assert-InstallerTest ($addinName -ceq 'Drive-It') "The add-in manifest is named '$addinName', not 'Drive-It'."
 $addinHash = (Get-FileHash -LiteralPath $addinPath -Algorithm SHA256).Hash
 
 $env:DRIVE_IT_DATA_DIR = $InstallRoot

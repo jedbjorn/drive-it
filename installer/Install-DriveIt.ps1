@@ -219,6 +219,13 @@ try {
     $addinPath = Join-Path $addinDirectory 'DriveIt.addin'
     $addin = [xml](Get-Content -LiteralPath (Join-Path $app 'addin\DriveIt.addin') -Raw)
     $addin.RevitAddIns.AddIn.Assembly = [string](Join-Path $app 'addin\DriveIt.Revit.dll')
+    # The RST family name; RST's tray and the companion contract (C6) read it.
+    # SelectSingleNode: on an XmlElement, .Name is the element's own tag name.
+    $addinName = $addin.RevitAddIns.AddIn.SelectSingleNode('Name')
+    if ($null -eq $addinName) {
+        $addinName = $addin.RevitAddIns.AddIn.AppendChild($addin.CreateElement('Name'))
+    }
+    $addinName.InnerText = 'Drive-It'
     $addinTemporary = Join-Path $addinDirectory ('.DriveIt-' + [Guid]::NewGuid().ToString('N') + '.tmp')
     $addinBackup = $addinTemporary + '.bak'
     try {

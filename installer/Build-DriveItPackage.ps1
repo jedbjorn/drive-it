@@ -12,6 +12,8 @@ $nodeVersion = '22.16.0'
 $pythonVersion = '3.12.9'
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '..')).ProviderPath
 $package = [IO.Path]::GetFullPath($OutputPath)
+# package.json carries the version (CI stamps it from the release tag); the published binaries get it too.
+$project = Get-Content -LiteralPath (Join-Path $repository 'package.json') -Raw | ConvertFrom-Json
 $archive = "$package.zip"
 
 if ([IO.Directory]::Exists($package)) {
@@ -49,7 +51,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'dotnet could not restore the Drive It Revit add-in.'
     }
-    & dotnet publish $projectPath -c Release --no-self-contained --no-restore -o (Join-Path $app 'addin')
+    & dotnet publish $projectPath -c Release --no-self-contained --no-restore "-p:Version=$($project.version)" -o (Join-Path $app 'addin')
     if ($LASTEXITCODE -ne 0) {
         throw 'dotnet could not build the Drive It Revit add-in.'
     }
@@ -60,7 +62,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'dotnet could not restore the Drive-It operator window.'
     }
-    & dotnet publish $operatorProject -c Release --no-self-contained --no-restore -o (Join-Path $app 'operator')
+    & dotnet publish $operatorProject -c Release --no-self-contained --no-restore "-p:Version=$($project.version)" -o (Join-Path $app 'operator')
     if ($LASTEXITCODE -ne 0) {
         throw 'dotnet could not build the Drive-It operator window.'
     }
@@ -93,7 +95,6 @@ try {
         }
     }
 
-    $project = Get-Content -LiteralPath (Join-Path $repository 'package.json') -Raw | ConvertFrom-Json
     $manifest = [ordered]@{
         schemaVersion = 1
         name = 'drive-it'

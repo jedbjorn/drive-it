@@ -1,5 +1,30 @@
 name: _build (reusable)
 
+# The one build pipeline, shared by build.yml (pull requests and pushes to main) and release.yml
+# (v* tags), so a release builds exactly what CI builds.
+#
+# Artifacts (consumers: release.yml, acceptance tooling via `gh run download -n drive-it-msi`):
+#   drive-it-windows-alpha  DriveIt-alpha.zip, the script-installer package
+#   drive-it-msi            DriveIt-alpha.msi, the per-user MSI (release.yml renames it to
+#                           DriveIt-<version>.msi)
+#   DriveIt                 the add-in and server bundle release.yml zips
+#
+# The MSI is checked against the RST companion contract twice: installer/inspect-msi.ps1 reads
+# its tables (C1-C3, name, version, ARP icon and links, Revit 2026 launch condition, process stop,
+# 450 MB limit), and test/msi.Tests.ps1 installs it for real with the tray's command line
+# (launch condition, upgrade from a lower-version build of the same package, blocked downgrade,
+# ARP name and version, C6 add-in, uninstall; every exit 0, never 3010).
+#
+# Code signing (input sign; true only from release.yml for a pushed v* tag while the repository
+# variable SIGNING_ENABLED is 'true', see RELEASING.md): the job then joins environment
+# "signing" (OIDC to Azure Artifact Signing; endpoint, account and profile from that environment's
+# variables) and Authenticode-signs every first-party DriveIt.*.dll/.exe in the package before the
+# zip and the MSI pack them, then the MSI. Bundled Node.js and Python keep their vendors'
+# signatures. installer/verify-signatures.ps1 then fails the job unless the MSI and every
+# first-party binary in it and in the staged bundle is validly signed and timestamped. On every
+# other build no job names the signing environment, the sign steps are skipped, and the same
+# script checks that nothing is signed.
+
 on:
   workflow_call:
     inputs:
@@ -8,6 +33,13 @@ on:
         type: string
         required: false
         default: ''
+      sign:
+        description: >-
+          Authenticode-sign the first-party binaries and the MSI (environment "signing").
+          release.yml passes true only for a pushed v* tag with SIGNING_ENABLED on.
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -16,6 +48,13 @@ jobs:
   check:
     name: Test and build
     runs-on: windows-latest
+    # The signing environment only on a signing run; otherwise the name is empty and the job
+    # deploys to no environment. id-token: write lets azure/login exchange the job's OIDC token;
+    # only the skipped-unless-signing login steps ask for one.
+    environment: ${{ inputs.sign && 'signing' || '' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,6 +97,71 @@ jobs:
         shell: pwsh
         run: installer/Build-DriveItPackage.ps1
 
+      # Signing run only: copy the first-party binaries (app\addin, app\operator) to one folder,
+      # sign that folder, and copy them back, so the bundled runtimes are never signed.
+      - name: Collect the first-party binaries to sign
+        if: inputs.sign
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = (Resolve-Path artifacts/DriveIt-alpha/app).Path
+          $pe = @(Get-ChildItem "$app/addin", "$app/operator" -Recurse -File | Where-Object { $_.Extension -in '.dll', '.exe' })
+          $foreign = @($pe | Where-Object { $_.Name -notlike 'DriveIt.*' })
+          $foreign | ForEach-Object { Write-Host "::error::$($_.FullName) is not a Drive-It binary; decide whether it ships and is signed" }
+          if ($foreign.Count -or -not $pe.Count) { exit 1 }
+          foreach ($file in $pe) {
+            $relative = $file.FullName.Substring($app.Length + 1)
+            $target = Join-Path "$env:RUNNER_TEMP/sign" $relative
+            New-Item -ItemType Directory -Force (Split-Path -Parent $target) | Out-Null
+            Copy-Item -LiteralPath $file.FullName -Destination $target
+            Write-Host $relative
+          }
+
+      # Logged in right before each signing step: the federated assertion is short-lived.
+      - name: Azure login (OIDC, binaries)
+        if: inputs.sign
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the first-party binaries
+        if: inputs.sign
+        uses: Azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files-folder: ${{ runner.temp }}\sign
+          files-folder-filter: dll,exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Designs/OS Drive-It
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Put the signed binaries back and repack the zip
+        if: inputs.sign
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sign = (Resolve-Path "$env:RUNNER_TEMP/sign").Path
+          Get-ChildItem $sign -Recurse -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path 'artifacts/DriveIt-alpha/app' $_.FullName.Substring($sign.Length + 1)) -Force
+          }
+          Compress-Archive -Path artifacts/DriveIt-alpha/* -DestinationPath artifacts/DriveIt-alpha.zip -Force
+
       - name: Verify current-user installation
         shell: pwsh
         run: test/installer.Tests.ps1 -PackagePath "$PWD/artifacts/DriveIt-alpha" -InstallRoot "$env:TEMP/DriveIt-installed" -FixtureDirectory "$env:TEMP/DriveIt-installer-test"
@@ -74,9 +178,92 @@ jobs:
         shell: pwsh
         run: installer/Build-DriveItMsi.ps1
 
-      - name: Verify MSI install and uninstall
+      # Version: package.json after the stamp above (the tag without v on a release).
+      - name: Inspect the MSI (companion contract)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          & ./installer/inspect-msi.ps1 -Msi artifacts/DriveIt-alpha.msi -Version $version
+          exit $LASTEXITCODE
+
+      - name: Resolve the MSI path for signing
+        if: inputs.sign
+        id: msi-full
         shell: pwsh
-        run: test/msi.Tests.ps1 -MsiPath artifacts/DriveIt-alpha.msi -LogDirectory "$env:RUNNER_TEMP/msi-logs"
+        run: Add-Content -Path $env:GITHUB_OUTPUT -Value "path=$((Resolve-Path artifacts/DriveIt-alpha.msi).Path)"
+
+      - name: Azure login (OIDC, MSI)
+        if: inputs.sign
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the MSI
+        if: inputs.sign
+        uses: Azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files: ${{ steps.msi-full.outputs.path }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Designs/OS Drive-It
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      # From the package's published (and, on a signing run, signed) add-in, so the release zip
+      # carries the same bytes as the MSI.
+      - name: Stage add-in and MCP server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $addin = "artifacts/DriveIt-alpha/app/addin"
+          $stage = "stage/DriveIt"
+          New-Item -ItemType Directory -Force "$stage/DriveIt", "$stage/server" | Out-Null
+          Copy-Item "$addin/DriveIt.Revit.dll", "$addin/DriveIt.UI.dll", "$addin/DriveIt.Core.dll" "$stage/DriveIt/"
+          if (Test-Path "$addin/Resources/icons") {
+            Copy-Item "$addin/Resources" "$stage/DriveIt/" -Recurse
+          }
+          Copy-Item "src/DriveIt.Revit/DriveIt.addin" "$stage/"
+          Copy-Item "server/index.js" "$stage/server/"
+          Copy-Item "package.json", "package-lock.json", "README.md", "LICENSE" "$stage/"
+          Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName }
+
+      # Signing run: the MSI and every first-party binary in it and in the staged bundle must be
+      # validly signed by AnJ Arch-Tech LLC and timestamped. Any other run: none may be signed.
+      - name: Verify signatures (MSI, its binaries, the staged bundle)
+        shell: powershell
+        env:
+          SIGN: ${{ inputs.sign }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extra = @{}
+          if ($env:SIGN -ne 'true') { $extra['Unsigned'] = $true }
+          & ./installer/verify-signatures.ps1 -Msi artifacts/DriveIt-alpha.msi -Folders stage/DriveIt @extra
+          exit $LASTEXITCODE
+
+      # The same package at a lower ProductVersion: the "previous release" msi.Tests.ps1 upgrades
+      # from and the downgrade it must block. Test-only, never uploaded.
+      - name: Build the lower-version MSI for the upgrade test
+        shell: pwsh
+        run: installer/Build-DriveItMsi.ps1 -Version 0.0.0 -OutputPath "$env:RUNNER_TEMP/DriveIt-lower.msi"
+
+      - name: Verify MSI install, upgrade, downgrade and uninstall
+        shell: pwsh
+        run: test/msi.Tests.ps1 -MsiPath artifacts/DriveIt-alpha.msi -LowerMsiPath "$env:RUNNER_TEMP/DriveIt-lower.msi" -LogDirectory "$env:RUNNER_TEMP/msi-logs"
 
       - name: Publish MSI logs
         if: failure()
@@ -94,22 +281,6 @@ jobs:
           path: artifacts/DriveIt-alpha.msi
           if-no-files-found: error
           retention-days: 7
-
-      - name: Stage add-in and MCP server
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $build = "src/DriveIt.Revit/bin/Release/net8.0-windows"
-          $stage = "stage/DriveIt"
-          New-Item -ItemType Directory -Force "$stage/DriveIt", "$stage/server" | Out-Null
-          Copy-Item "$build/DriveIt.Revit.dll", "$build/DriveIt.UI.dll", "$build/DriveIt.Core.dll" "$stage/DriveIt/"
-          if (Test-Path "$build/Resources/icons") {
-            Copy-Item "$build/Resources" "$stage/DriveIt/" -Recurse
-          }
-          Copy-Item "$build/DriveIt.addin" "$stage/"
-          Copy-Item "server/index.js" "$stage/server/"
-          Copy-Item "package.json", "package-lock.json", "README.md", "LICENSE" "$stage/"
-          Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName }
 
       - uses: actions/upload-artifact@v4
         with:

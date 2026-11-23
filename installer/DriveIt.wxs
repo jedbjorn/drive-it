@@ -1,20 +1,76 @@
 <!--
-  Per-user Drive It alpha MSI (unsigned). The MSI owns the package files under
-  %LOCALAPPDATA%\DriveIt; Install-DriveIt.ps1 then verifies the runtimes, runs the
-  MCP smoke check, and registers the Revit add-in, MCP configuration, and shortcut
-  in place. Uninstall-DriveIt.ps1 removes those registrations; user data stays.
+  Per-user Drive-It MSI, an RST family companion (rst-c companions/README.md, C1-C7).
+  The MSI owns the package files under %LOCALAPPDATA%\DriveIt; Install-DriveIt.ps1 then
+  verifies the runtimes, runs the MCP smoke check, and registers the Revit add-in, MCP
+  configuration, and shortcut in place. Uninstall-DriveIt.ps1 removes those registrations;
+  user data stays. installer/inspect-msi.ps1 checks the built MSI against the contract.
 
-  Build: wix build installer/DriveIt.wxs -arch x64 -ext WixToolset.Util.wixext
-         -bindpath pkg=<package directory> -d Version=<x.y.z> -o DriveIt.msi
+  Build: installer/Build-DriveItMsi.ps1, which runs
+         wix build installer/DriveIt.wxs -arch x64 -ext WixToolset.Util.wixext
+         -bindpath pkg=<package directory> -d Version=<x.y.z> -d StopCommand=<base64> -o <msi>
+
+  Silent and reboot-free (C4): RST's tray runs
+    msiexec /i DriveIt-X.Y.Z.msi /qn /norestart MSIRESTARTMANAGERCONTROL=Disable
+  and counts 3010 as a failure. With the Restart Manager off, any file still open when the
+  old version is removed or the new one is written is queued for a reboot, so
+  StopDriveItProcesses ends Drive-It's own processes first (see below). Revit is never
+  stopped: a running Revit holding DriveIt.Revit.dll is the one known 3010 case.
+
+  UpgradeCode is the stable identity of the product. NEVER change it: it is how Windows
+  Installer upgrades a prior install in place, and RST's tray depends on it.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Drive It" Manufacturer="Designs/OS" Version="$(Version)"
+  <Package Name="Drive-It" Manufacturer="Designs/OS" Version="$(Version)"
            UpgradeCode="6561188A-BD8D-43A9-B116-BA0894F8001B" Scope="perUser" Language="1033">
+    <SummaryInformation Description="Drive-It: MCP server and add-in for Autodesk Revit 2026" />
+
+    <!-- Default schedule (afterInstallValidate): the old version is removed before anything
+         new is installed. A newer installed version is never downgraded (C3). -->
     <MajorUpgrade AllowSameVersionUpgrades="yes"
-                  DowngradeErrorMessage="A newer version of Drive It is already installed." />
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Settings > Apps identity and links, as the sibling companions. -->
+    <Icon Id="DriveItIcon.ico" SourceFile="$(sys.SOURCEFILEDIR)branding\driveit.ico" />
+    <Property Id="ARPPRODUCTICON" Value="DriveItIcon.ico" />
     <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/jedbjorn/drive-it#install" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/jedbjorn/drive-it" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/jedbjorn/drive-it/releases/latest" />
+
+    <!-- Revit 2026 detection, the same AppSearch pair as splash-it installer/Product.wxs:
+         REVIT2026FOUND is the path of Revit.exe when either search finds it (a search that
+         finds nothing leaves the property alone, so the two act as an OR):
+           1. the folder in InstallLocation of Revit 2026's uninstall entry (64-bit HKLM);
+           2. the default folder, C:\Program Files\Autodesk\Revit 2026\.
+         A folder without Revit.exe (a leftover) does not count. -->
+    <Property Id="REVIT2026FOUND" Secure="yes">
+      <RegistrySearch Id="Revit2026InstallLocation" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7346B4A0-2600-0510-0000-705C0D862004}"
+                      Name="InstallLocation" Type="directory" Bitness="always64">
+        <DirectorySearch Id="Revit2026ExeInInstallLocation" Depth="0">
+          <FileSearch Name="Revit.exe" />
+        </DirectorySearch>
+      </RegistrySearch>
+      <DirectorySearch Id="Revit2026ExeInDefaultFolder"
+                       Path="[ProgramFiles64Folder]Autodesk\Revit 2026" Depth="0">
+        <FileSearch Name="Revit.exe" />
+      </DirectorySearch>
+    </Property>
+
+    <!-- A first install needs Revit 2026. "Installed" keeps repair and uninstall available
+         on a computer that no longer has it (an uninstall must always work). -->
+    <Launch Condition="Installed OR REVIT2026FOUND"
+            Message="Drive-It needs Autodesk Revit 2026, and it was not found on this computer." />
+
+    <!-- An administrative install (msiexec /a) only unpacks files; inspect-msi.ps1 and
+         verify-signatures.ps1 use one on a CI runner without Revit. -->
+    <AdminUISequence>
+      <LaunchConditions Suppress="yes" />
+    </AdminUISequence>
+    <AdminExecuteSequence>
+      <LaunchConditions Suppress="yes" />
+    </AdminExecuteSequence>
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="DriveIt" />
@@ -23,6 +79,24 @@
     <Feature Id="Main">
       <Files Directory="INSTALLFOLDER" Include="!(bindpath.pkg)\**" />
     </Feature>
+
+    <!-- Stops every process whose image is under %LOCALAPPDATA%\DriveIt\app (the private
+         node.exe an MCP client keeps running, its python.exe worker, DriveIt.Operator.exe)
+         before InstallValidate, so neither the removal of the old version
+         (RemoveExistingProducts) nor this install's file operations meet a file in use.
+         Immediate, because RemoveExistingProducts runs before InstallInitialize where no
+         deferred action can precede it. The script cannot come from the install folder: on
+         an upgrade that folder still holds the previous version, which may not have it. So
+         Build-DriveItMsi.ps1 embeds installer/Stop-DriveItProcesses.ps1 as an encoded
+         command. It runs after FindRelatedProducts and LaunchConditions, so a blocked
+         downgrade or a computer without Revit stops nothing. Return="ignore": a failure
+         here surfaces as the file-in-use 3010 it exists to prevent. The command is a plain
+         Property (no length limit) that WixQuietExec formats when it runs, which resolves
+         [System64Folder]; base64 holds no brackets for the formatter to touch. -->
+    <Property Id="WixQuietExecCmdLine"
+              Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $(StopCommand)" />
+    <CustomAction Id="StopDriveItProcesses" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec"
+                  Execute="immediate" Return="ignore" />
 
     <!-- "[INSTALLFOLDER]." keeps the trailing backslash from escaping the closing quote. -->
     <SetProperty Id="RegisterDriveIt" Sequence="execute" Before="RegisterDriveIt"
@@ -36,6 +110,7 @@
                   Execute="deferred" Impersonate="yes" Return="ignore" />
 
     <InstallExecuteSequence>
+      <Custom Action="StopDriveItProcesses" Before="InstallValidate" />
       <Custom Action="RegisterDriveIt" After="InstallFiles" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom Action="UnregisterDriveIt" Before="RemoveFiles"
               Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />

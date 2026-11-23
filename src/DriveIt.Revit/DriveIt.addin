@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <RevitAddIns>
   <AddIn Type="Application">
-    <Name>Drive It</Name>
+    <Name>Drive-It</Name>
     <Assembly>DriveIt\DriveIt.Revit.dll</Assembly>
     <AddInId>297ec490-5eed-4e02-92c6-766c1f725deb</AddInId>
     <FullClassName>DriveIt.Revit.App</FullClassName>
