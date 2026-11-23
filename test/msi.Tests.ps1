@@ -104,7 +104,8 @@ function Invoke-Msiexec {
 }
 
 function Get-ComProperty($Object, [string]$Name, [object[]]$Arguments = @()) {
-    return $Object.GetType().InvokeMember($Name, [Reflection.BindingFlags]::GetProperty, $null, $Object, $Arguments)
+    # The comma keeps an enumerable COM result (RelatedProducts' StringList) from unrolling.
+    return , $Object.GetType().InvokeMember($Name, [Reflection.BindingFlags]::GetProperty, $null, $Object, $Arguments)
 }
 
 function Get-MsiProperty([string]$Package, [string]$Name) {
