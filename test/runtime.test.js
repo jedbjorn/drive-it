@@ -541,7 +541,10 @@ test("every published Revit example matches the typed broker contract and execut
     const { root, runtime } = await fixture(t, {
       brokerExecutor: async (processId, envelope) => {
         envelopes.push(envelope);
-        return { id: envelope.id, status: "succeeded", changes: [], affectedFiles: [], affectedElements: [], checks: [] };
+        // Plays DocumentDispatcher: create_3d_view answers with createdViews and a decimal-string id.
+        const createdViews = envelope.operations[0].type === "create_3d_view"
+          ? [{ id: "354981", name: "3D View 1", type: "ThreeD" }] : undefined;
+        return { id: envelope.id, status: "succeeded", changes: [], affectedFiles: [], affectedElements: [], checks: [], createdViews };
       },
     });
     const receipt = await runtime.execute(request(root, {
@@ -553,6 +556,13 @@ test("every published Revit example matches the typed broker contract and execut
     assert.equal(envelopes[0].operations.length, 1, name);
     const operation = envelopes[0].operations[0];
     assert.equal(operation.type, name);
+    if (name === "create_3d_view") {
+      assert.match(documented.results, /createdViews: \[\{id, name, type\}\]/);
+      assert.deepEqual(receipt.createdViews, [{ id: "354981", name: "3D View 1", type: "ThreeD" }]);
+      assert.deepEqual(receipt.result.createdViews, receipt.createdViews);
+    } else {
+      assert.deepEqual(receipt.createdViews, [], name);
+    }
     assert.deepEqual(Object.keys(operation.arguments).sort(), required.sort(), name);
     for (const [key, expected] of Object.entries(contract.arguments)) {
       if (["path", "destinationPath", "templatePath"].includes(key)) {
@@ -562,6 +572,40 @@ test("every published Revit example matches the typed broker contract and execut
       }
     }
   }
+});
+
+test("created views reach the receipt and run history without result, also when the run fails later", async (t) => {
+  const view = { id: "9007199254740993", name: "QA 3D", type: "ThreeD" };
+  const { root, runtime } = await fixture(t, {
+    brokerExecutor: async (processId, envelope) => ({
+      id: envelope.id,
+      status: "succeeded",
+      document: { path: null, uniqueId: "doc-handle", kind: "rvt" },
+      changes: [`Created 3D view '${view.name}' (${view.id}).`],
+      affectedFiles: [],
+      affectedElements: [Number(view.id)],
+      createdViews: [view],
+      checks: [{ name: "transaction_commit", passed: true }],
+    }),
+  });
+
+  const plain = await runtime.execute(request(root, { idempotencyKey: "view-no-result", source: "revit.create_3d_view(name='QA 3D')" }));
+  assert.equal(plain.status, "succeeded", plain.error?.message);
+  assert.equal(plain.result, null);
+  assert.deepEqual(plain.createdViews, [view]);
+  assert.equal(typeof plain.createdViews[0].id, "string");
+  assert.deepEqual((await runtime.execute(request(root, { idempotencyKey: "view-no-result", source: "revit.create_3d_view(name='QA 3D')" }))).createdViews, [view]);
+
+  const partial = await runtime.execute(request(root, {
+    idempotencyKey: "view-then-raise",
+    source: "revit.create_3d_view(name='QA 3D')\nraise RuntimeError('a later step failed')",
+  }));
+  assert.equal(partial.status, "partially_applied");
+  assert.match(partial.error.message, /a later step failed/);
+  assert.deepEqual(partial.createdViews, [view]);
+
+  const history = await runtime.history.list();
+  assert.deepEqual(history.find(receipt => receipt.runId === partial.runId).createdViews, [view]);
 });
 
 test("closing a document clears the selected handle for the next open or create", async (t) => {

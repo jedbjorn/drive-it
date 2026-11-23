@@ -325,6 +325,7 @@ export class ScriptCatalog {
         revitVersion: receipt.session?.version ?? null,
         affectedFiles: receipt.affectedFiles,
         affectedElements: receipt.affectedElements,
+        createdViews: receipt.createdViews ?? [],
         error: receipt.error,
         startedAt: receipt.startedAt,
         completedAt: receipt.completedAt,

@@ -113,6 +113,7 @@ export class Runtime {
       changes: [],
       affectedFiles: [],
       affectedElements: [],
+      createdViews: [],
       checks: [],
       policyDecisionIds: [],
       policyRequests: [],
@@ -128,6 +129,7 @@ export class Runtime {
       changes: receipt.changes,
       affectedFiles: receipt.affectedFiles,
       affectedElements: receipt.affectedElements,
+      createdViews: receipt.createdViews,
       checks: receipt.checks,
     };
     let temporary;
@@ -253,6 +255,7 @@ export class Runtime {
     append(context.changes, response.changes);
     append(context.affectedFiles, response.affectedFiles);
     append(context.affectedElements, response.affectedElements);
+    append(context.createdViews, response.createdViews);
     append(context.checks, response.checks);
     if (response.document) context.receipt.document = documentWithKind(response.document);
   }

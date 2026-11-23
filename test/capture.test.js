@@ -142,6 +142,39 @@ test("launch root, retention mode, and PNG parsing", () => {
   assert.equal(pngDimensions(Buffer.from("not a png at all, just some bytes long enough to parse......")), null);
 });
 
+test("execute_script exposes createdViews and its id feeds capture_revit_view", async (t) => {
+  const launchRoot = await base(t, "created-view");
+  const view = { id: "354981", name: "Drive It QA 3D", type: "ThreeD" };
+  const envelopes = [];
+  let createdId = view.id;
+  const capturer = fakeBroker({ envelopes, receipt: { viewId: view.id, viewName: view.name, viewType: view.type } });
+  const brokerExecutor = async (processId, envelope, options) => envelope.type === "model.execute"
+    ? {
+      id: envelope.id, status: "succeeded", document: DOCUMENT, changes: [`Created 3D view '${view.name}'.`],
+      affectedFiles: [], affectedElements: [Number(view.id)], checks: [], createdViews: [{ ...view, id: createdId }],
+    }
+    : capturer(processId, envelope, options);
+  const { client, runtime } = await connected(t, { launchRoot, dataDir: path.join(launchRoot, "data"), brokerExecutor });
+  await mkdir(path.join(launchRoot, "ws"));
+  await runtime.workspace.setRoot(path.join(launchRoot, "ws"));
+
+  const run = await client.callTool({ name: "execute_script", arguments: {
+    processId: 4242, displayName: "Create a QA 3D view", source: "revit.create_3d_view(name='Drive It QA 3D')", idempotencyKey: "qa-view",
+  } });
+  assert.ok(!run.isError, run.content[0].text);
+  assert.deepEqual(run.structuredContent.createdViews, [view]);
+  const shot = await capture(client, { document: { uniqueId: DOCUMENT.uniqueId }, viewId: run.structuredContent.createdViews[0].id });
+  assert.ok(!shot.isError, shot.content[0].text);
+  assert.equal(envelopes.at(-1).envelope.capture.viewId, view.id);
+
+  // A numeric id (the precision loss the string id avoids) does not pass the published output schema.
+  createdId = Number(view.id);
+  const numeric = await client.callTool({ name: "execute_script", arguments: {
+    processId: 4242, displayName: "Create another QA 3D view", source: "revit.create_3d_view()", idempotencyKey: "qa-view-numeric",
+  } }).then(result => result, error => ({ isError: true, content: [{ text: error.message }] }));
+  assert.equal(numeric.isError, true);
+});
+
 test("discovery carries the visual QA rule and honest annotations", async (t) => {
   const launchRoot = await base(t, "discover");
   const { client } = await connected(t, { launchRoot, brokerExecutor: fakeBroker() });

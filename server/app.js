@@ -151,6 +151,9 @@ export function createDriveItServer(options = {}) {
       changes: z.array(z.unknown()),
       affectedFiles: z.array(z.unknown()),
       affectedElements: z.array(z.unknown()),
+      // Optional only so receipts stored before create_3d_view still replay; new receipts always carry it.
+      createdViews: z.array(z.object({ id: z.string(), name: z.string(), type: z.string() }).passthrough()).optional()
+        .describe("Views created by this run, e.g. by create_3d_view; pass id to capture_revit_view as viewId"),
       checks: z.array(z.unknown()),
       policyDecisionIds: z.array(z.string()),
       policyRequests: z.array(z.unknown()),
@@ -243,6 +246,7 @@ export function createDriveItServer(options = {}) {
         revitVersion: z.string().nullable(),
         affectedFiles: z.array(z.unknown()),
         affectedElements: z.array(z.unknown()),
+        createdViews: z.array(z.unknown()),
         error: z.unknown().nullable(),
         startedAt: z.string(),
         completedAt: z.string().nullable(),
