@@ -199,9 +199,11 @@ function Get-PngSize([string]$Path) {
 
 $markedViews = [System.Collections.Generic.List[string]]::new()
 
-# Element marks: a marked capture keeps the export's size and returns a well-formed legend, a
-# capture without marks returns none, requested ids get reasons, and a malformed id or a view kind
-# without marks fails with no file left. $NotMarkable is an existing id of a kind never marked here.
+# Element marks: a category-scoped capture keeps the export's size and returns a well-formed legend
+# inside its scope, a capture without a scope returns none, requested ids get reasons, levels and
+# grids get no marks in 3D, and a malformed id or a bad category list fails with no file left.
+# $NotMarkable is an existing id of a kind never marked here.
+$markScope = @("OST_Walls", "OST_Floors", "OST_GenericModel", "OST_Levels", "OST_Grids")
 function Test-Marks([string]$DocumentId, [string]$Kind, [object[]]$Views, [string]$NotMarkable) {
     foreach ($type in @("FloorPlan", "ThreeD", "Elevation", "Section")) {
         $view = $Views | Where-Object { $_.type -eq $type } | Select-Object -First 1
@@ -209,7 +211,7 @@ function Test-Marks([string]$DocumentId, [string]$Kind, [object[]]$Views, [strin
         $plain = Invoke-Capture $DocumentId $view.id
         Assert-Captured $plain "$Kind $type without marks"
         Assert-True ($null -eq (Get-Field $plain.capture "marks")) "$Kind ${type}: a capture without marks returned marks."
-        $shot = Invoke-Capture $DocumentId $view.id 512 @{ marks = $true }
+        $shot = Invoke-Capture $DocumentId $view.id 512 @{ markCategories = $markScope }
         Assert-Captured $shot "$Kind $type marked"
         Assert-True ((Get-PngSize $shot.capture.outputPath) -eq (Get-PngSize $plain.capture.outputPath)) "$Kind ${type}: the marked image changed size."
         $marks = Get-Field $shot.capture "marks"
@@ -220,6 +222,8 @@ function Test-Marks([string]$DocumentId, [string]$Kind, [object[]]$Views, [strin
         foreach ($row in @(Get-Field $marks "legend")) {
             $number++
             Assert-True ($row.mark -eq $number -and $row.elementId -match '^[1-9][0-9]*$') "$Kind ${type}: legend row $number is malformed."
+            Assert-True ($markScope -contains $row.category) "$Kind ${type}: mark $number is $($row.category), outside the scope."
+            Assert-True (-not ($type -eq "ThreeD" -and $row.category -in @("OST_Levels", "OST_Grids"))) "$Kind ${type}: a level or grid was marked in 3D."
             $bounds = Get-Field $row "bounds"
             if ($null -ne $bounds) {
                 Assert-True ($row.x -ge $bounds.x -and $row.x -le $bounds.x + $bounds.width -and $row.y -ge $bounds.y -and $row.y -le $bounds.y + $bounds.height) "$Kind ${type}: mark $number lies outside its bounds."
@@ -235,6 +239,13 @@ function Test-Marks([string]$DocumentId, [string]$Kind, [object[]]$Views, [strin
     Assert-True ($reasons["999999999"] -eq "not_found" -and $reasons[$NotMarkable] -eq "not_markable" -and $reasons.Count -eq 2) "$Kind markElementIds reasons were $($reasons | ConvertTo-Json -Compress)."
     Assert-True (@($requested.capture.marks.legend).Count -eq 0) "$Kind markElementIds marked an element that was not requested."
     Assert-CaptureRejected (Invoke-Capture $DocumentId $view.id 512 @{ markElementIds = @("12a") }) "invalid_element_id" "$Kind malformed mark id"
+    $union = Invoke-Capture $DocumentId $view.id 512 @{ markCategories = @("OST_Walls"); markElementIds = @("999999999") }
+    Assert-Captured $union "$Kind 3D markCategories with markElementIds"
+    Assert-True (@($union.capture.marks.notMarked).Count -eq 1 -and $union.capture.marks.notMarked[0].reason -eq "not_found") "$Kind union: the requested id got no not_found row."
+    $six = @("OST_Walls", "OST_Doors", "OST_Windows", "OST_Floors", "OST_Roofs", "OST_Columns")
+    foreach ($categories in @(@(), $six, @("Doors"), @("OST_Door"), @("OST_Rooms"), @("OST_TextNotes"))) {
+        Assert-CaptureRejected (Invoke-Capture $DocumentId $view.id 512 @{ markCategories = $categories }) "invalid_mark_category" "$Kind markCategories $($categories -join ',')"
+    }
 }
 
 $modelRejections = [System.Collections.Generic.List[string]]::new()

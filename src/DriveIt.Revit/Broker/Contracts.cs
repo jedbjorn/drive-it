@@ -25,9 +25,9 @@ public sealed class CaptureRequest
     public string? ViewId { get; set; }
     public int PixelSize { get; set; }
     public string TargetPath { get; set; } = "";
-    /// <summary>Draw element marks on the exported PNG. The server sends it only when marks are requested.</summary>
-    public bool Marks { get; set; }
-    /// <summary>Limits marks to these decimal element ids; supplying it implies Marks.</summary>
+    /// <summary>Marks the elements of these BuiltInCategory member names (1 to 5). With MarkElementIds, the union.</summary>
+    public List<string>? MarkCategories { get; set; }
+    /// <summary>Marks these decimal element ids. Either scope turns marks on; neither leaves the capture unmarked.</summary>
     public List<string>? MarkElementIds { get; set; }
 }
 

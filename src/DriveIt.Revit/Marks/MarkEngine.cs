@@ -73,6 +73,7 @@ internal sealed class MarkEngine
     private readonly Document document;
     private readonly View view;
     private readonly IReadOnlyList<long>? requested;
+    private readonly HashSet<BuiltInCategory> categories;
     private readonly bool isPlan;
     private readonly bool isThreeD;
     private int width;
@@ -80,11 +81,16 @@ internal sealed class MarkEngine
     private List<ClipPlane> planes = [];
     private Projection projection = null!;
 
-    public MarkEngine(Document document, View view, IReadOnlyList<long>? requested)
+    /// <summary>
+    /// The scope is the union of the requested ids and the elements of the requested categories.
+    /// Every element the view draws still occludes; only scope elements are placed or counted.
+    /// </summary>
+    public MarkEngine(Document document, View view, IReadOnlyList<long>? requested, IEnumerable<BuiltInCategory> categories)
     {
         this.document = document;
         this.view = view;
         this.requested = requested;
+        this.categories = [.. categories];
         isPlan = view.ViewType is ViewType.FloorPlan or ViewType.CeilingPlan or ViewType.EngineeringPlan;
         isThreeD = view is View3D;
     }
@@ -111,6 +117,46 @@ internal sealed class MarkEngine
         return null;
     }
 
+    private static readonly HashSet<string> CategoryNames = [.. Enum.GetNames(typeof(BuiltInCategory))];
+
+    /// <summary>
+    /// Why a markCategories entry is refused, or null with its category: the name must be a
+    /// BuiltInCategory member name, and a category never marked in any view is refused. Levels and
+    /// grids are accepted; a 3D view just marks none of them.
+    /// </summary>
+    public static string? CategoryRefusal(Document document, string name, out BuiltInCategory category)
+    {
+        category = BuiltInCategory.INVALID;
+        if (!name.StartsWith("OST_", StringComparison.Ordinal) || !CategoryNames.Contains(name)
+            || !Enum.TryParse(name, ignoreCase: false, out category))
+            return "it is not a BuiltInCategory member name; use the API name as a legend row's category returns it, such as OST_Walls or OST_Doors, not the display name";
+        if (category is BuiltInCategory.OST_Levels or BuiltInCategory.OST_Grids)
+            return null;
+        Category? found;
+        try
+        {
+            found = Category.GetCategory(document, category);
+        }
+        catch (Exception)
+        {
+            found = null;
+        }
+        if (NeverMarked(category) || category is BuiltInCategory.OST_CLines or BuiltInCategory.OST_RvtLinks
+            || (found is not null && found.CategoryType != CategoryType.Model))
+            return "elements of that category are never marked (annotations, rooms, areas, spaces, lines, reference planes and links get no marks)";
+        return null;
+    }
+
+    /// <summary>Model categories that are never marked: spatial elements, lines, cameras, base points and the like.</summary>
+    private static bool NeverMarked(BuiltInCategory category) =>
+        category is BuiltInCategory.OST_Cameras or BuiltInCategory.OST_SectionBox
+            or BuiltInCategory.OST_Rooms or BuiltInCategory.OST_Areas or BuiltInCategory.OST_MEPSpaces
+            or BuiltInCategory.OST_RoomSeparationLines or BuiltInCategory.OST_AreaSchemeLines
+            or BuiltInCategory.OST_SketchLines or BuiltInCategory.OST_Lines or BuiltInCategory.OST_PointClouds
+            or BuiltInCategory.OST_ProjectBasePoint or BuiltInCategory.OST_SharedBasePoint
+            or BuiltInCategory.OST_Viewers or BuiltInCategory.OST_Elev or BuiltInCategory.OST_MEPSpaceSeparationLines
+            or BuiltInCategory.OST_HVAC_Zones or BuiltInCategory.OST_IOSModelGroups;
+
     /// <summary>In a family document a form (extrusion, blend, ...) has no category; it is the family's.</summary>
     private static Category? CategoryOf(Element element) =>
         element.Category ?? (element is GenericForm or FreeFormElement ? element.Document.OwnerFamily?.FamilyCategory : null);
@@ -126,15 +172,7 @@ internal sealed class MarkEngine
         var category = CategoryOf(element);
         if (category is null || category.CategoryType != CategoryType.Model)
             return null;
-        return category.BuiltInCategory is BuiltInCategory.OST_Cameras or BuiltInCategory.OST_SectionBox
-            or BuiltInCategory.OST_Rooms or BuiltInCategory.OST_Areas or BuiltInCategory.OST_MEPSpaces
-            or BuiltInCategory.OST_RoomSeparationLines or BuiltInCategory.OST_AreaSchemeLines
-            or BuiltInCategory.OST_SketchLines or BuiltInCategory.OST_Lines or BuiltInCategory.OST_PointClouds
-            or BuiltInCategory.OST_ProjectBasePoint or BuiltInCategory.OST_SharedBasePoint
-            or BuiltInCategory.OST_Viewers or BuiltInCategory.OST_Elev or BuiltInCategory.OST_MEPSpaceSeparationLines
-            or BuiltInCategory.OST_HVAC_Zones or BuiltInCategory.OST_IOSModelGroups
-            ? null
-            : "model";
+        return NeverMarked(category.BuiltInCategory) ? null : "model";
     }
 
     private sealed class Candidate(Element element, string kind)
@@ -182,12 +220,14 @@ internal sealed class MarkEngine
             byId[candidate.Id] = candidate;
         }
 
-        // Requested ids: those the view does not draw are answered now; the rest are placed below.
+        // The scope: elements of the requested categories, plus the requested ids. Requested ids the
+        // view does not draw are answered now; the rest are placed below.
         var reasons = new Dictionary<long, string>();
-        HashSet<long>? wanted = null;
+        var wanted = new HashSet<long>(byId.Values
+            .Where(c => categories.Contains(CategoryOf(c.Element)?.BuiltInCategory ?? BuiltInCategory.INVALID))
+            .Select(c => c.Id));
         if (requested is not null)
         {
-            wanted = [];
             foreach (var id in requested)
             {
                 var element = document.GetElement(new ElementId(id));
@@ -285,7 +325,7 @@ internal sealed class MarkEngine
 
         var placed = new SpatialHash(radius * 2 + 2);
         PlaceModel(model, ids, clear, regions.Label, confirmed, radius, placed, wanted);
-        foreach (var candidate in datums.Where(c => wanted is null || wanted.Contains(c.Id)))
+        foreach (var candidate in datums.Where(c => wanted.Contains(c.Id)))
             PlaceDatum(candidate, radius, placed, drawn);
 
         // Numbers run in reading order: rows of one mark diameter, top to bottom, then left to right.
@@ -344,7 +384,7 @@ internal sealed class MarkEngine
         // Omitted: may be visible but unmarked, because visibility could not be established or no
         // legible position was free. Elements established as covered or not drawn are not counted.
         receipt.Omitted = model.Concat(datums)
-            .Count(c => (wanted is null || wanted.Contains(c.Id)) && c.Placed is null
+            .Count(c => wanted.Contains(c.Id) && c.Placed is null
                 && (c.Reason == "not_placed" || (c.NoGeometry && c.InFrame)));
 
         counts["candidates"] = model.Count;
@@ -896,7 +936,7 @@ internal sealed class MarkEngine
     /// The most legible elements first: each mark goes on a confirmed pixel the element owns with
     /// the clearance, inside the image, and never over another mark.
     /// </summary>
-    private void PlaceModel(List<Candidate> model, int[] ids, float[] clear, int[] label, bool[] confirmed, int radius, SpatialHash placed, HashSet<long>? wanted)
+    private void PlaceModel(List<Candidate> model, int[] ids, float[] clear, int[] label, bool[] confirmed, int radius, SpatialHash placed, HashSet<long> wanted)
     {
         var counts = new int[model.Count];
         bool Usable(int p) => ids[p] >= 0 && clear[p] >= MinimumClearance && confirmed[label[p]];
@@ -918,7 +958,7 @@ internal sealed class MarkEngine
 
         var spacing = radius * 2 + 2;
         var order = Enumerable.Range(0, model.Count)
-            .Where(i => wanted is null || wanted.Contains(model[i].Id))
+            .Where(i => wanted.Contains(model[i].Id))
             .OrderByDescending(i => model[i].MaxClear).ToList();
         foreach (var i in order)
         {

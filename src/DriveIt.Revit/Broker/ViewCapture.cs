@@ -24,6 +24,7 @@ public sealed partial class DocumentDispatcher
     private const int MaximumOtherViewsPerType = 5;
     private const int PixelTolerance = 2;
     private const string MarksDiagnosticsVariable = "DRIVE_IT_MARKS_DIAGNOSTICS";
+    private const int MaximumMarkCategories = 5;
 
     /// <summary>The graphical model views a capture accepts, in RVT and RFA documents alike.</summary>
     private static readonly HashSet<ViewType> CapturableViewTypes =
@@ -59,12 +60,13 @@ public sealed partial class DocumentDispatcher
                     $"pixelSize must be an integer from {MinimumPixelSize} through {MaximumPixelSize}.");
 
             var markIds = ParseMarkElementIds(capture.MarkElementIds);
-            var marks = capture.Marks || markIds is not null;
+            var marks = markIds is not null || capture.MarkCategories is not null;
 
             // Identity is checked here, in the API context, not when the request was queued.
             var state = ResolveCaptureDocument(application, request.Document, capture.ViewId);
             document = state.Document;
             response.Document = IdentitySnapshot(state);
+            var markCategories = ParseMarkCategories(document, capture.MarkCategories);
             var view = SelectView(application, document, capture.ViewId);
             if (marks && MarkEngine.UnavailableReason(view) is { } unavailable)
                 throw new RequestRejectedException("marks_unavailable",
@@ -98,7 +100,7 @@ public sealed partial class DocumentDispatcher
             }
             receipt.FitDirection = fit.ToString();
             if (marks)
-                receipt.Marks = DrawMarks(document, view, markIds, produced, target, request.Id);
+                receipt.Marks = DrawMarks(document, view, markIds, markCategories, produced, target, request.Id);
             else
                 File.Move(produced, target);
             receipt.DocumentModifiedAfter = document.IsModified;
@@ -138,17 +140,40 @@ public sealed partial class DocumentDispatcher
     }
 
     /// <summary>
+    /// BuiltInCategory member names, de-duplicated in request order; null when none were sent.
+    /// Refuses an empty or over-long list, a name that is not a member, and a category never marked.
+    /// </summary>
+    private static List<BuiltInCategory>? ParseMarkCategories(Document document, List<string>? raw)
+    {
+        if (raw is null)
+            return null;
+        var names = raw.Distinct(StringComparer.Ordinal).ToList();
+        if (names.Count is 0 or > MaximumMarkCategories)
+            throw new RequestRejectedException("invalid_mark_category",
+                $"markCategories must hold 1 to {MaximumMarkCategories} category names; it holds {names.Count}.");
+        var categories = new List<BuiltInCategory>();
+        foreach (var name in names)
+        {
+            if (MarkEngine.CategoryRefusal(document, name, out var category) is { } refusal)
+                throw new RequestRejectedException("invalid_mark_category", $"markCategories holds '{name}': {refusal}.");
+            categories.Add(category);
+        }
+        return categories;
+    }
+
+    /// <summary>
     /// Computes marks from the export and writes the marked image to the target, then removes the
     /// export. Any failure leaves no image at the target, so an unmarked export is never handed
     /// over as a marked one.
     /// </summary>
-    private static MarksReceipt DrawMarks(Document document, View view, List<long>? markIds, string produced, string target, string label)
+    private static MarksReceipt DrawMarks(Document document, View view, List<long>? markIds, List<BuiltInCategory>? markCategories,
+        string produced, string target, string label)
     {
         try
         {
             var timer = Stopwatch.StartNew();
             var (width, height, bgra) = MarkImaging.ReadBgra(produced);
-            var outcome = new MarkEngine(document, view, markIds).Run(width, height, bgra);
+            var outcome = new MarkEngine(document, view, markIds, markCategories ?? []).Run(width, height, bgra);
             MarkImaging.DrawMarks(width, height, bgra, outcome.Draw, outcome.Radius, target);
             var elapsed = timer.ElapsedMilliseconds;
             var diagnostics = Environment.GetEnvironmentVariable(MarksDiagnosticsVariable);

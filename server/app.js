@@ -4,7 +4,7 @@ import { apiReference, API_VERSION } from "./reference.js";
 import { Runtime } from "./runtime.js";
 import { revitContent } from "./content.js";
 import { executeBroker, readSession, resolveProcessId, sessionError } from "./session.js";
-import { launchRootFrom, NOT_MARKED_REASONS, PIXEL_SIZE, ReferenceImages, retentionFrom } from "./capture.js";
+import { launchRootFrom, MAX_MARK_CATEGORIES, NOT_MARKED_REASONS, PIXEL_SIZE, ReferenceImages, retentionFrom } from "./capture.js";
 import { defaultDataDir } from "./store.js";
 import { SCRIPT_ID, summarize as summarizeRow } from "./library.js";
 
@@ -69,7 +69,7 @@ function statusGuidance(receipt) {
 const VISUAL_QA_RULE = "After each modeling round and before reporting it complete: (1) review the run receipts and run explicit checks for the requested outcome; (2) if the round created or changed visible geometry, view graphics, or presentation, call capture_revit_view on at least one relevant existing view, and on more views when one projection cannot show the shape, placement, or clearance; when no suitable 3D view exists, create one with the create_3d_view operation through execute_script first (reuse a 3D view you created earlier in the session rather than creating another), capture the id from the receipt's createdViews, and tell the user you added that view to their model; (3) look at the returned image against the request and the checks, fix a visible discrepancy that is within the request, then repeat the checks and the capture; (4) report what was checked and what remains unverified. If a capture fails or no useful view exists, say that visual evidence is missing; never claim a visual pass you did not see. A round with only non-visual changes may rely on structured checks and say why a capture adds nothing. An image supports the receipts and checks; it does not prove hidden geometry, parameter values, or model quality.";
 
 // Element marks guidance, carried by the server instructions and the tool description.
-const MARKS_GUIDANCE = "Element marks are optional: pass marks: true, or markElementIds, when your next step needs an element id, and leave them off for a clean visual check, because marks cover part of the drawing; judge the model from an unmarked capture and identify elements from a marked one. Each numbered red circle maps through marks.legend to an elementId, API category, family, type, and the pixel bounds of the element's visible part. Only elements established as visible are marked, so no mark does not mean no element. After a run, pass the affected element ids in markElementIds to see where they are; marks.notMarked says why any got no mark. Mark numbers change between captures; carry the elementId forward. Perspective 3D views do not support marks; use an orthographic view. Receipts and structured checks remain the authority.";
+const MARKS_GUIDANCE = "Element marks are optional and need a scope: pass markCategories with the categories you are working on (up to five), or markElementIds with the ids a run affected, or both; leave both off for a clean visual check. Category names are API names as the legend returns them, such as OST_Walls or OST_Doors. Each numbered red circle maps through marks.legend to an elementId, API category, family, type, and the pixel bounds of the element's visible part. Marks are help, not a list of what exists: no mark, an empty legend, or not_visible does not mean the element is absent or hidden. In a plan, families drawn only as symbols, often doors and windows, usually get no mark; a section, elevation or 3D view may mark them. Marks cover part of the drawing, so judge the model from an unmarked capture and identify elements from a marked one. After a run, pass the affected element ids in markElementIds to see where they are; marks.notMarked gives a reason for each one without a mark. Mark numbers change between captures; carry the elementId forward. Perspective 3D views do not support marks; use an orthographic view. Receipts and structured checks remain the authority.";
 
 export const SERVER_INSTRUCTIONS = `Drive It drives a live Autodesk Revit 2026 session. Call get_revit_session first, model with execute_script, and keep its receipts and checks as the authoritative record. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}`;
 
@@ -347,13 +347,18 @@ export function createDriveItServer(options = {}) {
       purpose: z.string().trim().min(1).max(500).describe("Required. The modeling question this capture is meant to verify, e.g. \"Are the four walls closed at the corners?\""),
       relatedRunIds: z.array(z.string().min(1).max(200)).max(50).optional().describe("execute_script runIds this capture verifies"),
       retain: z.boolean().optional().describe("Keep this image after the session ends so the user can review it"),
-      marks: z.boolean().optional().describe("Draw a numbered red circle on each visible element and return marks.legend mapping each number to elementId, category, family, type, and pixel bounds. Default false: use it when you need element ids, not for judging the drawing. Not available in perspective 3D views"),
+      markCategories: z.array(z.string()).optional()
+        .describe(`1 to ${MAX_MARK_CATEGORIES} categories to mark, as API names the legend returns, e.g. ["OST_Doors", "OST_Walls"]; levels and grids are OST_Levels and OST_Grids. Turns marks on for the elements of these categories, together with any markElementIds. Name the categories you are working on`),
       markElementIds: z.array(z.string().max(64)).max(1000).optional()
-        .describe("Element ids as decimal strings, e.g. the ids a run affected. Turns marks on and marks only these; marks.notMarked gives each id that got no mark a reason: not_found, not_markable, not_in_view, not_visible, or not_placed. No mark never means the element is absent: not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted"),
+        .describe("Element ids as decimal strings, e.g. the ids a run affected. Turns marks on for these elements, together with any markCategories; marks.notMarked gives each id that got no mark a reason: not_found, not_markable, not_in_view, not_visible, or not_placed. No mark never means the element is absent: not_visible means no mark could be confirmed, including an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and those count in omitted"),
     },
     outputSchema: {
       ...captureMetadata,
       marks: z.object({
+        scope: z.object({
+          categories: z.array(z.string()),
+          elementIds: z.array(z.string()),
+        }).describe("The scope asked for; the legend holds elements of these categories and these ids only"),
         legend: z.array(z.object({
           mark: z.number().int(),
           elementId: z.string(),
@@ -369,9 +374,9 @@ export function createDriveItServer(options = {}) {
           reason: z.enum(NOT_MARKED_REASONS),
           bounds: pixelBounds.optional(),
         })).optional().describe("Only with markElementIds: each requested id that got no mark"),
-        omitted: z.number().int().describe("Elements that may be visible but got no mark"),
-        notes: z.array(z.string()).describe("The limits that apply to this marked capture"),
-      }).optional().describe("Present only when marks were requested"),
+        omitted: z.number().int().describe("Elements in the scope that may be visible but got no mark"),
+        notes: z.array(z.string()).describe("What a missing mark means and the limits that apply to this marked capture"),
+      }).optional().describe("Present only when markCategories or markElementIds was given"),
       absolutePath: z.string().describe("Where the user can open the PNG"),
       sidecarPath: z.string().describe("Launch-root-relative path of the JSON metadata"),
     },
@@ -401,7 +406,7 @@ export function createDriveItServer(options = {}) {
       let summary = `Captured ${metadata.view.type} view "${metadata.view.name}" (id ${metadata.view.id}) of "${metadata.document.title}" at ${metadata.image.width}x${metadata.image.height}. Inspect the image against the request and the checks before reporting. Saved for the user at ${absolutePath}. ${survives}`;
       if (metadata.marks) {
         const { legend, notMarked, omitted } = metadata.marks;
-        summary += ` Drew ${legend.length} element mark${legend.length === 1 ? "" : "s"}; marks.legend maps each number to its element id${notMarked ? `, and marks.notMarked lists ${notMarked.length} requested id${notMarked.length === 1 ? "" : "s"} without a mark` : ""}. ${omitted} more element${omitted === 1 ? "" : "s"} may be visible without a mark. Read marks.notes.`;
+        summary += ` Drew ${legend.length} element mark${legend.length === 1 ? "" : "s"} for the requested scope; marks.legend maps each number to its element id${notMarked ? `, and marks.notMarked lists ${notMarked.length} requested id${notMarked.length === 1 ? "" : "s"} without a mark` : ""}. ${omitted} more element${omitted === 1 ? "" : "s"} in the scope may be visible without a mark. No mark does not mean no element: check by element id before concluding an element is not there. Read marks.notes.`;
       }
       return {
         content: [

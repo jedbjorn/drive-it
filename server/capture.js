@@ -42,12 +42,18 @@ const START_TOLERANCE_MS = 10_000;
 const ELEMENT_ID = /^[1-9][0-9]{0,18}$/;
 const PLAN_VIEW_TYPES = new Set(["FloorPlan", "CeilingPlan", "EngineeringPlan"]);
 export const NOT_MARKED_REASONS = Object.freeze(["not_found", "not_markable", "not_in_view", "not_visible", "not_placed"]);
-// marks.notes: fixed sentences stating the limits that apply to a marked capture.
+export const MAX_MARK_CATEGORIES = 5;
+// A BuiltInCategory member name as the add-in reads it; the add-in checks membership.
+const CATEGORY_NAME = /^OST_[A-Za-z0-9_]+$/;
+const DATUM_CATEGORIES = new Set(["OST_Levels", "OST_Grids"]);
+// marks.notes: fixed sentences stating what a missing mark means and the limits that apply.
 export const MARK_NOTES = Object.freeze({
+  noMark: "Marks are help in finding elements, not a list of what exists or what is visible. An element with no mark, an empty legend, or a not_visible row may still exist and may still be in the image: not_visible means no mark could be confirmed, including an element whose visibility could not be established, and those count in omitted. Check by element id or a structured check before concluding an element is not there.",
   every: "Each mark names the element in its legend row, and bounds is the pixel rectangle of that element's visible part. Rarely a mark sits on something the image does not show; if a mark looks wrong, check the element by its id before acting.",
   plan: "In plans another element's symbol can be drawn over a marked element; the row's category and bounds say which element the mark names.",
+  planSymbols: "In plans a family drawn only as a symbol, often a door or a window, usually gets no mark and is counted in omitted; a section, elevation or 3D view may mark it.",
   threeD: "In 3D views with transparent graphics a mark can sit on faint lines of an element seen through another.",
-  notVisible: "not_visible means no mark could be confirmed, not that the element is absent: it also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted. Look for the element in the image before you conclude it is not there.",
+  threeDDatums: "Levels and grids are not marked in 3D views.",
 });
 
 export function captureError(code, message, detail) {
@@ -111,6 +117,27 @@ export function markElementIdsFrom(value) {
   return ids;
 }
 
+/** The category names to mark, de-duplicated in order, or null when markCategories was not supplied. */
+export function markCategoriesFrom(value) {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value)) {
+    throw captureError("INVALID_MARK_CATEGORY", "markCategories must be a list of 1 to 5 category API names, such as [\"OST_Doors\"].");
+  }
+  const names = [];
+  for (const [index, name] of value.entries()) {
+    if (typeof name !== "string" || !CATEGORY_NAME.test(name)) {
+      throw captureError("INVALID_MARK_CATEGORY",
+        `markCategories[${index}] is ${JSON.stringify(name)}, which is not a BuiltInCategory API name; use the name a legend row's category returns, such as "OST_Walls" or "OST_Doors", not the display name.`);
+    }
+    if (!names.includes(name)) names.push(name);
+  }
+  if (names.length === 0 || names.length > MAX_MARK_CATEGORIES) {
+    throw captureError("INVALID_MARK_CATEGORY",
+      `markCategories must hold 1 to ${MAX_MARK_CATEGORIES} category names; it holds ${names.length}. Name the categories you are working on.`);
+  }
+  return names;
+}
+
 function boundsFrom(value) {
   if (value === undefined || value === null) return null;
   const { x, y, width, height } = value;
@@ -122,7 +149,8 @@ function boundsFrom(value) {
  * The add-in's marks receipt as the result's marks object, with every documented field present
  * (the pipe omits nulls), or null when it is not a well-formed receipt.
  */
-export function marksFrom(receipt, { requested, viewType }) {
+export function marksFrom(receipt, { scope, viewType }) {
+  const requested = scope.elementIds.length > 0;
   if (!receipt || !Array.isArray(receipt.legend) || !Number.isInteger(receipt.omitted) || receipt.omitted < 0) return null;
   const legend = [];
   for (const row of receipt.legend) {
@@ -140,7 +168,7 @@ export function marksFrom(receipt, { requested, viewType }) {
       bounds,
     });
   }
-  const marks = { legend };
+  const marks = { scope: { categories: [...scope.categories], elementIds: [...scope.elementIds] }, legend };
   if (requested) {
     if (!Array.isArray(receipt.notMarked)) return null;
     marks.notMarked = [];
@@ -153,10 +181,12 @@ export function marksFrom(receipt, { requested, viewType }) {
     }
   }
   marks.omitted = receipt.omitted;
-  marks.notes = [MARK_NOTES.every];
-  if (PLAN_VIEW_TYPES.has(viewType)) marks.notes.push(MARK_NOTES.plan);
-  if (viewType === "ThreeD") marks.notes.push(MARK_NOTES.threeD);
-  if (marks.notMarked?.some(row => row.reason === "not_visible")) marks.notes.push(MARK_NOTES.notVisible);
+  marks.notes = [MARK_NOTES.noMark, MARK_NOTES.every];
+  if (PLAN_VIEW_TYPES.has(viewType)) marks.notes.push(MARK_NOTES.plan, MARK_NOTES.planSymbols);
+  if (viewType === "ThreeD") {
+    marks.notes.push(MARK_NOTES.threeD);
+    if (scope.categories.some(name => DATUM_CATEGORIES.has(name))) marks.notes.push(MARK_NOTES.threeDDatums);
+  }
   return marks;
 }
 
@@ -447,15 +477,17 @@ export class ReferenceImages {
 
   async capture({
     processId, document, viewId, pixelSize = PIXEL_SIZE.default, purpose, relatedRunIds = [], retain = false,
-    marks = false, markElementIds,
+    markCategories, markElementIds,
   }) {
     if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; no capture was taken.");
     if (!Number.isInteger(pixelSize) || pixelSize < PIXEL_SIZE.min || pixelSize > PIXEL_SIZE.max) {
       throw captureError("INVALID_PIXEL_SIZE", `pixelSize must be an integer from ${PIXEL_SIZE.min} through ${PIXEL_SIZE.max}.`);
     }
-    // Supplying markElementIds turns marks on and limits them to those elements.
+    // Either scope turns marks on and limits them to the union of its elements; neither leaves
+    // the capture unmarked.
     const markIds = markElementIdsFrom(markElementIds);
-    const marked = marks === true || markIds !== null;
+    const markNames = markCategoriesFrom(markCategories);
+    const marked = markIds !== null || markNames !== null;
     let directory;
     try {
       directory = await this.ensureSession();
@@ -495,10 +527,8 @@ export class ReferenceImages {
         capture: { viewId: viewId ?? null, pixelSize, targetPath: target },
       };
       // Only a marks request carries marks fields, so a capture without them is unchanged.
-      if (marked) {
-        envelope.capture.marks = true;
-        if (markIds) envelope.capture.markElementIds = markIds;
-      }
+      if (markNames) envelope.capture.markCategories = markNames;
+      if (markIds) envelope.capture.markElementIds = markIds;
       // The Revit version and build come from the pipe greeting of this same connection, so no
       // second connection competes for the single-instance pipe.
       let session = null;
@@ -566,7 +596,8 @@ export class ReferenceImages {
       }
       let markResult = null;
       if (marked) {
-        markResult = marksFrom(receipt.marks, { requested: markIds !== null, viewType: receipt.viewType });
+        const scope = { categories: markNames ?? [], elementIds: markIds ?? [] };
+        markResult = marksFrom(receipt.marks, { scope, viewType: receipt.viewType });
         if (!markResult) {
           throw captureError("MARKS_FAILED", "Revit exported the view but returned no usable marks legend; no image is returned as marked.", { stage: "validate" });
         }
