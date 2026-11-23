@@ -50,6 +50,7 @@ $runId = [guid]::NewGuid().ToString("N")
 $receiptLog = Join-Path $WorkspaceRoot "broker-receipts-$runId.jsonl"
 $projectTemplate = Join-Path $WorkspaceRoot "broker-project.rte"
 $familyTemplate = Join-Path $WorkspaceRoot "broker-family.rft"
+$annotationTemplate = Join-Path $WorkspaceRoot "broker-annotation.rft"
 $rvtPath = Join-Path $WorkspaceRoot "broker-$runId.rvt"
 $rfaPath = Join-Path $WorkspaceRoot "broker-$runId.rfa"
 $outsideDirectory = Join-Path $env:TEMP "drive-it-outside-$runId"
@@ -187,6 +188,22 @@ function Test-ViewCaptures([string]$DocumentId, [string]$Kind, [string[]]$Requir
     return $views
 }
 
+$modelRejections = [System.Collections.Generic.List[string]]::new()
+
+# A rejected or rolled-back model batch reports its code and keeps no effects.
+function Assert-ModelRejected($Response, [string]$Code, [string]$Label) {
+    Assert-Status $Response "failed"
+    $errorCode = Get-Field (Get-Field $Response "error") "code"
+    Assert-True ($errorCode -eq $Code) "${Label}: expected $Code but received ${errorCode}: $(Get-Field (Get-Field $Response 'error') 'message')"
+    Assert-True (@($Response.changes).Count -eq 0 -and @($Response.affectedElements).Count -eq 0 -and $null -eq (Get-Field $Response "createdViews")) "${Label}: the rejection reported effects."
+    $modelRejections.Add("$Label -> $Code")
+}
+
+function Invoke-Create3DView([string]$DocumentId, [object[]]$Names) {
+    $operations = @($Names | ForEach-Object { if ($null -eq $_) { @{ type = "create_3d_view"; arguments = @{} } } else { @{ type = "create_3d_view"; arguments = @{ name = $_ } } } })
+    return Invoke-Broker @{ document = Document-Target $DocumentId; operations = $operations }
+}
+
 # create_3d_view: a named and an unnamed isometric view, a duplicate-name rejection, and a
 # capture of the created view by the id the receipt returned.
 function Test-Create3DView([string]$DocumentId, [string]$Kind) {
@@ -203,6 +220,12 @@ function Test-Create3DView([string]$DocumentId, [string]$Kind) {
     Assert-Status $duplicate "failed"
     Assert-True ((Get-Field (Get-Field $duplicate "error") "code") -eq "duplicate_view_name") "$Kind duplicate 3D view name was not rejected as duplicate_view_name."
     Assert-True ($duplicate.changes.Count -eq 0 -and $null -eq (Get-Field $duplicate "createdViews")) "$Kind duplicate 3D view rejection reported effects."
+    Assert-ModelRejected (Invoke-Create3DView $DocumentId @("Drive It Twin $Kind", "Drive It Twin $Kind")) "duplicate_view_name" "$Kind in-batch duplicate name"
+    Assert-ModelRejected (Invoke-Create3DView $DocumentId @("")) "invalid_model_change" "$Kind empty name"
+    Assert-ModelRejected (Invoke-Create3DView $DocumentId @("Drive It {3D} $Kind")) "invalid_model_change" "$Kind name with a character Revit forbids"
+    $twin = Invoke-Create3DView $DocumentId @("Drive It Twin $Kind")
+    Assert-Status $twin "succeeded"
+    Assert-True (@(Get-Field $twin "createdViews")[0].name -eq "Drive It Twin $Kind") "$Kind a name from a rejected batch was not free afterwards."
     $unnamed = Invoke-Broker @{ document = Document-Target $DocumentId; operations = @(@{ type = "create_3d_view"; arguments = @{} }) }
     Assert-Status $unnamed "succeeded"
     $unnamedView = @(Get-Field $unnamed "createdViews")[0]
@@ -222,6 +245,7 @@ if ($LASTEXITCODE -ne 0) {
 Assert-True (([System.IO.File]::GetAttributes($danglingLink) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) "The dangling destination is not a reparse point."
 Assert-True (Test-Path $projectTemplate -PathType Leaf) "Missing in-root project template $projectTemplate"
 Assert-True (Test-Path $familyTemplate -PathType Leaf) "Missing in-root family template $familyTemplate"
+Assert-True (Test-Path $annotationTemplate -PathType Leaf) "Missing in-root annotation family template $annotationTemplate"
 
 try {
     1..3 | ForEach-Object {
@@ -378,6 +402,10 @@ try {
     Assert-True ($null -eq (Get-Field $rollback "createdViews")) "The rolled-back model batch retained a created view."
     Assert-True ($rollback.affectedElements.Count -eq 0) "The rolled-back model batch retained affected elements."
     Assert-True ($rollback.document.levels.name -notcontains "Drive It Rollback") "The first change survived transaction rollback."
+    # The rolled-back view is gone from the document: its name is free again.
+    $recreated = Invoke-Create3DView $rvtId @("Drive It Rollback 3D")
+    Assert-Status $recreated "succeeded"
+    Assert-True (@(Get-Field $recreated "createdViews")[0].name -eq "Drive It Rollback 3D") "The rolled-back 3D view name could not be re-created."
 
     $saved = Invoke-Broker @{ document = Document-Target $rvtId; operations = @(@{ type = "save_document"; arguments = @{} }) }
     Assert-Status $saved "succeeded"
@@ -452,6 +480,18 @@ try {
     Assert-Status $familyDeleted "succeeded"
     Assert-True (-not (Test-Path $rfaPath)) "The family delete left the file behind."
 
+    # Revit allows no 3D view in an annotation family; the batch rolls back with a specific code.
+    $annotation = Invoke-Broker @{
+        document = $null
+        operations = @(@{ type = "create_document"; arguments = @{ kind = "rfa"; templatePath = $annotationTemplate } })
+    }
+    Assert-Status $annotation "succeeded"
+    $annotationRefused = Invoke-Create3DView $annotation.document.uniqueId @("Drive It Annotation 3D")
+    Assert-ModelRejected $annotationRefused "view_creation_not_allowed" "annotation family"
+    $annotationRollback = $annotationRefused.checks | Where-Object { $_.name -eq "transaction_rollback" } | Select-Object -First 1
+    Assert-True ($null -ne $annotationRollback -and $annotationRollback.passed) "Revit did not confirm rollback of the refused annotation-family view."
+    Assert-Status (Invoke-Broker @{ document = Document-Target $annotation.document.uniqueId; operations = @(@{ type = "close_document"; arguments = @{} }) }) "succeeded"
+
     $revit = Get-Process -Id $ProcessId
     Assert-True $revit.Responding "Revit stopped responding after the broker workflows."
     [ordered]@{
@@ -464,6 +504,7 @@ try {
         captureDirectory = $captureRoot
         capturedViews = @($capturedViews)
         rejectedViews = @($rejectedViews)
+        modelRejections = @($modelRejections)
         checks = @(
             "policy_required_preflight_and_junction_resolution",
             "approved_outside_root_save_and_delete",
@@ -475,7 +516,8 @@ try {
             "rvt_and_rfa_delete",
             "rfa_family_type_save_close_reopen",
             "view_capture_rvt_rfa_export_and_rejections",
-            "create_3d_view_rvt_rfa_duplicate_rollback_capture"
+            "create_3d_view_rvt_rfa_duplicate_rollback_capture",
+            "create_3d_view_name_rules_rollback_recreate_annotation_refusal"
         )
     } | ConvertTo-Json -Depth 6
 }
