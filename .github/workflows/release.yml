@@ -1,5 +1,18 @@
 name: release
 
+# Tag-driven GitHub Release (RELEASING.md). Push a tag on a commit on main:
+#   v<major>.<minor>.<patch>               a full release, the only kind RST's tray installs
+#   v<major>.<minor>.<patch>-<prerelease>  a GitHub prerelease (built and published, never pinned)
+#
+#   1. prepare — validates the tag, resolves the version, and checks the commit is on main.
+#   2. build   — the full _build.yml pipeline against the tagged commit, with that version
+#                stamped (MSI ProductVersion = the numeric a.b.c). Signs when the repository
+#                variable SIGNING_ENABLED is 'true' (environment "signing"; see RELEASING.md).
+#   3. assets  — DriveIt-<version>.msi (exactly one .msi), DriveIt-<version>.zip and
+#                SHA256SUMS.txt over every asset, from the final (signed) bytes; checks the MSI
+#                ProductVersion against the tag and the 450 MB limit.
+#   4. publish — the only job with contents: write; creates the GitHub Release.
+
 on:
   push:
     tags: ['v*']
@@ -23,20 +36,33 @@ jobs:
       - id: version
         env:
           TAG: ${{ github.ref_name }}
+          SIGNING_ENABLED: ${{ vars.SIGNING_ENABLED }}
         run: |
           set -euo pipefail
-          version="${TAG#v}"
-          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
-            echo "::error::$TAG is not v<major>.<minor>.<patch>[-<prerelease>]"
+          full='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          pre='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$'
+          if [[ "$TAG" =~ $full ]]; then
+            prerelease=false
+          elif [[ "$TAG" =~ $pre ]]; then
+            prerelease=true
+          else
+            echo "::error::$TAG is not v<major>.<minor>.<patch> (full release) or v<major>.<minor>.<patch>-<prerelease>"
             exit 1
           fi
-          prerelease=false
-          [[ "$version" == *-* ]] && prerelease=true
+          if (( BASH_REMATCH[1] > 255 || BASH_REMATCH[2] > 255 || BASH_REMATCH[3] > 65535 )); then
+            echo "::error::$TAG exceeds the MSI ProductVersion range (255.255.65535)"
+            exit 1
+          fi
+          version="${TAG#v}"
+          if [[ "$SIGNING_ENABLED" != "true" ]]; then
+            echo "::warning::Signing is off (repository variable SIGNING_ENABLED is not 'true'): $TAG ships unsigned, and RST must not pin it."
+          fi
           {
             echo "version=$version"
             echo "tag=$TAG"
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
+          echo "tag $TAG -> version $version (MSI ProductVersion ${version%%-*}); prerelease=$prerelease"
 
       - uses: actions/checkout@v4
         with:
@@ -50,11 +76,18 @@ jobs:
             exit 1
           fi
 
+  # Signs only for a pushed v* tag while SIGNING_ENABLED is 'true' (the operator turns it on once
+  # the "signing" environment and its variables exist). id-token: write lets _build.yml log in to
+  # Azure (OIDC) when it signs.
   build:
     needs: prepare
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/_build.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
+      sign: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && vars.SIGNING_ENABLED == 'true' }}
 
   assets:
     name: Release assets
@@ -69,18 +102,54 @@ jobs:
         with:
           name: drive-it-msi
           path: msi/
-      - name: Package and checksum the release
+      - name: Install msitools (reads the MSI's Property table)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq msitools
+
+      - name: Package, check and checksum the release
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           asset="DriveIt-$VERSION.zip"
-          installer="DriveIt-$VERSION-x64.msi"
+          installer="DriveIt-$VERSION.msi"
           (cd dist && zip -r "$RUNNER_TEMP/$asset" DriveIt)
           mv "$RUNNER_TEMP/$asset" dist/
           mv msi/DriveIt-alpha.msi "dist/$installer"
           rm -rf dist/DriveIt
-          (cd dist && sha256sum "$asset" "$installer" > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+          ls -l dist/
+
+          # Exactly one .msi, named for RST's asset pattern.
+          shopt -s nullglob
+          msis=(dist/*.msi)
+          if [[ ${#msis[@]} -ne 1 || "${msis[0]}" != "dist/$installer" ]]; then
+            echo "::error::expected exactly dist/$installer, found: ${msis[*]}"
+            exit 1
+          fi
+          # Size: the contract allows 512 MB; fail at 450 MB for headroom.
+          size=$(stat -c %s "dist/$installer")
+          if (( size > 450 * 1024 * 1024 )); then
+            echo "::error::$installer is $size bytes, over the 450 MB limit"
+            exit 1
+          fi
+          # ProductVersion read from the MSI itself: the tag without v (numeric part for a prerelease).
+          product_version=$(msiinfo export "dist/$installer" Property | tr -d '\r' | awk -F '\t' '$1 == "ProductVersion" { print $2 }')
+          if [[ "$product_version" != "${VERSION%%-*}" ]]; then
+            echo "::error::$installer has ProductVersion '$product_version', expected '${VERSION%%-*}' from the tag"
+            exit 1
+          fi
+          product_name=$(msiinfo export "dist/$installer" Property | tr -d '\r' | awk -F '\t' '$1 == "ProductName" { print $2 }')
+          if [[ "$product_name" != "Drive-It" ]]; then
+            echo "::error::$installer has ProductName '$product_name', expected 'Drive-It'"
+            exit 1
+          fi
+          echo "$installer: $size bytes, ProductName $product_name, ProductVersion $product_version"
+
+          # Every asset, from the final (signed) bytes. Written outside dist/ so it cannot list itself.
+          sums="$RUNNER_TEMP/SHA256SUMS.txt"
+          (cd dist && sha256sum -- *) > "$sums"
+          mv "$sums" dist/SHA256SUMS.txt
+          cat dist/SHA256SUMS.txt
+          (cd dist && sha256sum -c SHA256SUMS.txt)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -110,6 +179,6 @@ jobs:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           set -euo pipefail
-          args=(release create "$TAG" dist/* --title "Drive It $TAG" --generate-notes --verify-tag)
+          args=(release create "$TAG" dist/* --title "Drive-It $TAG" --generate-notes --verify-tag)
           [[ "$PRERELEASE" == "true" ]] && args+=(--prerelease)
           gh "${args[@]}"

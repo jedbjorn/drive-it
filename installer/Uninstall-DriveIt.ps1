@@ -12,6 +12,21 @@ Set-StrictMode -Version Latest
 $install = [IO.Path]::GetFullPath($InstallRoot)
 $app = Join-Path $install 'app'
 
+# Stop this install's own processes (an MCP client's node.exe and its python.exe worker, an open
+# DriveIt.Operator.exe window) so their files can be removed without a reboot. The MSI does the
+# same earlier, before InstallValidate (installer/Stop-DriveItProcesses.ps1); this covers script
+# installs. Revit is never stopped.
+$appPrefix = $app.TrimEnd('\') + '\'
+$own = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ExecutablePath -and $_.ExecutablePath.StartsWith($appPrefix, [StringComparison]::OrdinalIgnoreCase)
+})
+foreach ($process in $own) {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+}
+foreach ($process in $own) {
+    Wait-Process -Id $process.ProcessId -Timeout 15 -ErrorAction SilentlyContinue
+}
+
 $node = Join-Path $app 'runtimes\node\node.exe'
 $clientScript = Join-Path $app 'server\clients.js'
 if ([IO.File]::Exists($node) -and [IO.File]::Exists($clientScript)) {
@@ -40,16 +55,6 @@ foreach ($shortcutName in @('Drive-It.lnk', 'Drive It.lnk')) {
         Remove-Item -LiteralPath $shortcutPath -Force
     }
 }
-
-# Close an open Start Menu window from this install so its files can be removed.
-$operatorDirectory = Join-Path $app 'operator'
-Get-Process -Name 'DriveIt.Operator' -ErrorAction SilentlyContinue | Where-Object {
-    try {
-        $_.Path -and $_.Path.StartsWith($operatorDirectory + '\', [StringComparison]::OrdinalIgnoreCase)
-    } catch {
-        $false
-    }
-} | Stop-Process -Force -ErrorAction SilentlyContinue
 
 $mcpPath = Join-Path $install 'mcp.json'
 if ([IO.File]::Exists($mcpPath)) {
