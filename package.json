@@ -25,7 +25,7 @@
     "url": "git+https://github.com/jedbjorn/drive-it.git"
   },
   "bugs": "https://github.com/jedbjorn/drive-it/issues",
-  "homepage": "https://jedbjorn.github.io/drive-it/",
+  "homepage": "https://drive-it.designs-os.com/",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",
     "zod": "4.6.7"
