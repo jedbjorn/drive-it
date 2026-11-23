@@ -2,7 +2,7 @@
 // current user (Claude Desktop, Claude Code, Codex) and removes it again on uninstall.
 // Only clients whose configuration location already exists are touched; every other
 // setting in their configuration is preserved.
-import { copyFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -12,10 +12,28 @@ const END = "# END drive-it";
 // execute_script accepts runs of up to 120 s; Codex otherwise stops waiting at 60 s.
 const CODEX_TOOL_TIMEOUT_SEC = 150;
 
-export function clientTargets({ userProfile, appData, codexHome }) {
+// The Microsoft Store (MSIX) build of Claude Desktop keeps its roaming data inside its
+// package, under <LocalAppData>\Packages\Claude_<publisher>\LocalCache\Roaming\Claude,
+// and never sees %APPDATA%\Claude. LocalAppData is the Roaming folder's sibling.
+async function storeClaudeDirectories(appData) {
+  const packages = path.join(path.dirname(appData), "Local", "Packages");
+  let names;
+  try {
+    names = await readdir(packages);
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+  return names.filter(name => /^Claude_[a-z0-9]+$/i.test(name))
+    .map(name => path.join(packages, name, "LocalCache", "Roaming", "Claude"));
+}
+
+export async function clientTargets({ userProfile, appData, codexHome }) {
   const codex = codexHome || path.join(userProfile, ".codex");
+  const desktop = directory => ({ client: "claude-desktop", detect: directory, file: path.join(directory, "claude_desktop_config.json"), format: "json" });
   return [
-    { client: "claude-desktop", detect: path.join(appData, "Claude"), file: path.join(appData, "Claude", "claude_desktop_config.json"), format: "json" },
+    desktop(path.join(appData, "Claude")),
+    ...(await storeClaudeDirectories(appData)).map(desktop),
     { client: "claude-code", detect: path.join(userProfile, ".claude.json"), file: path.join(userProfile, ".claude.json"), format: "json", stdioType: true },
     { client: "codex", detect: codex, file: path.join(codex, "config.toml"), format: "toml" },
   ];
@@ -127,7 +145,7 @@ export function removeFromJsonConfig(text) {
 
 export async function registerClients(entry, locations) {
   const results = [];
-  for (const target of clientTargets(locations)) {
+  for (const target of await clientTargets(locations)) {
     if (!(await exists(target.detect))) {
       results.push({ client: target.client, status: "not_found" });
       continue;
@@ -148,7 +166,7 @@ export async function registerClients(entry, locations) {
 
 export async function unregisterClients(locations) {
   const results = [];
-  for (const target of clientTargets(locations)) {
+  for (const target of await clientTargets(locations)) {
     try {
       const original = await readText(target.file);
       const next = original === null ? null
