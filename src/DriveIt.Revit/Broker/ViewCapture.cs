@@ -15,7 +15,9 @@ public sealed partial class DocumentDispatcher
     public const string ReferenceImagesDirectoryName = "_reference-images";
     private const int MinimumPixelSize = 256;
     private const int MaximumPixelSize = 2048;
-    private const int MaximumListedViews = 100;
+    // Per view type, so a large model's many plans cannot crowd its 3D views and sections out.
+    private const int MaximumListedViewsPerType = 20;
+    private const int MaximumOtherViewsPerType = 5;
 
     /// <summary>The graphical model views a capture accepts, in RVT and RFA documents alike.</summary>
     private static readonly HashSet<ViewType> CapturableViewTypes =
@@ -172,7 +174,7 @@ public sealed partial class DocumentDispatcher
         {
             // Only this document's own active view; never another document's or an arbitrary view.
             view = document.ActiveView ?? throw new RequestRejectedException("no_active_view",
-                $"'{document.Title}' has no active view (it is not the document shown in Revit's window, for example one Drive It opened in the background). Pass viewId; capturable views are listed in availableViews.");
+                $"'{document.Title}' has no active view (it is not the document shown in Revit's window, for example one Drive It opened in the background). Pass viewId; capturable views (up to 20 per view type) are listed in availableViews.");
         }
         else
         {
@@ -240,6 +242,7 @@ public sealed partial class DocumentDispatcher
     {
         var available = new List<ViewSummary>();
         var other = new List<ViewSummary>();
+        var listed = new Dictionary<string, int>(StringComparer.Ordinal);
         var views = new FilteredElementCollector(document).OfClass(typeof(View)).Cast<View>()
             .Where(view => view.ViewType is not (ViewType.Internal or ViewType.ProjectBrowser
                 or ViewType.SystemBrowser or ViewType.Undefined))
@@ -251,10 +254,12 @@ public sealed partial class DocumentDispatcher
                 : !CapturableViewTypes.Contains(view.ViewType) ? "unsupported_view_type"
                 : !view.CanBePrinted ? "view_not_exportable"
                 : null;
-            var list = reason is null ? available : other;
-            if (list.Count >= MaximumListedViews)
+            var key = $"{reason}:{view.ViewType}";
+            var count = listed.GetValueOrDefault(key);
+            if (count >= (reason is null ? MaximumListedViewsPerType : MaximumOtherViewsPerType))
                 continue;
-            list.Add(new ViewSummary
+            listed[key] = count + 1;
+            (reason is null ? available : other).Add(new ViewSummary
             {
                 Id = view.Id.Value.ToString(CultureInfo.InvariantCulture),
                 Name = view.Name,
