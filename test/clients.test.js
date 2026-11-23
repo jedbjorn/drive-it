@@ -58,6 +58,7 @@ test("only detected clients are registered and their other settings survive inst
   assert.ok(codexText.includes('command = "C:\\\\Users\\\\a b\\\\AppData\\\\Local\\\\DriveIt\\\\app\\\\runtimes\\\\node\\\\node.exe"'));
   assert.ok(codexText.includes("[mcp_servers.drive-it.env]"));
   assert.ok(codexText.includes("tool_timeout_sec = 150"));
+  assert.ok(codexText.includes("startup_timeout_sec = 30"));
   assert.ok(!/[^\r]\n/.test(codexText), "the file's CRLF line endings are kept");
 
   const again = await registerClients(entry, locations);
@@ -83,10 +84,67 @@ test("missing clients are left alone and unreadable configurations are skipped, 
   assert.equal(await exists(path.join(locations.userProfile, ".codex")), false);
 });
 
-test("a hand-written Codex drive-it table is never duplicated", () => {
+test("a hand-written Codex drive-it entry in any TOML form is never duplicated", () => {
   assert.throws(() => addToCodexConfig('[mcp_servers.drive-it]\ncommand = "mine.exe"\n', entry), /outside the Drive It block/);
   assert.throws(() => addToCodexConfig('[mcp_servers."drive-it".env]\nX = "1"\n', entry), /outside the Drive It block/);
+  assert.throws(() => addToCodexConfig('mcp_servers = { "drive-it" = { command = "mine.exe" } }\n', entry), /outside the Drive It block/);
+  assert.throws(() => addToCodexConfig('[mcp_servers]\ndrive-it.command = "mine.exe"\n', entry), /outside the Drive It block/);
   assert.ok(addToCodexConfig("", entry).startsWith("# BEGIN drive-it"));
+});
+
+test("a Codex config.toml that does not parse is skipped and left byte-for-byte unchanged", async (t) => {
+  const locations = await profile(t);
+  const codex = path.join(locations.userProfile, ".codex", "config.toml");
+  await mkdir(path.dirname(codex));
+  const broken = 'model = "gpt-5\n[mcp_servers.other\n';
+  await writeFile(codex, broken);
+  const results = await registerClients(entry, locations);
+  const row = results.find(r => r.client === "codex");
+  assert.equal(row.status, "skipped");
+  assert.match(row.reason, /not valid TOML/);
+  assert.equal(await readFile(codex, "utf8"), broken);
+  assert.equal(await exists(`${codex}.drive-it.bak`), false);
+});
+
+test("the ChatGPT desktop app's Store package creates the Codex config.toml it reads", async (t) => {
+  const locations = await profile(t);
+  await mkdir(path.join(locations.base, "Local", "Packages", "OpenAI.Codex_2p2nqsd0c76g0"), { recursive: true });
+  const results = await registerClients(entry, locations);
+  assert.deepEqual(results.find(r => r.client === "codex").status, "registered");
+  const text = await readFile(path.join(locations.userProfile, ".codex", "config.toml"), "utf8");
+  assert.ok(text.includes("[mcp_servers.drive-it]"));
+  assert.deepEqual((await unregisterClients(locations)).find(r => r.client === "codex").status, "removed");
+});
+
+test("Claude Code is registered through its own CLI when installed, falling back to the file", async (t) => {
+  const locations = await profile(t);
+  const claude = path.join(locations.userProfile, ".local", "bin", "claude.exe");
+  await mkdir(path.dirname(claude), { recursive: true });
+  await writeFile(claude, "");
+  const calls = [];
+  const runner = async (file, args) => {
+    calls.push([file, ...args]);
+    return { code: 0, stderr: "" };
+  };
+
+  const registered = await registerClients(entry, locations, { runner });
+  const row = registered.find(r => r.client === "claude-code");
+  assert.equal(row.status, "registered");
+  assert.equal(row.via, "claude mcp add-json");
+  assert.deepEqual(calls[0], [claude, "mcp", "remove", "-s", "user", "drive-it"]);
+  assert.deepEqual(calls[1].slice(0, 6), [claude, "mcp", "add-json", "-s", "user", "drive-it"]);
+  assert.deepEqual(JSON.parse(calls[1][6]), { type: "stdio", ...entry });
+  assert.equal(await exists(path.join(locations.userProfile, ".claude.json")), false, "the CLI owns the file");
+
+  const removed = await unregisterClients(locations, { runner });
+  assert.equal(removed.find(r => r.client === "claude-code").status, "removed");
+  assert.deepEqual(calls.at(-1), [claude, "mcp", "remove", "-s", "user", "drive-it"]);
+
+  const failing = async () => ({ code: 1, stderr: "boom" });
+  const fallback = await registerClients(entry, locations, { runner: failing });
+  assert.equal(fallback.find(r => r.client === "claude-code").via, undefined);
+  const written = JSON.parse(await readFile(path.join(locations.userProfile, ".claude.json"), "utf8"));
+  assert.deepEqual(written.mcpServers["drive-it"], { type: "stdio", ...entry });
 });
 
 test("the CLI registers from the installer's mcp.json and honours CODEX_HOME", async (t) => {

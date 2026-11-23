@@ -1,16 +1,20 @@
 // Registers the installed Drive It MCP server with the MCP clients found for the
-// current user (Claude Desktop, Claude Code, Codex) and removes it again on uninstall.
-// Only clients whose configuration location already exists are touched; every other
-// setting in their configuration is preserved.
-import { copyFile, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+// current user (Claude Desktop, Claude Code, Codex and the ChatGPT desktop app, which reads
+// Codex's config.toml) and removes it again on uninstall. Only detected clients are touched;
+// every other setting in their configuration is preserved.
+import { execFile } from "node:child_process";
+import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { parse as parseToml } from "smol-toml";
 
 export const SERVER_NAME = "drive-it";
 const BEGIN = "# BEGIN drive-it (managed by the Drive It installer)";
 const END = "# END drive-it";
 // execute_script accepts runs of up to 120 s; Codex otherwise stops waiting at 60 s.
 const CODEX_TOOL_TIMEOUT_SEC = 150;
+// Codex allows 10 s by default; a first cold node.exe start under Defender scanning can take longer.
+const CODEX_STARTUP_TIMEOUT_SEC = 30;
 
 // The Microsoft Store (MSIX) build of Claude Desktop reads its configuration from
 // <LocalAppData>\Claude-Data\claude_<publisher>\claude_desktop_config.json, a file the app
@@ -29,14 +33,27 @@ async function storeClaudeDirectories(appData) {
   return names.filter(name => /^claude_[a-z0-9]+$/i.test(name)).map(name => path.join(root, name));
 }
 
+async function packages(appData, pattern) {
+  const root = path.join(path.dirname(appData), "Local", "Packages");
+  try {
+    return (await readdir(root)).filter(name => pattern.test(name)).map(name => path.join(root, name));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 export async function clientTargets({ userProfile, appData, codexHome }) {
   const codex = codexHome || path.join(userProfile, ".codex");
+  // A fresh ChatGPT desktop (Store) install may not have created ~/.codex yet; its package
+  // is enough to create the file it will read.
+  const chatgpt = await packages(appData, /^OpenAI\.(Codex|ChatGPT)/i);
   const desktop = directory => ({ client: "claude-desktop", detect: directory, file: path.join(directory, "claude_desktop_config.json"), format: "json" });
   return [
     desktop(path.join(appData, "Claude")),
     ...(await storeClaudeDirectories(appData)).map(desktop),
-    { client: "claude-code", detect: path.join(userProfile, ".claude.json"), file: path.join(userProfile, ".claude.json"), format: "json", stdioType: true },
-    { client: "codex", detect: codex, file: path.join(codex, "config.toml"), format: "toml" },
+    { client: "claude-code", detect: path.join(userProfile, ".claude.json"), file: path.join(userProfile, ".claude.json"), format: "json", stdioType: true, cli: path.join(userProfile, ".local", "bin", "claude.exe") },
+    { client: "codex", detect: codex, alsoDetect: chatgpt, file: path.join(codex, "config.toml"), format: "toml" },
   ];
 }
 
@@ -81,6 +98,7 @@ function codexBlock(entry) {
     `[mcp_servers.${SERVER_NAME}]`,
     `command = ${tomlString(entry.command)}`,
     `args = [${(entry.args || []).map(tomlString).join(", ")}]`,
+    `startup_timeout_sec = ${CODEX_STARTUP_TIMEOUT_SEC}`,
     `tool_timeout_sec = ${CODEX_TOOL_TIMEOUT_SEC}`,
   ];
   const env = Object.entries(entry.env || {});
@@ -102,19 +120,27 @@ function withoutManagedBlock(text) {
   return { text: rest ? `${rest}${eol}` : "", eol, found: true };
 }
 
-function hasUnmanagedCodexEntry(text) {
-  const table = new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*("?)${SERVER_NAME}\\1\\s*[\\].]`, "m");
-  return table.test(text);
+function parseCodex(text, what) {
+  try {
+    return parseToml(text);
+  } catch (error) {
+    throw new Error(`${what} is not valid TOML (${error.message.split("\n")[0]}); leaving it unchanged`);
+  }
 }
 
+// A malformed config.toml stops the ChatGPT/Codex desktop app at startup, so the result is
+// parsed before it is written, and an existing file that does not parse is never touched.
 export function addToCodexConfig(text, entry) {
   const stripped = withoutManagedBlock(text ?? "");
-  if (hasUnmanagedCodexEntry(stripped.text)) {
-    throw new Error(`config.toml already defines [mcp_servers.${SERVER_NAME}] outside the Drive It block; leaving it unchanged`);
+  const existing = parseCodex(stripped.text, "config.toml");
+  if (existing.mcp_servers && Object.hasOwn(existing.mcp_servers, SERVER_NAME)) {
+    throw new Error(`config.toml already defines mcp_servers.${SERVER_NAME} outside the Drive It block; leaving it unchanged`);
   }
   const body = stripped.text.replace(/\s+$/, "");
   const block = codexBlock(entry).split("\n").join(stripped.eol);
-  return body ? `${body}${stripped.eol}${stripped.eol}${block}${stripped.eol}` : `${block}${stripped.eol}`;
+  const next = body ? `${body}${stripped.eol}${stripped.eol}${block}${stripped.eol}` : `${block}${stripped.eol}`;
+  parseCodex(next, "The updated config.toml");
+  return next;
 }
 
 export function removeFromCodexConfig(text) {
@@ -144,14 +170,40 @@ export function removeFromJsonConfig(text) {
   return `${JSON.stringify(configuration, null, 2)}\n`;
 }
 
-export async function registerClients(entry, locations) {
+function run(file, args) {
+  return new Promise(resolve => execFile(file, args, { windowsHide: true, timeout: 30000 },
+    (error, stdout, stderr) => resolve({ code: error ? (error.code ?? 1) : 0, stderr: String(stderr || error?.message || "") })));
+}
+
+// Claude Code rewrites ~/.claude.json while it runs, so its own CLI is the safe writer when it
+// is installed; the direct file edit remains the fallback.
+async function registerWithClaudeCli(target, entry, runner) {
+  if (!target.cli || !(await exists(target.cli))) return null;
+  await runner(target.cli, ["mcp", "remove", "-s", "user", SERVER_NAME]);
+  const added = await runner(target.cli, ["mcp", "add-json", "-s", "user", SERVER_NAME, JSON.stringify({ type: "stdio", ...entry })]);
+  return added.code === 0 ? { client: target.client, status: "registered", file: target.file, via: "claude mcp add-json" } : null;
+}
+
+async function detected(target) {
+  if (await exists(target.detect)) return true;
+  if (target.cli && await exists(target.cli)) return true;
+  return (target.alsoDetect || []).length > 0;
+}
+
+export async function registerClients(entry, locations, { runner = run } = {}) {
   const results = [];
   for (const target of await clientTargets(locations)) {
-    if (!(await exists(target.detect))) {
+    if (!(await detected(target))) {
       results.push({ client: target.client, status: "not_found" });
       continue;
     }
     try {
+      const viaCli = await registerWithClaudeCli(target, entry, runner);
+      if (viaCli) {
+        results.push(viaCli);
+        continue;
+      }
+      await mkdir(path.dirname(target.file), { recursive: true });
       const original = await readText(target.file);
       const next = target.format === "toml"
         ? addToCodexConfig(original, entry)
@@ -165,10 +217,17 @@ export async function registerClients(entry, locations) {
   return results;
 }
 
-export async function unregisterClients(locations) {
+export async function unregisterClients(locations, { runner = run } = {}) {
   const results = [];
   for (const target of await clientTargets(locations)) {
     try {
+      if (target.cli && await exists(target.cli)) {
+        const cliRemoved = await runner(target.cli, ["mcp", "remove", "-s", "user", SERVER_NAME]);
+        if (cliRemoved.code === 0) {
+          results.push({ client: target.client, status: "removed", file: target.file, via: "claude mcp remove" });
+          continue;
+        }
+      }
       const original = await readText(target.file);
       const next = original === null ? null
         : target.format === "toml" ? removeFromCodexConfig(original) : removeFromJsonConfig(original);
