@@ -91,10 +91,15 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
     assert.deepEqual(session, expected);
     assert.ok(Array.isArray(content.projectTemplates));
 
-    // Without a processId, the real \\.\pipe listing finds the only Drive It session.
+    // Without a processId, the real \\.\pipe listing finds this session. Other test files run
+    // in parallel and may hold their own drive-it pipes, in which case the ambiguity error must
+    // still name this one.
     const found = await client.callTool({ name: "get_revit_session", arguments: {} });
-    assert.ok(!found.isError, found.content[0].text);
-    assert.equal(found.structuredContent.processId, processId);
+    if (found.isError) {
+      assert.match(found.content[0].text, new RegExp(`Several Revit sessions.*processId ${processId}\\b`));
+    } else {
+      assert.equal(found.structuredContent.processId, processId);
+    }
   }
 });
 
