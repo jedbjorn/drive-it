@@ -80,12 +80,21 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
     await once(bridge, "listening");
     t.after(() => new Promise(resolve => bridge.close(resolve)));
 
-    const result = await call();
-    assert.ok(!result.isError, result.content[0].text);
-    assert.deepEqual(result.structuredContent, {
+    const expected = {
       ...info,
       connectionIdentity: `current-user:named-pipe:drive-it-${processId}`,
-    });
+      workspaceRoot: null,
+    };
+    const result = await call();
+    assert.ok(!result.isError, result.content[0].text);
+    const { content, ...session } = result.structuredContent;
+    assert.deepEqual(session, expected);
+    assert.ok(Array.isArray(content.projectTemplates));
+
+    // Without a processId, the real \\.\pipe listing finds the only Drive It session.
+    const found = await client.callTool({ name: "get_revit_session", arguments: {} });
+    assert.ok(!found.isError, found.content[0].text);
+    assert.equal(found.structuredContent.processId, processId);
   }
 });
 
