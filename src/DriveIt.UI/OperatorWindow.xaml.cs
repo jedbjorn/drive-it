@@ -61,7 +61,7 @@ public partial class OperatorWindow : Window
                 found = true;
                 await RefreshListsAsync();
             });
-            if (found && WorkspaceRoot is null && _promptForMissingRoot) BrowseForRoot();
+            if (found && WorkspaceRoot is null && _promptForMissingRoot && BrowseForRoot()) await SaveRootAsync();
         }
         finally
         {
@@ -69,9 +69,13 @@ public partial class OperatorWindow : Window
         }
     }
 
-    private void OnBrowse(object sender, RoutedEventArgs e) => BrowseForRoot();
+    // Picking a folder chooses it; Save root remains for a path typed into the box.
+    private async void OnBrowse(object sender, RoutedEventArgs e)
+    {
+        if (BrowseForRoot()) await SaveRootAsync();
+    }
 
-    private void BrowseForRoot()
+    private bool BrowseForRoot()
     {
         var dialog = new OpenFolderDialog
         {
@@ -82,15 +86,20 @@ public partial class OperatorWindow : Window
         {
             var current = RootText.Text.Trim();
             if (current.Length > 0 && Directory.Exists(current)) dialog.InitialDirectory = current;
-            if (dialog.ShowDialog(this) == true) RootText.Text = dialog.FolderName;
+            if (dialog.ShowDialog(this) != true) return false;
+            RootText.Text = dialog.FolderName;
+            return true;
         }
         catch (Exception exception)
         {
             ShowError("Drive-It could not open the folder picker: " + exception.Message);
+            return false;
         }
     }
 
-    private async void OnSaveRoot(object sender, RoutedEventArgs e) => await RunAsync(async () =>
+    private async void OnSaveRoot(object sender, RoutedEventArgs e) => await SaveRootAsync();
+
+    private Task SaveRootAsync() => RunAsync(async () =>
     {
         WorkspaceRoot = await _client.SetWorkspaceAsync(RootText.Text);
         RootText.Text = WorkspaceRoot;

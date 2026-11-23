@@ -152,6 +152,8 @@ public class OperatorClientTests
         var run = RunRecord.FromJson(json.RootElement, zone);
 
         Assert.Equal("Renumber level 2 doors · succeeded · 2026-11-23 10:05", run.Label);
+        Assert.Equal("Renumber level 2 doors", run.Title);
+        Assert.Equal("succeeded · 2026-11-23 10:05", run.Meta);
     }
 
     [Fact]

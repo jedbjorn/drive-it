@@ -76,6 +76,12 @@ public sealed class RunRecord
     /// <summary>The list row: "displayName · status · local time".</summary>
     public string Label => OperatorText.HistoryLabel(this);
 
+    /// <summary>The row's first line: the display name, or the run ID for older receipts.</summary>
+    public string Title => DisplayName ?? RunId ?? "(unnamed run)";
+
+    /// <summary>The row's second line: "status · local time".</summary>
+    public string Meta => OperatorText.HistoryMeta(this);
+
     /// <summary>The details pane: the receipt as indented JSON.</summary>
     public string Details => OperatorText.PrettyJson(Receipt);
 
@@ -122,7 +128,13 @@ public static class OperatorText
 
     public static string HistoryLabel(RunRecord run)
     {
-        var parts = new List<string> { run.DisplayName ?? run.RunId ?? "(unnamed run)" };
+        var meta = HistoryMeta(run);
+        return meta.Length == 0 ? run.Title : run.Title + HistorySeparator + meta;
+    }
+
+    public static string HistoryMeta(RunRecord run)
+    {
+        var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(run.Status)) parts.Add(run.Status!);
         if (run.StartedAt is { } started)
             parts.Add(TimeZoneInfo.ConvertTime(started, run.TimeZone).ToString(TimeFormat, CultureInfo.InvariantCulture));
