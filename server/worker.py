@@ -339,7 +339,7 @@ class Revit:
     OPERATIONS = {
         "open_document", "create_document", "read_document", "save_document",
         "save_as_document", "close_document", "delete_document", "create_level",
-        "create_wall", "create_family_type", "delete_element",
+        "create_wall", "create_3d_view", "create_family_type", "delete_element",
     }
 
     def __init__(self, process_id, document, policy_pending, policy_denied):

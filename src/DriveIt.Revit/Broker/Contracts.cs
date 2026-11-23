@@ -99,6 +99,7 @@ public sealed class BrokerResponse
     public List<CheckReceipt> Checks { get; set; } = [];
     public List<PolicyPathGrant>? PolicyRequests { get; set; }
     public CaptureReceipt? Capture { get; set; }
+    public List<ViewSummary>? CreatedViews { get; set; }
     public ErrorReceipt? Error { get; set; }
 }
 
