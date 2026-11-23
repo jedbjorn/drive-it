@@ -189,6 +189,23 @@ test("the session tool finds the only Revit and tells the agent where to work", 
   assert.equal(result.structuredContent.processId, 4321);
   assert.equal(result.structuredContent.workspaceRoot, await runtime.workspace.getRoot());
   assert.deepEqual(result.structuredContent.content, content);
+
+  const fresh = new Runtime({ dataDir: path.join(base, "fresh") });
+  const { server: freshServer } = createDriveItServer({
+    runtime: fresh,
+    processResolver: async processId => processId ?? 4321,
+    sessionReader: async processId => ({ processId, version: "2026", build: "b", connectionIdentity: `pipe-${processId}` }),
+    contentReader: async () => content,
+  });
+  const [freshClientTransport, freshServerTransport] = InMemoryTransport.createLinkedPair();
+  await freshServer.connect(freshServerTransport);
+  const freshClient = new Client({ name: "drive-it-fresh-test", version: "1" });
+  await freshClient.connect(freshClientTransport);
+  t.after(() => freshClient.close());
+  await freshClient.listTools();
+  const unset = await freshClient.callTool({ name: "get_revit_session", arguments: {} });
+  assert.ok(!unset.isError, unset.content[0].text);
+  assert.equal(unset.structuredContent.workspaceRoot, null);
 });
 
 test("a pending run tells the agent to resume with the same idempotency key", async (t) => {

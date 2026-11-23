@@ -73,7 +73,7 @@ export function createDriveItServer(options = {}) {
   const server = new McpServer({ name: "drive-it", version: "0.1.0" });
 
   server.registerTool("get_revit_session", {
-    description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user, and Revit's installed project templates, family template folders, and library folders. Use these real paths instead of guessing file names.",
+    description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user (null until the user picks one in the Drive-It window; ask them to), and Revit's installed project templates, family template folders, and library folders. Use these real paths instead of guessing file names.",
     inputSchema: { processId: processId.optional().describe("Windows process ID of Revit.exe; omit it to use the only running Revit") },
     outputSchema: {
       processId,
@@ -91,7 +91,11 @@ export function createDriveItServer(options = {}) {
   }, async ({ processId }) => {
     try {
       const info = await sessionReader(await processResolver(processId));
-      const value = { ...info, workspaceRoot: await runtime.workspace.getRoot(), content: await contentReader(info.version) };
+      const workspaceRoot = await runtime.workspace.getRoot().catch(error => {
+        if (error.code === "WORKSPACE_NOT_SELECTED") return null;
+        throw error;
+      });
+      const value = { ...info, workspaceRoot, content: await contentReader(info.version) };
       return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: sessionError(error) }] };
