@@ -61,7 +61,7 @@ function Test-Tree([string] $root, [string] $label) {
   $pe = @(Get-ChildItem -LiteralPath $root -Recurse -File |
     Where-Object { $_.Extension -in '.dll', '.exe' } | Sort-Object FullName)
   $excluded = 0
-  $firstParty = 0
+  $ownBinaries = 0
   foreach ($f in $pe) {
     $rel = $f.FullName.Substring($rootFull.Length)
     if ($rel -match '(^|\\)runtimes\\') { $excluded++; continue }
@@ -69,11 +69,11 @@ function Test-Tree([string] $root, [string] $label) {
       $script:problems.Add("$label\$rel is not a Drive-It binary ($FirstParty); decide whether it ships and is signed")
       continue
     }
-    $firstParty++
+    $ownBinaries++
     Test-File $f.FullName "$label\$rel"
   }
   Write-Host "  ($excluded bundled runtime binaries under runtimes\ excluded)"
-  if ($firstParty -eq 0) { $script:problems.Add("$label holds no Drive-It DLL or EXE") }
+  if ($ownBinaries -eq 0) { $script:problems.Add("$label holds no Drive-It DLL or EXE") }
 }
 
 $mode = if ($Unsigned) { 'unsigned (no signing on this build)' } else { "signed by CN=$Signer, timestamped" }
