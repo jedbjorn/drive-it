@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
@@ -301,6 +302,7 @@ public sealed partial class DocumentDispatcher
         response.Document = Snapshot(state);
         var initialChangeCount = response.Changes.Count;
         var initialElementCount = response.AffectedElements.Count;
+        var initialViewCount = response.CreatedViews?.Count ?? 0;
 
         using var transaction = new Transaction(state.Document, "Drive It model batch");
         transaction.Start();
@@ -320,6 +322,17 @@ public sealed partial class DocumentDispatcher
                         var wall = CreateWall(state.Document, change);
                         response.AffectedElements.Add(wall.Id.Value);
                         response.Changes.Add($"Created wall {wall.Id.Value}.");
+                        break;
+                    case "create_3d_view":
+                        var view = Create3DView(state.Document, change);
+                        response.AffectedElements.Add(view.Id.Value);
+                        (response.CreatedViews ??= new List<ViewSummary>()).Add(new ViewSummary
+                        {
+                            Id = view.Id.Value.ToString(CultureInfo.InvariantCulture),
+                            Name = view.Name,
+                            Type = view.ViewType.ToString(),
+                        });
+                        response.Changes.Add($"Created 3D view '{view.Name}' ({view.Id.Value}).");
                         break;
                     case "create_family_type":
                         var familyType = state.Document.FamilyManager.NewType(change.Name!);
@@ -380,6 +393,12 @@ public sealed partial class DocumentDispatcher
             {
                 response.Changes.RemoveRange(initialChangeCount, response.Changes.Count - initialChangeCount);
                 response.AffectedElements.RemoveRange(initialElementCount, response.AffectedElements.Count - initialElementCount);
+                if (response.CreatedViews is not null)
+                {
+                    response.CreatedViews.RemoveRange(initialViewCount, response.CreatedViews.Count - initialViewCount);
+                    if (response.CreatedViews.Count == 0)
+                        response.CreatedViews = null;
+                }
             }
 
             response.Status = HasEffects(response) ? "partially_applied" : "failed";
@@ -399,8 +418,23 @@ public sealed partial class DocumentDispatcher
         return wall;
     }
 
+    private static View3D Create3DView(Document document, ModelChangeRequest change)
+    {
+        var view = View3D.CreateIsometric(document, ThreeDimensionalViewType(document)!.Id);
+        if (change.Name is not null)
+            view.Name = change.Name;
+        return view;
+    }
+
+    private static ViewFamilyType? ThreeDimensionalViewType(Document document) =>
+        new FilteredElementCollector(document).OfClass(typeof(ViewFamilyType)).Cast<ViewFamilyType>()
+            .Where(type => type.ViewFamily == ViewFamily.ThreeDimensional)
+            .OrderBy(type => type.Id.Value)
+            .FirstOrDefault();
+
     private static void ValidateChanges(Document document, List<ModelChangeRequest> changes)
     {
+        var newViewNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var change in changes)
         {
             switch (change.Type)
@@ -418,6 +452,16 @@ public sealed partial class DocumentDispatcher
                         throw new RequestRejectedException("invalid_model_change", "create_wall requires start, end, and a positive finite height.");
                     if (!IsFinite(change.Start) || !IsFinite(change.End) || ToXyz(change.Start).DistanceTo(ToXyz(change.End)) < 1e-9)
                         throw new RequestRejectedException("invalid_model_change", "create_wall requires finite, distinct endpoints.");
+                    break;
+                case "create_3d_view":
+                    if (change.Name is not null && string.IsNullOrWhiteSpace(change.Name))
+                        throw new RequestRejectedException("invalid_model_change", "create_3d_view name must not be empty; omit it to let Revit name the view.");
+                    if (ThreeDimensionalViewType(document) is null)
+                        throw new RequestRejectedException("view_type_not_found",
+                            $"This {DocumentKind(document)} document has no 3D view family type, so a 3D view cannot be created.");
+                    if (change.Name is not null && (!newViewNames.Add(change.Name) ||
+                        new FilteredElementCollector(document).OfClass(typeof(View3D)).Any(view => view.Name == change.Name)))
+                        throw new RequestRejectedException("duplicate_view_name", $"A 3D view named '{change.Name}' already exists or is created earlier in this batch.");
                     break;
                 case "create_family_type":
                     if (!document.IsFamilyDocument)
@@ -542,7 +586,7 @@ public sealed partial class DocumentDispatcher
         response.Changes.Count > 0 || response.AffectedFiles.Count > 0 || response.AffectedElements.Count > 0;
 
     private static bool IsModelChange(string type) =>
-        type is "create_level" or "create_wall" or "create_family_type" or "delete_element";
+        type is "create_level" or "create_wall" or "create_3d_view" or "create_family_type" or "delete_element";
 
     private static T Deserialize<T>(System.Text.Json.Nodes.JsonObject? arguments)
     {

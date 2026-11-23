@@ -148,6 +148,7 @@ test("discovery carries the visual QA rule and honest annotations", async (t) =>
   assert.equal(client.getInstructions(), SERVER_INSTRUCTIONS);
   assert.match(SERVER_INSTRUCTIONS, /capture_revit_view/);
   assert.match(SERVER_INSTRUCTIONS, /visual evidence is missing/);
+  assert.match(SERVER_INSTRUCTIONS, /no suitable 3D view exists, create one with the create_3d_view operation/);
   const { tools } = await client.listTools();
   const tool = tools.find(candidate => candidate.name === "capture_revit_view");
   assert.ok(tool);
@@ -155,6 +156,7 @@ test("discovery carries the visual QA rule and honest annotations", async (t) =>
   assert.equal(tool.annotations.destructiveHint, false);
   assert.match(tool.description, /does not modify the Revit model; it writes a local reference image/);
   assert.match(tool.description, /never claim a visual pass/);
+  assert.match(tool.description, /create_3d_view/);
   assert.deepEqual(tool.inputSchema.required, ["purpose"]);
   for (const name of ["processId", "document", "viewId", "pixelSize", "relatedRunIds", "retain"]) {
     assert.ok(tool.inputSchema.properties[name], name);

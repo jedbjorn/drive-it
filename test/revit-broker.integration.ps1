@@ -187,6 +187,32 @@ function Test-ViewCaptures([string]$DocumentId, [string]$Kind, [string[]]$Requir
     return $views
 }
 
+# create_3d_view: a named and an unnamed isometric view, a duplicate-name rejection, and a
+# capture of the created view by the id the receipt returned.
+function Test-Create3DView([string]$DocumentId, [string]$Kind) {
+    $name = "Drive It 3D $Kind"
+    $created = Invoke-Broker @{ document = Document-Target $DocumentId; operations = @(@{ type = "create_3d_view"; arguments = @{ name = $name } }) }
+    Assert-Status $created "succeeded"
+    $views = @(Get-Field $created "createdViews")
+    Assert-True ($views.Count -eq 1) "$Kind create_3d_view returned $($views.Count) created views."
+    $view = $views[0]
+    Assert-True ($view.id -is [string] -and $view.id -match '^[1-9][0-9]*$') "$Kind create_3d_view returned a non-string view id: $($view.id)."
+    Assert-True ($view.name -eq $name -and $view.type -eq "ThreeD") "$Kind create_3d_view returned '$($view.name)' ($($view.type))."
+    Assert-True ($created.affectedElements -contains [long]$view.id) "$Kind create_3d_view did not list the view in affectedElements."
+    $duplicate = Invoke-Broker @{ document = Document-Target $DocumentId; operations = @(@{ type = "create_3d_view"; arguments = @{ name = $name } }) }
+    Assert-Status $duplicate "failed"
+    Assert-True ((Get-Field (Get-Field $duplicate "error") "code") -eq "duplicate_view_name") "$Kind duplicate 3D view name was not rejected as duplicate_view_name."
+    Assert-True ($duplicate.changes.Count -eq 0 -and $null -eq (Get-Field $duplicate "createdViews")) "$Kind duplicate 3D view rejection reported effects."
+    $unnamed = Invoke-Broker @{ document = Document-Target $DocumentId; operations = @(@{ type = "create_3d_view"; arguments = @{} }) }
+    Assert-Status $unnamed "succeeded"
+    $unnamedView = @(Get-Field $unnamed "createdViews")[0]
+    Assert-True (-not [string]::IsNullOrWhiteSpace($unnamedView.name) -and $unnamedView.id -ne $view.id) "$Kind unnamed create_3d_view returned no distinct named view."
+    $shot = Invoke-Capture $DocumentId $view.id
+    Assert-Captured $shot "$Kind created 3D"
+    Assert-True ($shot.capture.viewId -eq $view.id -and $shot.capture.viewType -eq "ThreeD") "$Kind created 3D: the capture named another view."
+    return $view
+}
+
 New-Item -ItemType Directory -Force $outsideDirectory | Out-Null
 New-Item -ItemType Junction -Path $junction -Target $outsideDirectory | Out-Null
 & cmd.exe /c mklink $danglingLink $canonicalDanglingOutsideRvt | Out-Null
@@ -314,7 +340,8 @@ try {
     Assert-True ($model.document.levels.name -contains "Drive It Level") "The committed level was not observed in the project."
     Assert-True ($model.affectedElements.Count -eq 2) "The successful RVT batch did not identify both affected elements."
 
-    $rvtViews = @(Test-ViewCaptures $rvtId "RVT" @("FloorPlan"))
+    Test-Create3DView $rvtId "RVT" | Out-Null
+    $rvtViews = @(Test-ViewCaptures $rvtId "RVT" @("FloorPlan", "ThreeD"))
     Assert-CaptureRejected (Invoke-Capture $rvtId $level.id) "not_a_view" "RVT level element"
 
     # Element ids belong to one document: an RVT view id against an open RFA is not followed.
@@ -339,6 +366,7 @@ try {
     $rollback = Invoke-Broker @{
         document = Document-Target $rvtId
         operations = @(
+            @{ type = "create_3d_view"; arguments = @{ name = "Drive It Rollback 3D" } },
             @{ type = "create_level"; arguments = @{ name = "Drive It Rollback"; elevation = 6.0 } },
             @{ type = "create_wall"; arguments = @{ baseLevelId = $level.id; height = 10.0; start = @{ x = 0; y = 0; z = 0 }; end = @{ x = 0; y = 0; z = 5 } } }
         )
@@ -347,6 +375,8 @@ try {
     $rollbackCheck = $rollback.checks | Where-Object { $_.name -eq "transaction_rollback" } | Select-Object -First 1
     Assert-True ($null -ne $rollbackCheck -and $rollbackCheck.passed) "Revit did not confirm rollback of the failed model batch."
     Assert-True ($rollback.changes.Count -eq 0) "The rolled-back model batch retained reported changes."
+    Assert-True ($null -eq (Get-Field $rollback "createdViews")) "The rolled-back model batch retained a created view."
+    Assert-True ($rollback.affectedElements.Count -eq 0) "The rolled-back model batch retained affected elements."
     Assert-True ($rollback.document.levels.name -notcontains "Drive It Rollback") "The first change survived transaction rollback."
 
     $saved = Invoke-Broker @{ document = Document-Target $rvtId; operations = @(@{ type = "save_document"; arguments = @{} }) }
@@ -398,6 +428,7 @@ try {
     }
     Assert-Status $familyEdit "succeeded"
     Assert-True ($familyEdit.document.familyTypes -contains "Drive It Type") "The new family type was not observed."
+    Test-Create3DView $familyId "RFA" | Out-Null
     Test-ViewCaptures $familyId "RFA" @("ThreeD") | Out-Null
     $familySaved = Invoke-Broker @{
         document = Document-Target $familyId
@@ -443,7 +474,8 @@ try {
             "partial_delete_close_observation",
             "rvt_and_rfa_delete",
             "rfa_family_type_save_close_reopen",
-            "view_capture_rvt_rfa_export_and_rejections"
+            "view_capture_rvt_rfa_export_and_rejections",
+            "create_3d_view_rvt_rfa_duplicate_rollback_capture"
         )
     } | ConvertTo-Json -Depth 6
 }

@@ -519,6 +519,7 @@ test("every published Revit example matches the typed broker contract and execut
       optional: [],
       effect: /RVT model transaction/,
     },
+    create_3d_view: { arguments: {}, optional: ["name"], effect: /isometric 3D view in an RVT or RFA model transaction/ },
     create_family_type: { arguments: { name: "Type 1" }, optional: [], effect: /RFA.*parameter values are not changed/ },
     delete_element: { arguments: { elementId: 123 }, optional: [], effect: /dependent elements/ },
   };
