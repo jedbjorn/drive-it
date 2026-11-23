@@ -19,6 +19,11 @@ const revitOperations = {
   delete_element: [withDocument({ elementId: "Required: Element id of an existing element" }), "Deleted element identity", "Deletes an existing element and its dependent elements in the model transaction"],
 };
 
+// Primitives state where their document comes from: the script's current document.
+function withCurrentDocument(args) {
+  return { ...args, document: "Optional: {uniqueId} target; defaults to the script's current document, which get_active_document and edit_family set; with none, the call fails with document_not_open" };
+}
+
 const elementSummary = "{id, uniqueId, name, category, builtInCategory, typeId, typeName, familyName, familyId, levelId}";
 const parameterEntry = "{name, builtIn, guid, storageType, value, display, readOnly, hasValue}; value is raw, doubles in Revit internal units";
 const targetsActive = "Later calls in the same script target the returned document unless they pass document";
@@ -26,11 +31,11 @@ const targetsActive = "Later calls in the same script target the returned docume
 // Built-in primitives: [arguments, results, effects, example]. Read primitives return their output
 // directly; the others return the full broker response like the operations above.
 const revitPrimitives = {
-  get_active_document: [withDocument({}),
+  get_active_document: [withCurrentDocument({}),
     "Full response; document is the active document's snapshot plus isModified, activeView {id, name, viewType} or null, and openDocuments [{uniqueId, title, path, kind, isActive}] for every open, non-linked document",
     `Resolves the document shown in Revit's window (RVT or RFA) and registers it and every open document. ${targetsActive}. No transaction, no policy paths, no change to the active document or view; fails with no_active_document, listing openDocuments, when none is active`,
     "doc = revit.get_active_document()[\"document\"]"],
-  find_elements: [withDocument({
+  find_elements: [withCurrentDocument({
     category: "Required: BuiltInCategory name (\"OST_Walls\") or the category name the document shows (\"Walls\"); unknown names fail with unknown_category and the closest names",
     kind: "Optional: \"instance\" (default) or \"type\"",
     levelId: "Optional: Level element id; instances whose level matches (not with kind \"type\")",
@@ -41,7 +46,7 @@ const revitPrimitives = {
   `Returns the result directly: {total, returned, offset, truncated, elements: [${elementSummary}]} in element-id order; a field is null when it does not apply, and familyId is the loadable family's id`,
   "Reads one page of elements of a category; no transaction, the model is unchanged",
   "walls = revit.find_elements(category=\"Walls\")"],
-  get_parameters: [withDocument({
+  get_parameters: [withCurrentDocument({
     elementIds: "Required: List of element ids, at most 2000",
     names: "Optional: List of exact parameter names to return",
     includeType: "Optional: Boolean; also read each element's type parameters (default true)",
@@ -49,11 +54,11 @@ const revitPrimitives = {
   `Returns the result directly: [{id, uniqueId, typeId, parameters: [${parameterEntry}], type: {id, parameters} or null}]`,
   "Reads parameters of elements and their types; a missing id fails the whole call with element_not_found naming each one; no transaction, the model is unchanged",
   "params = revit.get_parameters(elementIds=[123], names=[\"Comments\"])"],
-  list_types: [withDocument({ category: "Required: Category, resolved as in find_elements" }),
+  list_types: [withCurrentDocument({ category: "Required: Category, resolved as in find_elements" }),
     "Returns the result directly: [{id, uniqueId, name, familyName, familyId, category}] sorted by family then name",
     "Lists the types of one category; no transaction, the model is unchanged",
     "wall_types = revit.list_types(category=\"Walls\")"],
-  list_views: [withDocument({
+  list_views: [withCurrentDocument({
     viewTypes: "Optional: List of Revit ViewType names, such as [\"FloorPlan\", \"ThreeD\"]; default every type",
     includeSheets: "Optional: Boolean; include sheets (default true)",
     includeTemplates: "Optional: Boolean; include view templates (default false)",
@@ -61,11 +66,11 @@ const revitPrimitives = {
   "Returns the result directly: [{id, uniqueId, name, viewType, isTemplate, sheetNumber, levelId, capturable}]; capturable views can be passed to capture_revit_view as viewId",
   "Lists views and sheets; no transaction, the model is unchanged",
   "views = revit.list_views(viewTypes=[\"ThreeD\"])"],
-  get_selection: [withDocument({}),
+  get_selection: [withCurrentDocument({}),
     "Returns the result directly: [{id, uniqueId, name, category, typeName}] for the elements the user has selected; [] when nothing is selected",
     "Reads the live UI selection of the active document; another document fails with document_not_active",
     "selected = revit.get_selection()"],
-  set_selection: [withDocument({ elementIds: "Required: List of element ids, at most 2000; [] clears the selection" }),
+  set_selection: [withCurrentDocument({ elementIds: "Required: List of element ids, at most 2000; [] clears the selection" }),
     "Full response with a changes line and a selection_readback check comparing the request with Revit's selection",
     "Replaces the active document's UI selection. No transaction, no document change, no undo entry, no zoom or view change; document_not_active or element_not_found leave the selection unchanged",
     "revit.set_selection(elementIds=[123])"],

@@ -178,6 +178,9 @@ test("get_api_reference lists every primitive and units with an example that run
     assert.equal(entry.apiVersion, API_VERSION, name);
     assert.match(entry.example, new RegExp(`^(\\w+ = )?${name.includes(".") ? name.replace(".", "\\.") : `revit\\.${name}`}\\(`), name);
     for (const [key, description] of Object.entries(entry.arguments)) assert.match(description, /^(Required|Optional): /, `${name}.${key}`);
+    if (!name.startsWith("units.")) {
+      assert.match(entry.arguments.document, /^Optional: .*defaults to the script's current document, which get_active_document and edit_family set/, name);
+    }
     if (READ_PRIMITIVES.includes(name)) assert.match(entry.results, /^Returns the result directly: /, name);
     if (RESPONSE_PRIMITIVES.includes(name)) assert.match(entry.results, /^Full response/, name);
     const before = envelopes.length;

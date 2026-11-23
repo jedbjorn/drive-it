@@ -556,7 +556,7 @@ public sealed partial class DocumentDispatcher
     }
 
     private static DocumentState RequireDocument(DocumentState? state) => state ??
-        throw new RequestRejectedException("document_not_open", "The requested operation requires an open selected document.");
+        throw new RequestRejectedException("document_not_open", "The requested operation requires an open selected document, and this script has none. Call revit.get_active_document() first to use the model open in Revit's window, or pass document= with a uniqueId from an earlier receipt.");
 
     private DocumentState Register(Document document, bool created = false)
     {

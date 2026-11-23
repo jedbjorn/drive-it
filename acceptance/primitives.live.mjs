@@ -39,6 +39,16 @@ try {
   check("api version", reference.version === "revit-2026-alpha.2", reference.version);
   check("reference lists every primitive and units", [...primitives.map(name => `revit.${name}`), "units.to_internal", "units.from_internal"].every(name => names.includes(name)), names);
 
+  // A script with no document target: find_elements fails with document_not_open naming the fix.
+  const untargeted = await client.callTool({
+    name: "execute_script",
+    arguments: { processId, timeoutMs: 120000, displayName: "Read walls with no document target", source: "result = revit.find_elements(category=\"Walls\")" },
+  });
+  const refusal = untargeted.structuredContent;
+  check("no document target fails with document_not_open naming revit.get_active_document()",
+    refusal?.status === "failed" && refusal.error?.code === "document_not_open" && refusal.error.message.includes("revit.get_active_document()"),
+    refusal?.error);
+
   // The model the user has open, reached without a document argument or a path.
   const source = `
 active = revit.get_active_document()

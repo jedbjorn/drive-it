@@ -294,7 +294,10 @@ $threeD = @(Read-Primitive $documentId "list_views" @{ viewTypes = @("ThreeD") }
 Assert-True ($threeD.Count -ge 1 -and @($threeD | Where-Object { $_.viewType -ne "ThreeD" }).Count -eq 0) "viewTypes did not filter to ThreeD."
 Pass "list_views_marks_3d_view_capturable"
 
-# Bad input fails with its code and no result.
+# Bad input fails with its code and no result. No document target: the error names the fix.
+$untargeted = Invoke-Broker @(Op "find_elements" @{ category = "Walls" }) $null
+Assert-Failure $untargeted "document_not_open" "find_elements with no document target"
+Assert-True ($untargeted.error.message -match "revit\.get_active_document\(\)" -and $untargeted.error.message -match "document=") "document_not_open does not name the fix: $($untargeted.error.message)"
 Assert-Failure (Invoke-Broker @(Op "find_elements" @{ category = "Wals" }) (Target $documentId)) "unknown_category" "unknown category"
 $unknown = Invoke-Broker @(Op "list_types" @{ category = "OST_NotACategory" }) (Target $documentId)
 Assert-Failure $unknown "unknown_category" "unknown OST_ category"
@@ -306,7 +309,7 @@ Assert-True ($null -eq $missing.results[0]) "A failed get_parameters returned a 
 Assert-Failure (Invoke-Broker @(Op "find_elements" @{ category = "Walls"; limit = 2001 }) (Target $documentId)) "limit_exceeded" "limit 2001"
 $tooMany = @(1..2001 | ForEach-Object { [long]$_ })
 Assert-Failure (Invoke-Broker @(Op "get_parameters" @{ elementIds = $tooMany }) (Target $documentId)) "limit_exceeded" "2001 ids"
-Pass "unknown_category_element_not_found_limit_exceeded"
+Pass "document_not_open_unknown_category_element_not_found_limit_exceeded"
 
 # Criterion 4: set_selection then get_selection, with the read-back check, no document change.
 $pick = @($expectedIds[0], $expectedIds[2])
