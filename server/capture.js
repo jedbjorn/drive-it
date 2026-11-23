@@ -38,6 +38,24 @@ export const BROKER_BUDGET = Object.freeze({ connectWaitMs: 20_000, timeoutMs: 1
 // A pid alive with a start time this far from the recorded one belongs to another process.
 const START_TOLERANCE_MS = 10_000;
 
+// Element ids as the add-in reads them: positive decimal, no leading zero, within a 64-bit id.
+const ELEMENT_ID = /^[1-9][0-9]{0,18}$/;
+const PLAN_VIEW_TYPES = new Set(["FloorPlan", "CeilingPlan", "EngineeringPlan"]);
+export const NOT_MARKED_REASONS = Object.freeze(["not_found", "not_markable", "not_in_view", "not_visible", "not_placed"]);
+export const MAX_MARK_CATEGORIES = 5;
+// A BuiltInCategory member name as the add-in reads it; the add-in checks membership.
+const CATEGORY_NAME = /^OST_[A-Za-z0-9_]+$/;
+const DATUM_CATEGORIES = new Set(["OST_Levels", "OST_Grids"]);
+// marks.notes: fixed sentences stating what a missing mark means and the limits that apply.
+export const MARK_NOTES = Object.freeze({
+  noMark: "Marks are help in finding elements, not a list of what exists or what is visible. An element with no mark, an empty legend, or a not_visible row may still exist and may still be in the image: not_visible means no mark could be confirmed, including an element whose visibility could not be established, and those count in omitted. Check by element id or a structured check before concluding an element is not there.",
+  every: "Each mark names the element in its legend row, and bounds is the pixel rectangle of that element's visible part. Rarely a mark sits on something the image does not show; if a mark looks wrong, check the element by its id before acting.",
+  plan: "In plans another element's symbol can be drawn over a marked element; the row's category and bounds say which element the mark names.",
+  planSymbols: "In plans a family drawn only as a symbol, often a door or a window, usually gets no mark and is counted in omitted; a section, elevation or 3D view may mark it.",
+  threeD: "In 3D views with transparent graphics a mark can sit on faint lines of an element seen through another.",
+  threeDDatums: "Levels and grids are not marked in 3D views.",
+});
+
 export function captureError(code, message, detail) {
   const error = new Error(message);
   error.code = code;
@@ -80,6 +98,96 @@ export function pngDimensions(bytes) {
   const width = bytes.readUInt32BE(16);
   const height = bytes.readUInt32BE(20);
   return width > 0 && height > 0 ? { width, height } : null;
+}
+
+/** The ids to mark, de-duplicated in order, or null when markElementIds was not supplied. */
+export function markElementIdsFrom(value) {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw captureError("INVALID_ELEMENT_ID", "markElementIds must be a non-empty list of element ids as decimal strings, such as [\"373532\"].");
+  }
+  const ids = [];
+  for (const [index, id] of value.entries()) {
+    if (typeof id !== "string" || !ELEMENT_ID.test(id)) {
+      throw captureError("INVALID_ELEMENT_ID",
+        `markElementIds[${index}] is ${JSON.stringify(id)}, which is not a positive decimal Revit element id such as "373532".`);
+    }
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/** The category names to mark, de-duplicated in order, or null when markCategories was not supplied. */
+export function markCategoriesFrom(value) {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value)) {
+    throw captureError("INVALID_MARK_CATEGORY", "markCategories must be a list of 1 to 5 category API names, such as [\"OST_Doors\"].");
+  }
+  const names = [];
+  for (const [index, name] of value.entries()) {
+    if (typeof name !== "string" || !CATEGORY_NAME.test(name)) {
+      throw captureError("INVALID_MARK_CATEGORY",
+        `markCategories[${index}] is ${JSON.stringify(name)}, which is not a BuiltInCategory API name; use the name a legend row's category returns, such as "OST_Walls" or "OST_Doors", not the display name.`);
+    }
+    if (!names.includes(name)) names.push(name);
+  }
+  if (names.length === 0 || names.length > MAX_MARK_CATEGORIES) {
+    throw captureError("INVALID_MARK_CATEGORY",
+      `markCategories must hold 1 to ${MAX_MARK_CATEGORIES} category names; it holds ${names.length}. Name the categories you are working on.`);
+  }
+  return names;
+}
+
+function boundsFrom(value) {
+  if (value === undefined || value === null) return null;
+  const { x, y, width, height } = value;
+  if (![x, y, width, height].every(Number.isInteger) || width <= 0 || height <= 0) return undefined;
+  return { x, y, width, height };
+}
+
+/**
+ * The add-in's marks receipt as the result's marks object, with every documented field present
+ * (the pipe omits nulls), or null when it is not a well-formed receipt.
+ */
+export function marksFrom(receipt, { scope, viewType }) {
+  const requested = scope.elementIds.length > 0;
+  if (!receipt || !Array.isArray(receipt.legend) || !Number.isInteger(receipt.omitted) || receipt.omitted < 0) return null;
+  const legend = [];
+  for (const row of receipt.legend) {
+    const bounds = boundsFrom(row?.bounds);
+    if (!row || !Number.isInteger(row.mark) || row.mark !== legend.length + 1 || typeof row.elementId !== "string"
+      || !Number.isInteger(row.x) || !Number.isInteger(row.y) || bounds === undefined) return null;
+    legend.push({
+      mark: row.mark,
+      elementId: row.elementId,
+      category: row.category ?? null,
+      familyName: row.familyName ?? null,
+      typeName: row.typeName ?? null,
+      x: row.x,
+      y: row.y,
+      bounds,
+    });
+  }
+  const marks = { scope: { categories: [...scope.categories], elementIds: [...scope.elementIds] }, legend };
+  if (requested) {
+    if (!Array.isArray(receipt.notMarked)) return null;
+    marks.notMarked = [];
+    for (const row of receipt.notMarked) {
+      const bounds = boundsFrom(row?.bounds);
+      if (!row || typeof row.elementId !== "string" || !NOT_MARKED_REASONS.includes(row.reason) || bounds === undefined) return null;
+      marks.notMarked.push(row.reason === "not_placed"
+        ? { elementId: row.elementId, reason: row.reason, bounds }
+        : { elementId: row.elementId, reason: row.reason });
+    }
+  }
+  marks.omitted = receipt.omitted;
+  marks.notes = [MARK_NOTES.noMark, MARK_NOTES.every];
+  if (PLAN_VIEW_TYPES.has(viewType)) marks.notes.push(MARK_NOTES.plan, MARK_NOTES.planSymbols);
+  if (viewType === "ThreeD") {
+    marks.notes.push(MARK_NOTES.threeD);
+    if (scope.categories.some(name => DATUM_CATEGORIES.has(name))) marks.notes.push(MARK_NOTES.threeDDatums);
+  }
+  return marks;
 }
 
 function readJsonSync(file) {
@@ -367,11 +475,19 @@ export class ReferenceImages {
     return { mode: this.retention, requested: requested === true, retained, survivesSessionEnd: retained };
   }
 
-  async capture({ processId, document, viewId, pixelSize = PIXEL_SIZE.default, purpose, relatedRunIds = [], retain = false }) {
+  async capture({
+    processId, document, viewId, pixelSize = PIXEL_SIZE.default, purpose, relatedRunIds = [], retain = false,
+    markCategories, markElementIds,
+  }) {
     if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; no capture was taken.");
     if (!Number.isInteger(pixelSize) || pixelSize < PIXEL_SIZE.min || pixelSize > PIXEL_SIZE.max) {
       throw captureError("INVALID_PIXEL_SIZE", `pixelSize must be an integer from ${PIXEL_SIZE.min} through ${PIXEL_SIZE.max}.`);
     }
+    // Either scope turns marks on and limits them to the union of its elements; neither leaves
+    // the capture unmarked.
+    const markIds = markElementIdsFrom(markElementIds);
+    const markNames = markCategoriesFrom(markCategories);
+    const marked = markIds !== null || markNames !== null;
     let directory;
     try {
       directory = await this.ensureSession();
@@ -410,6 +526,9 @@ export class ReferenceImages {
         document: document ? { path: documentPath, uniqueId: document.uniqueId || null } : null,
         capture: { viewId: viewId ?? null, pixelSize, targetPath: target },
       };
+      // Only a marks request carries marks fields, so a capture without them is unchanged.
+      if (markNames) envelope.capture.markCategories = markNames;
+      if (markIds) envelope.capture.markElementIds = markIds;
       // The Revit version and build come from the pipe greeting of this same connection, so no
       // second connection competes for the single-instance pipe.
       let session = null;
@@ -428,6 +547,8 @@ export class ReferenceImages {
         let message = response?.error?.message || "Revit did not export the view.";
         if (code === "UNSUPPORTED_REQUEST") {
           message += " The Drive-It add-in loaded in Revit predates view capture (Drive-It was updated while Revit was running); ask the user to restart Revit.";
+        } else if (marked && code === "INVALID_REQUEST" && /could not be mapped/i.test(message) && /mark/i.test(message)) {
+          message += " The Drive-It add-in loaded in Revit predates element marks (Drive-It was updated while Revit was running); ask the user to restart Revit, or capture without marks.";
         }
         const detail = { stage: "export" };
         if (response?.document) detail.document = response.document;
@@ -460,7 +581,7 @@ export class ReferenceImages {
       }
       if (stat.size > MAX_IMAGE_BYTES) {
         throw captureError("CAPTURE_TOO_LARGE",
-          `The exported PNG is ${stat.size} bytes, over the ${MAX_IMAGE_BYTES}-byte (8 MiB) limit. Retry with a smaller pixelSize.`,
+          `The ${marked ? "marked" : "exported"} PNG is ${stat.size} bytes, over the ${MAX_IMAGE_BYTES}-byte (8 MiB) limit. Retry with a smaller pixelSize.`,
           { stage: "validate", byteSize: stat.size, pixelSize });
       }
       const bytes = await readFile(target);
@@ -472,6 +593,16 @@ export class ReferenceImages {
         throw captureError("CAPTURE_SIZE_EXCEEDED",
           `Revit exported ${dimensions.width}x${dimensions.height}, larger than the requested pixelSize ${pixelSize} on its longer side.`,
           { stage: "validate", width: dimensions.width, height: dimensions.height, pixelSize });
+      }
+      let markResult = null;
+      if (marked) {
+        const scope = { categories: markNames ?? [], elementIds: markIds ?? [] };
+        markResult = marksFrom(receipt.marks, { scope, viewType: receipt.viewType });
+        if (!markResult) {
+          throw captureError("MARKS_FAILED", "Revit exported the view but returned no usable marks legend; no image is returned as marked.", { stage: "validate" });
+        }
+      } else if (receipt.marks !== undefined && receipt.marks !== null) {
+        throw captureError("INVALID_IMAGE", "Revit returned marks for a capture that did not ask for them.", { stage: "validate" });
       }
       const sha256 = createHash("sha256").update(bytes).digest("hex");
       const retention = this.retentionFor(retain);
@@ -514,6 +645,7 @@ export class ReferenceImages {
           documentModifiedAfter: receipt.documentModifiedAfter ?? null,
         },
       };
+      if (markResult) metadata.marks = markResult;
 
       if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; the capture was discarded.", { stage: "store" });
       try {

@@ -748,3 +748,261 @@ test("selection errors pass view lists, totals, and an add-in restart hint throu
   });
   await assert.rejects(stale.capture({ processId: 1, purpose: "old add-in" }), error => error.code === "UNSUPPORTED_REQUEST" && /restart Revit/.test(error.message));
 });
+
+// ---- element marks (spec #8) --------------------------------------------------------------
+
+const LEGEND = [
+  // The pipe omits nulls; the result restores every documented field.
+  { mark: 1, elementId: "373532", category: "OST_Walls", familyName: "Basic Wall", typeName: "Generic - 200mm", x: 412, y: 288, bounds: { x: 380, y: 250, width: 96, height: 74 } },
+  { mark: 2, elementId: "1001", x: 30, y: 300 },
+];
+
+function marksReceipt(overrides = {}) {
+  return { legend: LEGEND, omitted: 4, ...overrides };
+}
+
+test("a capture without a scope sends no marks fields and returns no marks object", async (t) => {
+  const launchRoot = await base(t, "nomarks");
+  const envelopes = [];
+  const { client } = await connected(t, { launchRoot, brokerExecutor: fakeBroker({ envelopes }) });
+  // There is no marks argument; an old-style marks: true is not a scope and marks nothing.
+  for (const args of [{}, { marks: true }]) {
+    const result = await capture(client, args);
+    assert.ok(!result.isError, result.content[0].text);
+    assert.equal(result.structuredContent.marks, undefined);
+    assert.doesNotMatch(result.content[1].text, /element mark|"marks"/);
+    const sidecar = JSON.parse(await readFile(path.join(launchRoot, result.structuredContent.sidecarPath), "utf8"));
+    assert.equal(sidecar.marks, undefined);
+  }
+  for (const { envelope } of envelopes) assert.deepEqual(Object.keys(envelope.capture), ["viewId", "pixelSize", "targetPath"]);
+});
+
+test("markCategories returns the scope, legend, omitted count and notes in the result and sidecar, with the same bytes", async (t) => {
+  const launchRoot = await base(t, "marks");
+  const envelopes = [];
+  const bytes = png(90, 60, 0x40);
+  const { client } = await connected(t, { launchRoot, brokerExecutor: fakeBroker({ bytes, envelopes, receipt: { marks: marksReceipt() } }) });
+  const result = await capture(client, { markCategories: ["OST_Walls", "OST_Doors", "OST_Walls"], viewId: "312" });
+  assert.ok(!result.isError, result.content[0].text);
+  assert.deepEqual(envelopes[0].envelope.capture.markCategories, ["OST_Walls", "OST_Doors"]);
+  assert.equal(envelopes[0].envelope.capture.markElementIds, undefined);
+  assert.equal(envelopes[0].envelope.capture.marks, undefined);
+
+  const { marks } = result.structuredContent;
+  assert.deepEqual(marks.scope, { categories: ["OST_Walls", "OST_Doors"], elementIds: [] });
+  assert.deepEqual(marks.legend, [
+    LEGEND[0],
+    { mark: 2, elementId: "1001", category: null, familyName: null, typeName: null, x: 30, y: 300, bounds: null },
+  ]);
+  assert.equal(marks.notMarked, undefined);
+  assert.equal(marks.omitted, 4);
+  // A floor plan: what a missing mark means, the note for every marked capture, and both plan notes.
+  const { MARK_NOTES } = await import("../server/capture.js");
+  assert.deepEqual(marks.notes, [MARK_NOTES.noMark, MARK_NOTES.every, MARK_NOTES.plan, MARK_NOTES.planSymbols]);
+  assert.match(result.content[1].text, /Drew 2 element marks for the requested scope; marks\.legend maps each number to its element id\. 4 more elements in the scope may be visible without a mark\. No mark does not mean no element/);
+
+  const saved = await readFile(result.structuredContent.absolutePath);
+  assert.deepEqual(saved, bytes);
+  assert.deepEqual(Buffer.from(result.content[0].data, "base64"), saved);
+  const sidecar = JSON.parse(await readFile(path.join(launchRoot, result.structuredContent.sidecarPath), "utf8"));
+  assert.deepEqual(sidecar.marks, marks);
+});
+
+test("marks.notes always say what a missing mark means, and add the plan and 3D limits by view kind", async (t) => {
+  const launchRoot = await base(t, "notes");
+  let viewType = "FloorPlan";
+  const brokerExecutor = async (processId, envelope, options) => fakeBroker({ receipt: { viewType, marks: marksReceipt() } })(processId, envelope, options);
+  const { client } = await connected(t, { launchRoot, brokerExecutor });
+  const plan = ["noMark", "every", "plan", "planSymbols"];
+  const cases = [
+    ["FloorPlan", ["OST_Walls"], plan], ["CeilingPlan", ["OST_Walls"], plan], ["EngineeringPlan", ["OST_Walls"], plan],
+    ["FloorPlan", ["OST_Levels", "OST_Grids"], plan],
+    ["ThreeD", ["OST_Walls"], ["noMark", "every", "threeD"]],
+    ["ThreeD", ["OST_Walls", "OST_Levels"], ["noMark", "every", "threeD", "threeDDatums"]],
+    ["ThreeD", ["OST_Grids"], ["noMark", "every", "threeD", "threeDDatums"]],
+    ["Elevation", ["OST_Walls"], ["noMark", "every"]], ["Section", ["OST_Grids"], ["noMark", "every"]], ["Detail", ["OST_Walls"], ["noMark", "every"]],
+  ];
+  const { MARK_NOTES } = await import("../server/capture.js");
+  for (const [type, markCategories, keys] of cases) {
+    viewType = type;
+    const result = await capture(client, { markCategories });
+    assert.ok(!result.isError, result.content[0].text);
+    assert.deepEqual(result.structuredContent.marks.notes, keys.map(key => MARK_NOTES[key]), `${type} ${markCategories}`);
+  }
+  assert.match(MARK_NOTES.noMark, /^Marks are help in finding elements, not a list of what exists or what is visible\. An element with no mark, an empty legend, or a not_visible row may still exist and may still be in the image/);
+  assert.match(MARK_NOTES.noMark, /including an element whose visibility could not be established, and those count in omitted/);
+  assert.match(MARK_NOTES.planSymbols, /often a door or a window, usually gets no mark and is counted in omitted/);
+  assert.match(MARK_NOTES.threeD, /transparent graphics/);
+  assert.match(MARK_NOTES.threeDDatums, /Levels and grids are not marked in 3D views/);
+});
+
+test("an empty legend is a result, and still says no mark does not mean no element", async (t) => {
+  const launchRoot = await base(t, "empty");
+  const { client } = await connected(t, { launchRoot, brokerExecutor: fakeBroker({ receipt: { viewType: "FloorPlan", marks: marksReceipt({ legend: [], omitted: 12 }) } }) });
+  const result = await capture(client, { markCategories: ["OST_Doors"] });
+  assert.ok(!result.isError, result.content[0].text);
+  assert.ok(result.content.some(block => block.type === "image"));
+  const { marks } = result.structuredContent;
+  assert.deepEqual(marks.legend, []);
+  assert.equal(marks.omitted, 12);
+  assert.match(marks.notes[0], /^Marks are help in finding elements/);
+  assert.match(result.content[1].text, /Drew 0 element marks for the requested scope.*12 more elements in the scope may be visible without a mark\. No mark does not mean no element/);
+});
+
+test("markElementIds turns marks on, de-duplicates, and returns each unmarked id with its reason", async (t) => {
+  const launchRoot = await base(t, "markids");
+  const envelopes = [];
+  const notMarked = [
+    { elementId: "9", reason: "not_found" },
+    { elementId: "10", reason: "not_markable" },
+    { elementId: "11", reason: "not_in_view" },
+    { elementId: "12", reason: "not_visible" },
+    { elementId: "13", reason: "not_placed", bounds: { x: 1, y: 2, width: 3, height: 4 } },
+  ];
+  const { client } = await connected(t, {
+    launchRoot,
+    brokerExecutor: fakeBroker({ envelopes, receipt: { viewType: "Elevation", marks: marksReceipt({ legend: [LEGEND[0]], notMarked, omitted: 0 }) } }),
+  });
+  const result = await capture(client, { markElementIds: ["373532", "9", "373532", "10", "11", "12", "13"] });
+  assert.ok(!result.isError, result.content[0].text);
+  assert.deepEqual(envelopes[0].envelope.capture.markElementIds, ["373532", "9", "10", "11", "12", "13"]);
+  assert.equal(envelopes[0].envelope.capture.markCategories, undefined);
+  const { marks } = result.structuredContent;
+  assert.deepEqual(marks.scope, { categories: [], elementIds: ["373532", "9", "10", "11", "12", "13"] });
+  assert.deepEqual(marks.legend, [LEGEND[0]]);
+  assert.deepEqual(marks.notMarked, notMarked);
+  assert.equal(marks.omitted, 0);
+  const { MARK_NOTES } = await import("../server/capture.js");
+  assert.deepEqual(marks.notes, [MARK_NOTES.noMark, MARK_NOTES.every]);
+  assert.match(result.content[1].text, /marks\.notMarked lists 5 requested ids without a mark/);
+});
+
+test("markCategories and markElementIds together send both and echo the union's scope", async (t) => {
+  const launchRoot = await base(t, "union");
+  const envelopes = [];
+  const { client } = await connected(t, {
+    launchRoot,
+    brokerExecutor: fakeBroker({ envelopes, receipt: { viewType: "Section", marks: marksReceipt({ notMarked: [] }) } }),
+  });
+  const result = await capture(client, { markCategories: ["OST_Walls"], markElementIds: ["373532", "1001"] });
+  assert.ok(!result.isError, result.content[0].text);
+  assert.deepEqual(envelopes[0].envelope.capture.markCategories, ["OST_Walls"]);
+  assert.deepEqual(envelopes[0].envelope.capture.markElementIds, ["373532", "1001"]);
+  assert.deepEqual(result.structuredContent.marks.scope, { categories: ["OST_Walls"], elementIds: ["373532", "1001"] });
+  assert.deepEqual(result.structuredContent.marks.notMarked, []);
+});
+
+test("a bad category list is INVALID_MARK_CATEGORY with no Revit call and no artifact", async (t) => {
+  const launchRoot = await base(t, "badcats");
+  const envelopes = [];
+  const { client, references } = await connected(t, { launchRoot, brokerExecutor: fakeBroker({ envelopes }) });
+  const six = ["OST_Walls", "OST_Doors", "OST_Windows", "OST_Floors", "OST_Roofs", "OST_Columns"];
+  for (const markCategories of [[], six, ["Doors"], ["OST Doors"], ["ost_doors"], [""], ["OST_Walls", "Walls"]]) {
+    const result = await capture(client, { markCategories });
+    assert.equal(result.isError, true, JSON.stringify(markCategories));
+    assert.ok(!result.content.some(block => block.type === "image"));
+    assert.match(result.content[0].text, /^INVALID_MARK_CATEGORY: markCategories.*No image was captured/, JSON.stringify(markCategories));
+  }
+  // A repeated name counts once, so five distinct names are within the limit.
+  assert.equal(envelopes.length, 0);
+  const five = await capture(client, { markCategories: [...six.slice(0, 5), "OST_Walls"] });
+  assert.match(five.content[0].text, /^MARKS_FAILED/);
+  assert.deepEqual(envelopes[0].envelope.capture.markCategories, six.slice(0, 5));
+  assert.equal((await capture(client, { markCategories: [42] })).isError, true);
+  assert.equal(envelopes.length, 1);
+  assert.deepEqual(await listTree(path.join(launchRoot, REFERENCE_DIRECTORY, references.sessionId)), [SESSION_MARKER]);
+});
+
+test("a malformed element id is a specific error with no Revit call and no artifact", async (t) => {
+  const launchRoot = await base(t, "badids");
+  const envelopes = [];
+  const { client, references } = await connected(t, { launchRoot, brokerExecutor: fakeBroker({ envelopes }) });
+  for (const markElementIds of [["12a"], ["0"], ["-5"], ["007"], [""], ["12345678901234567890"], []]) {
+    const result = await capture(client, { markElementIds });
+    assert.equal(result.isError, true, JSON.stringify(markElementIds));
+    assert.ok(!result.content.some(block => block.type === "image"));
+    assert.match(result.content[0].text, /^INVALID_ELEMENT_ID: markElementIds.*No image was captured/, JSON.stringify(markElementIds));
+  }
+  // Ids are strings; a number is rejected by the argument schema.
+  assert.equal((await capture(client, { markElementIds: [42] })).isError, true);
+  assert.equal(envelopes.length, 0);
+  assert.deepEqual(await listTree(path.join(launchRoot, REFERENCE_DIRECTORY, references.sessionId)), []);
+});
+
+test("marks failures return a specific error, no image presented as marked, and no partial artifact", async (t) => {
+  const launchRoot = await base(t, "markfail");
+  let mode;
+  const big = Buffer.concat([png(4, 4).subarray(0, 33), Buffer.alloc(MAX_IMAGE_BYTES)]);
+  const brokerExecutor = async (processId, envelope, options) => {
+    if (mode === "unavailable" || mode === "drawing" || mode === "stale" || mode === "category") {
+      const [code, message] = {
+        unavailable: ["marks_unavailable", "Marks are unavailable for view '{3D} camera' (355099): it is a perspective 3D view."],
+        drawing: ["marks_failed", "Revit exported view 'Level 1', but its marks could not be drawn: out of memory."],
+        stale: ["invalid_request", "The JSON property 'markCategories' could not be mapped to any .NET member contained in type 'DriveIt.Revit.Broker.CaptureRequest'."],
+        category: ["invalid_mark_category", "markCategories holds 'OST_Rooms': elements of that category are never marked."],
+      }[mode];
+      return { id: envelope.id, type: "view.capture", status: "failed", error: { code, message } };
+    }
+    const receipt = {
+      missing: {},
+      malformed: { marks: { legend: [{ mark: 2, elementId: "1", x: 1, y: 1 }], omitted: 0 } },
+      badReason: { marks: { legend: [], notMarked: [{ elementId: "1", reason: "hidden" }], omitted: 0 } },
+      big: { marks: marksReceipt() },
+    }[mode];
+    return fakeBroker({ bytes: mode === "big" ? big : png(32, 32), receipt })(processId, envelope, options);
+  };
+  const { client, references } = await connected(t, { launchRoot, brokerExecutor });
+  const sessionDirectory = path.join(launchRoot, REFERENCE_DIRECTORY, references.sessionId);
+  const cases = {
+    unavailable: /^MARKS_UNAVAILABLE: Marks are unavailable for view .*perspective/,
+    drawing: /^MARKS_FAILED: Revit exported view 'Level 1', but its marks could not be drawn/,
+    stale: /^INVALID_REQUEST: .*predates element marks.*restart Revit/,
+    category: /^INVALID_MARK_CATEGORY: markCategories holds 'OST_Rooms': elements of that category are never marked/,
+    missing: /^MARKS_FAILED: .*no image is returned as marked/,
+    malformed: /^MARKS_FAILED:/,
+    badReason: /^MARKS_FAILED:/,
+    big: /^CAPTURE_TOO_LARGE: The marked PNG is \d+ bytes/,
+  };
+  for (const [name, pattern] of Object.entries(cases)) {
+    mode = name;
+    const result = await capture(client, name === "badReason" ? { markElementIds: ["1"] } : { markCategories: [name === "category" ? "OST_Rooms" : "OST_Walls"] });
+    assert.equal(result.isError, true, name);
+    assert.ok(!result.content.some(block => block.type === "image"), name);
+    assert.match(result.content[0].text, pattern, name);
+    assert.match(result.content[0].text, /No image was captured/, name);
+  }
+  assert.deepEqual(await listTree(sessionDirectory), [SESSION_MARKER]);
+
+  // Marks in a receipt nobody asked for are not passed off as an unmarked capture.
+  mode = "big";
+  const unasked = await client.callTool({ name: "capture_revit_view", arguments: { purpose: "check" } });
+  assert.equal(unasked.isError, true);
+});
+
+test("discovery carries brief marks guidance beside the intact visual QA rule", async (t) => {
+  const launchRoot = await base(t, "guidance");
+  const { client } = await connected(t, { launchRoot, brokerExecutor: fakeBroker() });
+  const { tools } = await client.listTools();
+  const tool = tools.find(candidate => candidate.name === "capture_revit_view");
+  for (const text of [SERVER_INSTRUCTIONS, tool.description]) {
+    assert.match(text, /Element marks are optional and need a scope: pass markCategories with the categories you are working on \(up to five\), or markElementIds with the ids a run affected, or both; leave both off for a clean visual check/);
+    assert.match(text, /Category names are API names as the legend returns them, such as OST_Walls/);
+    assert.match(text, /marks\.legend to an elementId, API category, family, type, and the pixel bounds/);
+    assert.match(text, /Marks are help, not a list of what exists: no mark, an empty legend, or not_visible does not mean the element is absent or hidden/);
+    assert.match(text, /In a plan, families drawn only as symbols, often doors and windows, usually get no mark/);
+    assert.match(text, /judge the model from an unmarked capture and identify elements from a marked one/);
+    assert.match(text, /pass the affected element ids in markElementIds/);
+    assert.match(text, /Mark numbers change between captures; carry the elementId forward/);
+    assert.match(text, /Perspective 3D views do not support marks/);
+    assert.match(text, /Receipts and structured checks remain the authority/);
+    assert.match(text, /never claim a visual pass you did not see/);
+  }
+  assert.equal(tool.inputSchema.properties.marks, undefined);
+  assert.equal(tool.inputSchema.properties.markCategories.type, "array");
+  assert.match(tool.inputSchema.properties.markCategories.description, /^1 to 5 categories to mark, as API names the legend returns/);
+  assert.equal(tool.inputSchema.properties.markElementIds.type, "array");
+  assert.match(tool.inputSchema.properties.markElementIds.description, /not_found, not_markable, not_in_view, not_visible, or not_placed/);
+  assert.match(tool.inputSchema.properties.markElementIds.description, /No mark never means the element is absent: not_visible means no mark could be confirmed, including an element whose visibility could not be established/);
+  assert.deepEqual(tool.inputSchema.required, ["purpose"]);
+  assert.ok(tool.outputSchema.properties.marks);
+});

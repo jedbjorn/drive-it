@@ -1,13 +1,17 @@
+using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json.Nodes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+using DriveIt.Revit.Marks;
 
 namespace DriveIt.Revit.Broker;
 
 /// <summary>
 /// view.capture: exports one existing graphical view with Document.ExportImage, in Revit's API
 /// context, into the empty staging directory the MCP server created for this capture. It starts no
-/// transaction and creates no view; the server validates, hashes and publishes the PNG.
+/// transaction and creates no view; the server validates, hashes and publishes the PNG. With marks
+/// requested, the add-in draws numbered element marks on the exported PNG before handing it over.
 /// </summary>
 public sealed partial class DocumentDispatcher
 {
@@ -19,6 +23,8 @@ public sealed partial class DocumentDispatcher
     private const int MaximumListedViewsPerType = 20;
     private const int MaximumOtherViewsPerType = 5;
     private const int PixelTolerance = 2;
+    private const string MarksDiagnosticsVariable = "DRIVE_IT_MARKS_DIAGNOSTICS";
+    private const int MaximumMarkCategories = 5;
 
     /// <summary>The graphical model views a capture accepts, in RVT and RFA documents alike.</summary>
     private static readonly HashSet<ViewType> CapturableViewTypes =
@@ -53,11 +59,18 @@ public sealed partial class DocumentDispatcher
                 throw new RequestRejectedException("invalid_pixel_size",
                     $"pixelSize must be an integer from {MinimumPixelSize} through {MaximumPixelSize}.");
 
+            var markIds = ParseMarkElementIds(capture.MarkElementIds);
+            var marks = markIds is not null || capture.MarkCategories is not null;
+
             // Identity is checked here, in the API context, not when the request was queued.
             var state = ResolveCaptureDocument(application, request.Document, capture.ViewId);
             document = state.Document;
             response.Document = IdentitySnapshot(state);
+            var markCategories = ParseMarkCategories(document, capture.MarkCategories);
             var view = SelectView(application, document, capture.ViewId);
+            if (marks && MarkEngine.UnavailableReason(view) is { } unavailable)
+                throw new RequestRejectedException("marks_unavailable",
+                    $"Marks are unavailable for view '{view.Name}' ({view.Id.Value}): {unavailable}.");
             var receipt = new CaptureReceipt
             {
                 ViewId = view.Id.Value.ToString(CultureInfo.InvariantCulture),
@@ -86,7 +99,10 @@ public sealed partial class DocumentDispatcher
                         $"Revit exported {width}x{height} for view '{view.Name}', larger than pixelSize {capture.PixelSize} on its longer side with either fit direction.");
             }
             receipt.FitDirection = fit.ToString();
-            File.Move(produced, target);
+            if (marks)
+                receipt.Marks = DrawMarks(document, view, markIds, markCategories, produced, target, request.Id);
+            else
+                File.Move(produced, target);
             receipt.DocumentModifiedAfter = document.IsModified;
             if (receipt.DocumentModifiedBefore == false && receipt.DocumentModifiedAfter == true)
                 throw new RequestRejectedException("document_modified_by_capture",
@@ -103,6 +119,120 @@ public sealed partial class DocumentDispatcher
             Fail(response, "export_failed", $"Revit could not export the view: {exception.Message}", document, stagingDirectory);
         }
         return response;
+    }
+
+    /// <summary>Decimal element ids, de-duplicated in request order; null when none were sent.</summary>
+    private static List<long>? ParseMarkElementIds(List<string>? raw)
+    {
+        if (raw is null)
+            return null;
+        var ids = new List<long>();
+        foreach (var text in raw)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length > 19 || text[0] == '0'
+                || !long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var id))
+                throw new RequestRejectedException("invalid_element_id",
+                    $"markElementIds holds '{text}', which is not a positive decimal Revit element id.");
+            if (!ids.Contains(id))
+                ids.Add(id);
+        }
+        return ids;
+    }
+
+    /// <summary>
+    /// BuiltInCategory member names, de-duplicated in request order; null when none were sent.
+    /// Refuses an empty or over-long list, a name that is not a member, and a category never marked.
+    /// </summary>
+    private static List<BuiltInCategory>? ParseMarkCategories(Document document, List<string>? raw)
+    {
+        if (raw is null)
+            return null;
+        var names = raw.Distinct(StringComparer.Ordinal).ToList();
+        if (names.Count is 0 or > MaximumMarkCategories)
+            throw new RequestRejectedException("invalid_mark_category",
+                $"markCategories must hold 1 to {MaximumMarkCategories} category names; it holds {names.Count}.");
+        var categories = new List<BuiltInCategory>();
+        foreach (var name in names)
+        {
+            if (MarkEngine.CategoryRefusal(document, name, out var category) is { } refusal)
+                throw new RequestRejectedException("invalid_mark_category", $"markCategories holds '{name}': {refusal}.");
+            categories.Add(category);
+        }
+        return categories;
+    }
+
+    /// <summary>
+    /// Computes marks from the export and writes the marked image to the target, then removes the
+    /// export. Any failure leaves no image at the target, so an unmarked export is never handed
+    /// over as a marked one.
+    /// </summary>
+    private static MarksReceipt DrawMarks(Document document, View view, List<long>? markIds, List<BuiltInCategory>? markCategories,
+        string produced, string target, string label)
+    {
+        try
+        {
+            var timer = Stopwatch.StartNew();
+            var (width, height, bgra) = MarkImaging.ReadBgra(produced);
+            var outcome = new MarkEngine(document, view, markIds, markCategories ?? []).Run(width, height, bgra);
+            MarkImaging.DrawMarks(width, height, bgra, outcome.Draw, outcome.Radius, target);
+            var elapsed = timer.ElapsedMilliseconds;
+            var diagnostics = Environment.GetEnvironmentVariable(MarksDiagnosticsVariable);
+            if (!string.IsNullOrWhiteSpace(diagnostics))
+                MarkImaging.WriteDiagnostics(diagnostics, label, produced, width, height, outcome, MarksReport(view, outcome, elapsed));
+            File.Delete(produced);
+            return outcome.Receipt;
+        }
+        catch (RequestRejectedException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new RequestRejectedException("marks_failed",
+                $"Revit exported view '{view.Name}', but its marks could not be drawn: {exception.Message}");
+        }
+    }
+
+    /// <summary>Verification-only report beside the diagnostic images; never part of the tool result.</summary>
+    private static JsonObject MarksReport(View view, MarkOutcome outcome, long marksMs)
+    {
+        var legend = new JsonArray();
+        for (var i = 0; i < outcome.Receipt.Legend.Count; i++)
+        {
+            var row = outcome.Receipt.Legend[i];
+            legend.Add(new JsonObject
+            {
+                ["mark"] = row.Mark,
+                ["elementId"] = row.ElementId,
+                ["category"] = row.Category,
+                ["familyName"] = row.FamilyName,
+                ["typeName"] = row.TypeName,
+                ["x"] = row.X,
+                ["y"] = row.Y,
+                ["bounds"] = row.Bounds is null ? null : new JsonObject
+                {
+                    ["x"] = row.Bounds.X, ["y"] = row.Bounds.Y, ["width"] = row.Bounds.Width, ["height"] = row.Bounds.Height,
+                },
+                ["kind"] = outcome.Kinds[i],
+                ["clearancePx"] = outcome.Clearances[i],
+            });
+        }
+        return new JsonObject
+        {
+            ["view"] = new JsonObject
+            {
+                ["id"] = view.Id.Value.ToString(CultureInfo.InvariantCulture),
+                ["name"] = view.Name,
+                ["type"] = view.ViewType.ToString(),
+            },
+            ["marksMs"] = marksMs,
+            ["radius"] = outcome.Radius,
+            ["omitted"] = outcome.Receipt.Omitted,
+            ["counts"] = new JsonObject(outcome.Counts.Select(pair => new KeyValuePair<string, JsonNode?>(pair.Key, pair.Value))),
+            ["legend"] = legend,
+            ["notMarked"] = outcome.Receipt.NotMarked is null ? null : new JsonArray(outcome.Receipt.NotMarked
+                .Select(row => (JsonNode)new JsonObject { ["elementId"] = row.ElementId, ["reason"] = row.Reason }).ToArray()),
+        };
     }
 
     private static string ExportOnce(Document document, View view, FitDirectionType fit, int pixelSize, string stagingDirectory)

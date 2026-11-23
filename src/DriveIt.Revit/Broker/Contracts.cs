@@ -25,6 +25,10 @@ public sealed class CaptureRequest
     public string? ViewId { get; set; }
     public int PixelSize { get; set; }
     public string TargetPath { get; set; } = "";
+    /// <summary>Marks the elements of these BuiltInCategory member names (1 to 5). With MarkElementIds, the union.</summary>
+    public List<string>? MarkCategories { get; set; }
+    /// <summary>Marks these decimal element ids. Either scope turns marks on; neither leaves the capture unmarked.</summary>
+    public List<string>? MarkElementIds { get; set; }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -116,12 +120,51 @@ public sealed class CaptureReceipt
     public bool? DocumentModifiedAfter { get; set; }
     public bool TemporaryViewCreated { get; set; }
     public bool TransactionStarted { get; set; }
+    public MarksReceipt? Marks { get; set; }
     public List<ViewSummary>? AvailableViews { get; set; }
     public List<ViewSummary>? OtherViews { get; set; }
     public int? AvailableViewsTotal { get; set; }
     public int? OtherViewsTotal { get; set; }
     public int? ViewsListedPerType { get; set; }
     public int? OtherViewsListedPerType { get; set; }
+}
+
+/// <summary>
+/// The marks drawn on a capture: one legend row per mark in mark order, the requested ids that got
+/// no mark (only with markElementIds), and the count of elements that may be visible but got none.
+/// </summary>
+public sealed class MarksReceipt
+{
+    public List<MarkLegendRow> Legend { get; set; } = [];
+    public List<MarkNotMarkedRow>? NotMarked { get; set; }
+    public int Omitted { get; set; }
+}
+
+public sealed class MarkLegendRow
+{
+    public int Mark { get; set; }
+    public string ElementId { get; set; } = "";
+    public string? Category { get; set; }
+    public string? FamilyName { get; set; }
+    public string? TypeName { get; set; }
+    public int X { get; set; }
+    public int Y { get; set; }
+    public PixelBounds? Bounds { get; set; }
+}
+
+public sealed class MarkNotMarkedRow
+{
+    public string ElementId { get; set; } = "";
+    public string Reason { get; set; } = "";
+    public PixelBounds? Bounds { get; set; }
+}
+
+public sealed class PixelBounds
+{
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
 }
 
 public sealed class ViewSummary
