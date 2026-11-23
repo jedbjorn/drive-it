@@ -46,14 +46,15 @@ function Get-Field($Object, [string]$Name) {
     return $property.Value
 }
 
-function Invoke-Broker([object[]]$Operations, $Document = $null) {
+function Invoke-Broker([object[]]$Operations, $Document = $null, [string]$Root = $WorkspaceRoot, $Approval = $null) {
     $request = @{
         id = [guid]::NewGuid().ToString("N")
         type = "model.execute"
-        workspaceRoot = $WorkspaceRoot
+        workspaceRoot = $Root
         document = $Document
         operations = $Operations
     }
+    if ($null -ne $Approval) { $request.outsideRootApproval = $Approval }
     $json = ConvertTo-Json -InputObject $request -Depth 12 -Compress
     $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", "drive-it-$ProcessId",
         [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
@@ -346,6 +347,52 @@ Pass "background_document_not_active"
 $after = Get-Active
 Assert-True ($after.document.isModified -eq $modifiedBefore) "The fixture's IsModified changed from $modifiedBefore to $($after.document.isModified) across the queries and selection."
 Pass "is_modified_unchanged"
+
+# get_active_document retargets a later save or delete, so preflight authorizes the active
+# document's path: under a root that excludes the fixture, the whole batch stops before any effect.
+$fixtureFile = Get-Item -LiteralPath $document.path
+$writtenBefore = $fixtureFile.LastWriteTimeUtc
+$narrowRoot = Join-Path $WorkspaceRoot "f8-policy-root-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $narrowRoot | Out-Null
+try {
+    Assert-True (-not $document.path.StartsWith("$narrowRoot\", [System.StringComparison]::OrdinalIgnoreCase)) "The fixture lies inside the narrow root."
+    $background = Invoke-Broker @(Op "create_document" @{ kind = "rvt"; templatePath = $ProjectTemplate }) $null
+    Assert-Status $background "succeeded" "background document for the switched target"
+    $backgroundId = $background.document.uniqueId
+    try {
+        $cases = @(
+            @{ label = "save after get_active_document"; operation = "save_document"; target = $null },
+            @{ label = "save after get_active_document switches from a background target"; operation = "save_document"; target = (Target $backgroundId) },
+            @{ label = "delete after get_active_document"; operation = "delete_document"; target = $null }
+        )
+        foreach ($case in $cases) {
+            $refused = Invoke-Broker @((Op "get_active_document"), (Op $case.operation)) $case.target $narrowRoot
+            Assert-Status $refused "policy_required" $case.label
+            $requests = @($refused.policyRequests | Where-Object { $_.operation -eq $case.operation })
+            Assert-True ($requests.Count -eq 1 -and @($requests[0].paths).Count -eq 1 -and (Same-Path $requests[0].paths[0] $document.path)) "$($case.label): policyRequests $($refused.policyRequests | ConvertTo-Json -Compress -Depth 4)"
+            Assert-True (@($refused.changes).Count -eq 0 -and @($refused.affectedFiles).Count -eq 0) "$($case.label) reported effects."
+            Assert-True (Test-Path -LiteralPath $document.path -PathType Leaf) "$($case.label) removed the fixture."
+            Assert-True ((Get-Item -LiteralPath $document.path).LastWriteTimeUtc -eq $writtenBefore) "$($case.label) wrote the fixture."
+        }
+        Assert-True ((Get-Active).document.uniqueId -eq $documentId) "A refused batch changed the active document."
+        Pass "outside_root_save_delete_after_get_active_document_policy_required"
+
+        $approval = @{ decisionId = "primitives-$([guid]::NewGuid().ToString('N'))"; grants = @(@{ operation = "save_document"; paths = @($document.path) }) }
+        $approved = Invoke-Broker @((Op "get_active_document"), (Op "save_document")) (Target $backgroundId) $narrowRoot $approval
+        Assert-Status $approved "succeeded" "approved save after get_active_document"
+        Assert-True (@($approved.affectedFiles).Count -eq 1 -and (Same-Path $approved.affectedFiles[0] $document.path)) "Approved save affectedFiles: $($approved.affectedFiles -join ', ')"
+        $inside = Invoke-Broker @((Op "get_active_document"), (Op "save_document")) $null
+        Assert-Status $inside "succeeded" "inside-root save after get_active_document"
+        Assert-True (@($inside.affectedFiles).Count -eq 1 -and (Same-Path $inside.affectedFiles[0] $document.path)) "Inside-root save affectedFiles: $($inside.affectedFiles -join ', ')"
+        Pass "approved_and_inside_root_save_after_get_active_document"
+    }
+    finally {
+        Invoke-Broker @(Op "close_document") (Target $backgroundId) | Out-Null
+    }
+}
+finally {
+    Remove-Item -LiteralPath $narrowRoot -Force
+}
 
 [ordered]@{
     status = "succeeded"

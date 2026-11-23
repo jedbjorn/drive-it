@@ -84,7 +84,11 @@ public sealed partial class DocumentDispatcher
             var item = new PreparedOperation(operation.Type);
             if (IsQuery(operation.Type))
             {
-                // Queries and selection carry no policy paths and never change currentPath.
+                // Queries and selection carry no policy paths. get_active_document retargets the
+                // operations after it, so a later save or delete is authorized for the active
+                // document's path; the rest leave currentPath unchanged.
+                if (operation.Type == "get_active_document")
+                    currentPath = ActiveDocumentPath(application);
                 item.Query = PrepareQuery(operation);
                 prepared.Add(item);
                 continue;
@@ -178,6 +182,7 @@ public sealed partial class DocumentDispatcher
                     break;
                 case "save_document":
                     current = RequireDocument(current);
+                    RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
                     Save(current, response);
                     break;
                 case "save_as_document":
@@ -191,6 +196,7 @@ public sealed partial class DocumentDispatcher
                     break;
                 case "delete_document":
                     current = RequireDocument(current);
+                    RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
                     Delete(current, response);
                     current = null;
                     break;
@@ -621,6 +627,28 @@ public sealed partial class DocumentDispatcher
     private static bool AllCovered(OutsideRootApproval? approval, List<PolicyPathGrant> requests)
     {
         return requests.All(request => request.Paths.All(path => WorkspacePolicy.IsCovered(approval, request.Operation, path)));
+    }
+
+    /// <summary>
+    /// The path Revit's window shows, as preflight sees it; null when nothing is active or the
+    /// active document is unsaved (save and delete then fail on their own before any effect).
+    /// </summary>
+    private static string? ActiveDocumentPath(UIApplication application) =>
+        application.ActiveUIDocument?.Document is { IsLinked: false } active ? CanonicalDocumentPath(active) : null;
+
+    /// <summary>
+    /// Fail-closed backstop for save and delete: the file the operation actually reaches must be
+    /// inside the root or covered by the batch's decision, even where preflight predicted another
+    /// target (for example, save_as_document on the active document before get_active_document).
+    /// </summary>
+    private static void RequireAuthorized(BrokerRequest request, string root, string operation, DocumentState state)
+    {
+        var path = CanonicalDocumentPath(state.Document);
+        if (path is null || WorkspacePolicy.IsInside(root, path)
+            || WorkspacePolicy.IsCovered(request.OutsideRootApproval, operation, path))
+            return;
+        throw new RequestRejectedException("policy_required",
+            $"{operation} reaches {path}, outside the workspace root, and the batch's outside-root decision does not cover it.");
     }
 
     private static bool HasEffects(BrokerResponse response) =>
