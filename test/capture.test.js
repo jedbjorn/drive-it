@@ -182,6 +182,8 @@ test("discovery carries the visual QA rule and honest annotations", async (t) =>
   assert.match(SERVER_INSTRUCTIONS, /capture_revit_view/);
   assert.match(SERVER_INSTRUCTIONS, /visual evidence is missing/);
   assert.match(SERVER_INSTRUCTIONS, /no suitable 3D view exists, create one with the create_3d_view operation/);
+  assert.match(SERVER_INSTRUCTIONS, /reuse a 3D view you created earlier in the session/);
+  assert.match(SERVER_INSTRUCTIONS, /tell the user you added that view to their model/);
   const { tools } = await client.listTools();
   const tool = tools.find(candidate => candidate.name === "capture_revit_view");
   assert.ok(tool);
