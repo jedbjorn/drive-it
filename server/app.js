@@ -2,7 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiReference, API_VERSION } from "./reference.js";
 import { Runtime } from "./runtime.js";
-import { readSession, sessionError } from "./session.js";
+import { revitContent } from "./content.js";
+import { readSession, resolveProcessId, sessionError } from "./session.js";
 import { defaultDataDir } from "./store.js";
 import { SCRIPT_ID, summarize as summarizeRow } from "./library.js";
 
@@ -51,26 +52,47 @@ const scriptSummary = z.object({
 });
 const receiptStatus = z.enum(["pending", "denied", "failed", "timed_out", "partially_applied", "succeeded"]);
 
+// Plain instructions ahead of the JSON receipt, so a model resumes a pending run instead of
+// starting a new request with a new key.
+function statusGuidance(receipt) {
+  if (receipt.status === "pending") {
+    return `WAITING FOR THE USER: this run needs a one-time approval for ${receipt.policyRequests.map(request => `${request.operation} ${request.paths.join(", ")}`).join("; ")}. Ask the user to approve or deny it in the Drive-It window (Revit Add-Ins tab > Drive-It, or Start menu > Drive-It). After they approve, call execute_script again with idempotencyKey "${receipt.idempotencyKey}" and the same request to resume; a different key starts a new request that needs a new approval.\n`;
+  }
+  if (receipt.status === "denied") {
+    return "DENIED BY THE USER: do not retry this request; ask the user how they want to proceed.\n";
+  }
+  return "";
+}
+
 export function createDriveItServer(options = {}) {
   const dataDir = options.dataDir || defaultDataDir();
   const runtime = options.runtime || new Runtime({ ...options, dataDir });
   const sessionReader = options.sessionReader || readSession;
+  const processResolver = options.processResolver || resolveProcessId;
+  const contentReader = options.contentReader || revitContent;
   const server = new McpServer({ name: "drive-it", version: "0.1.0" });
 
   server.registerTool("get_revit_session", {
-    description: "Read the Revit version, build, and current-user connection identity from a running Drive It add-in.",
-    inputSchema: { processId: processId.describe("Windows process ID of Revit.exe") },
+    description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user, and Revit's installed project templates, family template folders, and library folders. Use these real paths instead of guessing file names.",
+    inputSchema: { processId: processId.optional().describe("Windows process ID of Revit.exe; omit it to use the only running Revit") },
     outputSchema: {
       processId,
       version: z.string(),
       build: z.string(),
       connectionIdentity: z.string(),
+      workspaceRoot: z.string().nullable(),
+      content: z.object({
+        projectTemplates: stringList,
+        familyTemplateFolders: stringList,
+        libraryFolders: stringList,
+      }),
     },
     annotations: { readOnlyHint: true },
   }, async ({ processId }) => {
     try {
-      const info = await sessionReader(processId);
-      return { content: [{ type: "text", text: JSON.stringify(info) }], structuredContent: info };
+      const info = await sessionReader(await processResolver(processId));
+      const value = { ...info, workspaceRoot: await runtime.workspace.getRoot(), content: await contentReader(info.version) };
+      return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: sessionError(error) }] };
     }
@@ -79,13 +101,13 @@ export function createDriveItServer(options = {}) {
   server.registerTool("execute_script", {
     description: "Run inline Python or an exact saved script revision in the isolated fixed worker. File and typed Revit effects follow the persistent workspace policy and return a durable receipt.",
     inputSchema: {
-      processId: processId.describe("Windows process ID of the selected Revit.exe"),
+      processId: processId.optional().describe("Windows process ID of the selected Revit.exe; omit it to use the only running Revit"),
       displayName: z.string().trim().min(1).max(200).describe("Required. One plain-language line, written for the user, saying what this run does to their files or model, e.g. \"Add Level 3 at 24 ft to the tower model\". Shown in the Drive-It operator window's run history and approval requests"),
       source: z.string().min(1).optional().describe("Inline Python source; mutually exclusive with script"),
       script: scriptReference.optional().describe("Saved script reference; mutually exclusive with source. An exact draft or active revision, or \"latest\" for the newest active revision. Retired revisions are rejected"),
       arguments: z.record(z.string(), z.unknown()).optional().describe("JSON arguments exposed to Python as args; saved scripts validate them against the revision's inputSchema and apply its defaults"),
       document: document.optional().describe("Optional model path and broker-issued document handle"),
-      idempotencyKey: z.string().min(1).max(200).optional().describe("Replay key; completed runs return their original receipt"),
+      idempotencyKey: z.string().min(1).max(200).optional().describe("Replay key; completed runs return their original receipt. To resume a run that returned status pending, call again with the same idempotencyKey and the same request; a new key starts a new request that needs a new approval"),
       timeoutMs: z.number().int().positive().max(120000).optional().describe("Worker timeout, default 30000 ms"),
     },
     // Must list every receipt field: MCP clients reject structured content with undeclared properties.
@@ -121,10 +143,10 @@ export function createDriveItServer(options = {}) {
     },
   }, async input => {
     try {
-      const receipt = await runtime.execute(input);
+      const receipt = await runtime.execute({ ...input, processId: await processResolver(input.processId) });
       return {
         isError: ["failed", "timed_out", "partially_applied"].includes(receipt.status) || undefined,
-        content: [{ type: "text", text: JSON.stringify(receipt) }],
+        content: [{ type: "text", text: `${statusGuidance(receipt)}${JSON.stringify(receipt)}` }],
         structuredContent: receipt,
       };
     } catch (error) {

@@ -79,3 +79,36 @@ export function sessionError(error) {
     ? "Check the Revit process ID and that the Drive It add-in is loaded."
     : error.message;
 }
+
+const SESSION_PIPE = /^drive-it-(\d+)$/;
+
+async function listPipes() {
+  if (process.platform !== "win32") return [];
+  const { readdir } = await import("node:fs/promises");
+  return readdir("\\\\.\\pipe\\");
+}
+
+// Every Revit with the add-in loaded serves drive-it-<pid>; stale or busy pipes are skipped.
+export async function listSessions({ pipeLister = listPipes, reader = readSession } = {}) {
+  const ids = (await pipeLister()).map(name => SESSION_PIPE.exec(name)?.[1]).filter(Boolean).map(Number);
+  const sessions = await Promise.all(ids.map(id => reader(id, { timeoutMs: 2000 }).catch(() => null)));
+  return sessions.filter(Boolean);
+}
+
+function sessionLookupError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+// An explicit processId wins; otherwise the only running session is used.
+export async function resolveProcessId(processId, { lister = listSessions } = {}) {
+  if (processId !== undefined) return processId;
+  const sessions = await lister();
+  if (sessions.length === 1) return sessions[0].processId;
+  if (sessions.length === 0) {
+    throw sessionLookupError("REVIT_NOT_RUNNING", "No running Revit 2026 has the Drive It add-in loaded. Ask the user to start Revit 2026 and, if Revit asks about Drive It, to choose Always Load; then try again.");
+  }
+  const list = sessions.map(session => `processId ${session.processId} (Revit ${session.version})`).join(", ");
+  throw sessionLookupError("MULTIPLE_REVIT_SESSIONS", `Several Revit sessions are running: ${list}. Ask the user which Revit window to use and pass its processId.`);
+}
