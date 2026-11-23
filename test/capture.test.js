@@ -471,17 +471,24 @@ test("the stdio server sweeps dead sessions at startup under DRIVE_IT_LAUNCH_ROO
   const dead = await fakeSession(path.join(launchRoot, REFERENCE_DIRECTORY), "20261101T000000Z-000000aa",
     { processId: pid, processStartedAt: new Date().toISOString() }, pair("20261101T000001Z-000000a1", false));
   const client = new Client({ name: "drive-it-capture-stdio", version: "1" });
-  await client.connect(new StdioClientTransport({
+  const transport = new StdioClientTransport({
     command: process.execPath,
     args: [fileURLToPath(new URL("../server/index.js", import.meta.url))],
     cwd,
     env: { ...process.env, DRIVE_IT_DATA_DIR: path.join(directory, "data"), DRIVE_IT_LAUNCH_ROOT: launchRoot },
-  }));
-  t.after(() => client.close());
-  const { tools } = await client.listTools();
-  assert.ok(tools.some(tool => tool.name === "capture_revit_view"));
-  await waitFor(() => !existsSync(dead));
-  assert.ok(!existsSync(path.join(cwd, REFERENCE_DIRECTORY)));
+  });
+  await client.connect(transport);
+  // The child must be gone before the temporary tree is removed: Windows locks its cwd.
+  const child = transport._process;
+  try {
+    const { tools } = await client.listTools();
+    assert.ok(tools.some(tool => tool.name === "capture_revit_view"));
+    await waitFor(() => !existsSync(dead));
+    assert.ok(!existsSync(path.join(cwd, REFERENCE_DIRECTORY)));
+  } finally {
+    await client.close();
+    if (child.exitCode === null && child.signalCode === null) await once(child, "exit");
+  }
 });
 
 // End to end over stdio and a real named pipe that plays the add-in: the protocol, the file
@@ -524,19 +531,23 @@ test("stdio capture through the pipe contract, then cleanup at client shutdown",
   });
   const client = new Client({ name: "drive-it-capture-pipe", version: "1" });
   await client.connect(transport);
-  await client.listTools();
-  const dropped = await client.callTool({ name: "capture_revit_view", arguments: { processId, purpose: "pipe contract" } });
-  assert.ok(!dropped.isError, dropped.content[0].text);
-  assert.deepEqual(Buffer.from(dropped.content[0].data, "base64"), bytes);
-  assert.deepEqual(await readFile(dropped.structuredContent.absolutePath), bytes);
-  const kept = await client.callTool({ name: "capture_revit_view", arguments: { processId, purpose: "keep this", retain: true, viewId: "312" } });
-  assert.ok(!kept.isError, kept.content[0].text);
-  assert.equal(envelopes[0].type, "view.capture");
-  assert.equal(envelopes[1].capture.viewId, "312");
-
   const child = transport._process;
-  await client.close();
-  if (child.exitCode === null) await once(child, "exit");
+  let dropped;
+  let kept;
+  try {
+    await client.listTools();
+    dropped = await client.callTool({ name: "capture_revit_view", arguments: { processId, purpose: "pipe contract" } });
+    assert.ok(!dropped.isError, dropped.content[0].text);
+    assert.deepEqual(Buffer.from(dropped.content[0].data, "base64"), bytes);
+    assert.deepEqual(await readFile(dropped.structuredContent.absolutePath), bytes);
+    kept = await client.callTool({ name: "capture_revit_view", arguments: { processId, purpose: "keep this", retain: true, viewId: "312" } });
+    assert.ok(!kept.isError, kept.content[0].text);
+    assert.equal(envelopes[0].type, "view.capture");
+    assert.equal(envelopes[1].capture.viewId, "312");
+  } finally {
+    await client.close();
+    if (child.exitCode === null && child.signalCode === null) await once(child, "exit");
+  }
   assert.ok(!existsSync(dropped.structuredContent.absolutePath));
   assert.ok(existsSync(kept.structuredContent.absolutePath));
 });
