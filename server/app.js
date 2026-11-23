@@ -4,7 +4,7 @@ import { apiReference, API_VERSION } from "./reference.js";
 import { Runtime } from "./runtime.js";
 import { revitContent } from "./content.js";
 import { executeBroker, readSession, resolveProcessId, sessionError } from "./session.js";
-import { launchRootFrom, PIXEL_SIZE, ReferenceImages, retentionFrom } from "./capture.js";
+import { launchRootFrom, NOT_MARKED_REASONS, PIXEL_SIZE, ReferenceImages, retentionFrom } from "./capture.js";
 import { defaultDataDir } from "./store.js";
 import { SCRIPT_ID, summarize as summarizeRow } from "./library.js";
 
@@ -68,9 +68,12 @@ function statusGuidance(receipt) {
 // The every-turn visual QA rule, carried by both the server instructions and the tool description.
 const VISUAL_QA_RULE = "After each modeling round and before reporting it complete: (1) review the run receipts and run explicit checks for the requested outcome; (2) if the round created or changed visible geometry, view graphics, or presentation, call capture_revit_view on at least one relevant existing view, and on more views when one projection cannot show the shape, placement, or clearance; when no suitable 3D view exists, create one with the create_3d_view operation through execute_script first (reuse a 3D view you created earlier in the session rather than creating another), capture the id from the receipt's createdViews, and tell the user you added that view to their model; (3) look at the returned image against the request and the checks, fix a visible discrepancy that is within the request, then repeat the checks and the capture; (4) report what was checked and what remains unverified. If a capture fails or no useful view exists, say that visual evidence is missing; never claim a visual pass you did not see. A round with only non-visual changes may rely on structured checks and say why a capture adds nothing. An image supports the receipts and checks; it does not prove hidden geometry, parameter values, or model quality.";
 
-export const SERVER_INSTRUCTIONS = `Drive It drives a live Autodesk Revit 2026 session. Call get_revit_session first, model with execute_script, and keep its receipts and checks as the authoritative record. Visual self-QA every modeling turn: ${VISUAL_QA_RULE}`;
+// Element marks guidance, carried by the server instructions and the tool description.
+const MARKS_GUIDANCE = "Element marks are optional: pass marks: true, or markElementIds, when your next step needs an element id, and leave them off for a clean visual check, because marks cover part of the drawing; judge the model from an unmarked capture and identify elements from a marked one. Each numbered red circle maps through marks.legend to an elementId, API category, family, type, and the pixel bounds of the element's visible part. Only elements established as visible are marked, so no mark does not mean no element. After a run, pass the affected element ids in markElementIds to see where they are; marks.notMarked says why any got no mark. Mark numbers change between captures; carry the elementId forward. Perspective 3D views do not support marks; use an orthographic view. Receipts and structured checks remain the authority.";
 
-const CAPTURE_DESCRIPTION = `Export an existing Revit view to a PNG with Revit's own renderer (Document.ExportImage, not a screenshot) and return the image for you to inspect. Supported: 3D, floor plan, ceiling plan, structural plan, elevation, section, and detail views in RVT and RFA documents; sheets, schedules, legends, drafting views, and view templates are rejected. It does not modify the Revit model; it writes a local reference image (PNG plus JSON metadata) under the server's launch root in _reference-images/<session>, deleted at session end unless retain is true or the operator keeps all captures. The view is exported as it is set up (orientation, crop, visibility); change a view through execute_script first if needed. Omit viewId to capture the document's active view; with a viewId, pass the document it belongs to whenever more than one document is open. Errors list capturable views with their ids. ${VISUAL_QA_RULE}`;
+export const SERVER_INSTRUCTIONS = `Drive It drives a live Autodesk Revit 2026 session. Call get_revit_session first, model with execute_script, and keep its receipts and checks as the authoritative record. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}`;
+
+const CAPTURE_DESCRIPTION = `Export an existing Revit view to a PNG with Revit's own renderer (Document.ExportImage, not a screenshot) and return the image for you to inspect. Supported: 3D, floor plan, ceiling plan, structural plan, elevation, section, and detail views in RVT and RFA documents; sheets, schedules, legends, drafting views, and view templates are rejected. It does not modify the Revit model; it writes a local reference image (PNG plus JSON metadata) under the server's launch root in _reference-images/<session>, deleted at session end unless retain is true or the operator keeps all captures. The view is exported as it is set up (orientation, crop, visibility); change a view through execute_script first if needed. Omit viewId to capture the document's active view; with a viewId, pass the document it belongs to whenever more than one document is open. Errors list capturable views with their ids. ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}`;
 
 export function createDriveItServer(options = {}) {
   const dataDir = options.dataDir || defaultDataDir();
@@ -327,6 +330,8 @@ export function createDriveItServer(options = {}) {
     }),
   };
 
+  const pixelBounds = z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int(), height: z.number().int() });
+
   server.registerTool("capture_revit_view", {
     title: "Capture Revit view",
     description: CAPTURE_DESCRIPTION,
@@ -342,9 +347,31 @@ export function createDriveItServer(options = {}) {
       purpose: z.string().trim().min(1).max(500).describe("Required. The modeling question this capture is meant to verify, e.g. \"Are the four walls closed at the corners?\""),
       relatedRunIds: z.array(z.string().min(1).max(200)).max(50).optional().describe("execute_script runIds this capture verifies"),
       retain: z.boolean().optional().describe("Keep this image after the session ends so the user can review it"),
+      marks: z.boolean().optional().describe("Draw a numbered red circle on each visible element and return marks.legend mapping each number to elementId, category, family, type, and pixel bounds. Default false: use it when you need element ids, not for judging the drawing. Not available in perspective 3D views"),
+      markElementIds: z.array(z.string().max(64)).max(1000).optional()
+        .describe("Element ids as decimal strings, e.g. the ids a run affected. Turns marks on and marks only these; marks.notMarked gives each id that got no mark a reason: not_found, not_markable, not_in_view, not_visible, or not_placed"),
     },
     outputSchema: {
       ...captureMetadata,
+      marks: z.object({
+        legend: z.array(z.object({
+          mark: z.number().int(),
+          elementId: z.string(),
+          category: z.string().nullable().describe("BuiltInCategory member name, e.g. OST_Walls"),
+          familyName: z.string().nullable(),
+          typeName: z.string().nullable(),
+          x: z.number().int().describe("Pixel centre of the mark"),
+          y: z.number().int(),
+          bounds: pixelBounds.nullable().describe("Pixel rectangle of the element's visible part; null for levels and grids"),
+        })),
+        notMarked: z.array(z.object({
+          elementId: z.string(),
+          reason: z.enum(NOT_MARKED_REASONS),
+          bounds: pixelBounds.optional(),
+        })).optional().describe("Only with markElementIds: each requested id that got no mark"),
+        omitted: z.number().int().describe("Elements that may be visible but got no mark"),
+        notes: z.array(z.string()).describe("The limits that apply to this marked capture"),
+      }).optional().describe("Present only when marks were requested"),
       absolutePath: z.string().describe("Where the user can open the PNG"),
       sidecarPath: z.string().describe("Launch-root-relative path of the JSON metadata"),
     },
@@ -371,7 +398,11 @@ export function createDriveItServer(options = {}) {
       const survives = metadata.retention.survivesSessionEnd
         ? "It is kept after this session ends."
         : "It is deleted when this session ends; pass retain: true to keep a capture for the user.";
-      const summary = `Captured ${metadata.view.type} view "${metadata.view.name}" (id ${metadata.view.id}) of "${metadata.document.title}" at ${metadata.image.width}x${metadata.image.height}. Inspect the image against the request and the checks before reporting. Saved for the user at ${absolutePath}. ${survives}`;
+      let summary = `Captured ${metadata.view.type} view "${metadata.view.name}" (id ${metadata.view.id}) of "${metadata.document.title}" at ${metadata.image.width}x${metadata.image.height}. Inspect the image against the request and the checks before reporting. Saved for the user at ${absolutePath}. ${survives}`;
+      if (metadata.marks) {
+        const { legend, notMarked, omitted } = metadata.marks;
+        summary += ` Drew ${legend.length} element mark${legend.length === 1 ? "" : "s"}; marks.legend maps each number to its element id${notMarked ? `, and marks.notMarked lists ${notMarked.length} requested id${notMarked.length === 1 ? "" : "s"} without a mark` : ""}. ${omitted} more element${omitted === 1 ? "" : "s"} may be visible without a mark. Read marks.notes.`;
+      }
       return {
         content: [
           { type: "image", data: bytes.toString("base64"), mimeType: "image/png" },
