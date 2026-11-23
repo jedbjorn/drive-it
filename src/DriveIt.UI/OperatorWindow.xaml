@@ -169,7 +169,16 @@
                 <TextBlock Grid.ColumnSpan="3" Style="{StaticResource SectionText}" Text="Run history" />
                 <ListBox x:Name="HistoryList" Grid.Row="1" Style="{StaticResource OperatorList}"
                          AutomationProperties.Name="Run history"
-                         SelectionChanged="OnHistorySelected" />
+                         SelectionChanged="OnHistorySelected">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel AutomationProperties.Name="{Binding Label}">
+                                <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" />
+                                <TextBlock Text="{Binding Meta}" Style="{StaticResource MutedText}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
                 <TextBlock x:Name="NoHistoryText" Grid.Row="1" Margin="10,8" Style="{StaticResource MutedText}"
                            TextWrapping="Wrap" IsHitTestVisible="False"
                            Text="No runs yet." />

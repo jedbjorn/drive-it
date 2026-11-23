@@ -11,11 +11,30 @@ function pipeName(processId) {
   return String.raw`\\.\pipe\drive-it-${processId}`;
 }
 
-function connect(processId, timeoutMs) {
+// The add-in serves one connection at a time and re-creates its pipe after each one, so a
+// connection made right after another can briefly find no pipe (ENOENT) or a busy one (EBUSY).
+async function openPipe(processId, attempts = 8) {
+  for (let attempt = 1; ; attempt += 1) {
+    const pipe = createConnection(pipeName(processId));
+    try {
+      await new Promise((resolve, reject) => {
+        pipe.once("connect", resolve);
+        pipe.once("error", reject);
+      });
+      return pipe;
+    } catch (error) {
+      pipe.destroy();
+      if (!["ENOENT", "EBUSY"].includes(error.code) || attempt >= attempts) throw error;
+      await new Promise(resolve => setTimeout(resolve, 25 * attempt));
+    }
+  }
+}
+
+async function connect(processId, timeoutMs) {
   if (process.platform !== "win32") {
     throw new Error("Run the MCP server on the Windows machine hosting Revit.");
   }
-  const pipe = createConnection(pipeName(processId));
+  const pipe = await openPipe(processId);
   pipe.setEncoding("utf8");
   const iterator = pipe[Symbol.asyncIterator]();
   let buffered = "";
@@ -53,7 +72,7 @@ function validateSession(info, processId) {
 }
 
 export async function readSession(processId, { timeoutMs = 4000 } = {}) {
-  const connection = connect(processId, timeoutMs);
+  const connection = await connect(processId, timeoutMs);
   try {
     return validateSession(await connection.readJson(4096), processId);
   } finally {
@@ -62,7 +81,7 @@ export async function readSession(processId, { timeoutMs = 4000 } = {}) {
 }
 
 export async function executeBroker(processId, envelope, { timeoutMs = 30000 } = {}) {
-  const connection = connect(processId, timeoutMs);
+  const connection = await connect(processId, timeoutMs);
   try {
     validateSession(await connection.readJson(4096), processId);
     await connection.writeJson(envelope);

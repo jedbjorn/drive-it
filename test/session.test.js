@@ -51,3 +51,29 @@ test("Revit's installed templates, family template folders, and libraries are li
   });
   assert.deepEqual(await revitContent("2027", programData), { projectTemplates: [], familyTemplateFolders: [], libraryFolders: [] });
 });
+
+test("back-to-back reads ride out the add-in re-creating its pipe", { skip: process.platform !== "win32" }, async (t) => {
+  const { createServer } = await import("node:net");
+  const { readSession } = await import("../server/session.js");
+  const processId = 40000 + (process.pid % 20000);
+  const info = { processId, version: "2026", build: "test" };
+  let server;
+  let closed = false;
+  // Like the add-in: one connection per pipe instance, and a gap before the next instance exists.
+  const listen = () => {
+    if (closed) return;
+    server = createServer(socket => {
+      socket.end(`${JSON.stringify(info)}\n`);
+      server.close(() => setTimeout(listen, 40));
+    });
+    server.listen(String.raw`\\.\pipe\drive-it-${processId}`);
+  };
+  listen();
+  t.after(() => { closed = true; server.close(); });
+  await new Promise(resolve => setTimeout(resolve, 50));
+
+  const first = await readSession(processId);
+  const second = await readSession(processId);
+  assert.equal(first.processId, processId);
+  assert.equal(second.processId, processId);
+});
