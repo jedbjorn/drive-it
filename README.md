@@ -110,7 +110,8 @@ Revit is required to use the add-in, but not to run the Node.js tests or compile
 1. Download `DriveIt-<version>-x64.msi` from the [latest release](https://github.com/jedbjorn/drive-it/releases) and run it. It is a per-user install and needs no administrator account. The alpha MSI is unsigned, so Windows SmartScreen may warn you first: choose **More info**, then **Run anyway**.
 2. Start Revit 2026. Revit asks about the unsigned Drive It add-in the first time; choose **Always Load**.
 3. Open **Drive-It** from the Start Menu, or click **Drive-It** on Revit's **Add-Ins** tab, and select your workspace folder.
-4. Restart Claude or Codex so it picks up the new `drive-it` MCP server.
+4. Restart Claude, ChatGPT or Codex so it picks up the new `drive-it` MCP server. In the ChatGPT desktop app, Drive It's tools are available in Codex and Work mode, not in plain Chat.
+5. The first time the assistant calls a Drive It tool, the client asks for permission. Choose **Always allow** so later runs are not interrupted; Drive It still asks you itself before a script writes outside your workspace.
 
 The MSI registers Drive It with every supported MCP client it finds for your Windows user, and leaves everything else in their configuration unchanged:
 
@@ -118,10 +119,10 @@ The MSI registers Drive It with every supported MCP client it finds for your Win
 |---|---|---|
 | Claude Desktop | `%APPDATA%\Claude` exists | `mcpServers.drive-it` in `%APPDATA%\Claude\claude_desktop_config.json` |
 | Claude Desktop (Microsoft Store) | `%LOCALAPPDATA%\Claude-Data\claude_<id>` exists | `mcpServers.drive-it` in `claude_desktop_config.json` in that folder |
-| Claude Code | `%USERPROFILE%\.claude.json` exists | user-scope `mcpServers.drive-it` in `%USERPROFILE%\.claude.json` |
-| Codex (CLI and app) | `%USERPROFILE%\.codex` exists | a marked `[mcp_servers.drive-it]` block in `%USERPROFILE%\.codex\config.toml`, with a 150-second tool timeout |
+| Claude Code | `%USERPROFILE%\.claude.json` or `%USERPROFILE%\.local\bin\claude.exe` exists | a user-scope `drive-it` server, added with `claude mcp add-json -s user` when the CLI is installed, otherwise written to `mcpServers.drive-it` in `%USERPROFILE%\.claude.json` |
+| Codex CLI and the ChatGPT desktop app | `%USERPROFILE%\.codex` exists, or the ChatGPT/Codex Microsoft Store app is installed | a marked `[mcp_servers.drive-it]` block in `%USERPROFILE%\.codex\config.toml` (created if missing), with a 30-second startup timeout and a 150-second tool timeout |
 
-Before changing a client file, the installer saves a copy next to it as `<file>.drive-it.bak`. If a client configuration cannot be read, or Codex already has its own `[mcp_servers.drive-it]` table, that client is skipped and its file is left untouched. If you install a client after Drive It, repair Drive It from the folder that holds the MSI with `msiexec /fa DriveIt-<version>-x64.msi` to register it. You can also copy the entry from `%LOCALAPPDATA%\DriveIt\mcp.json` into any other stdio MCP client.
+Before changing a client file, the installer saves a copy next to it as `<file>.drive-it.bak`. If a client configuration cannot be read, `config.toml` is not valid TOML, or Codex already defines its own `drive-it` server, that client is skipped and its file is left untouched. The updated `config.toml` is also parsed before it is saved, because a malformed file stops the ChatGPT and Codex apps from starting. If you install a client after Drive It, repair Drive It from the folder that holds the MSI with `msiexec /fa DriveIt-<version>-x64.msi` to register it. You can also copy the entry from `%LOCALAPPDATA%\DriveIt\mcp.json` into any other stdio MCP client.
 
 To remove Drive It, uninstall it from Settings > Apps. This removes the application, the Revit add-in registration, the Start Menu shortcut, and the `drive-it` entries it added to Claude and Codex. Your workspace selection and run receipts in `%LOCALAPPDATA%\DriveIt` are kept. For an unattended install or removal, use `msiexec /i DriveIt-<version>-x64.msi /qn` or `msiexec /x DriveIt-<version>-x64.msi /qn`.
 
@@ -235,7 +236,7 @@ Build the self-contained installer package on a development machine with `instal
 - `dotnet build src/DriveIt.Revit -c Release` compiles the Revit 2026 add-in. The operator window is `src/DriveIt.UI` (WPF, the family theme copied from Splash-It), hosted in Revit and by `src/DriveIt.Operator` (the Start Menu exe); its operator.js client and labels are in `src/DriveIt.Core`, tested by `dotnet test test/DriveIt.Core.Tests` on any OS.
 - `DriveIt.Operator.exe --self-test <report.json>` opens and closes the window in both themes against the installed operator.js; the installer and MSI tests run it.
 - CI builds the Windows alpha package and MSI, runs the script installer tests, then installs and uninstalls the MSI silently and checks the add-in, Claude/Codex registrations, and preserved user data.
-- `test/clients.test.js` covers the Claude Desktop, Claude Code, and Codex configuration merges and their removal.
+- `test/clients.test.js` covers the Claude Desktop, Claude Code (file and CLI), Codex and ChatGPT desktop configuration merges, TOML validation, and their removal.
 - `test/revit-broker.integration.ps1` exercises the live broker against a running Revit process. Copy a project template to `C:\DriveIt\broker-fixtures\broker-project.rte` and a family template to `broker-family.rft`, then run `powershell -ExecutionPolicy Bypass -File test/revit-broker.integration.ps1 -ProcessId <pid>`. It writes JSONL receipts to that workspace and uses only disposable model files.
 
 GitHub Actions runs the tests and build on `windows-latest` for pull requests and pushes to `main`. It uses only GitHub-hosted runners; no local runner or Revit installation is required. Live Revit verification is a separate manual check.
