@@ -386,7 +386,8 @@ public sealed partial class DocumentDispatcher
             });
             response.Error = new ErrorReceipt
             {
-                Code = rolledBack ? "model_batch_failed" : "model_batch_rollback_failed",
+                Code = !rolledBack ? "model_batch_rollback_failed"
+                    : exception is RequestRejectedException rejected ? rejected.Code : "model_batch_failed",
                 Message = exception.Message,
             };
             if (rolledBack)
@@ -420,7 +421,17 @@ public sealed partial class DocumentDispatcher
 
     private static View3D Create3DView(Document document, ModelChangeRequest change)
     {
-        var view = View3D.CreateIsometric(document, ThreeDimensionalViewType(document)!.Id);
+        View3D view;
+        try
+        {
+            view = View3D.CreateIsometric(document, ThreeDimensionalViewType(document)!.Id);
+        }
+        catch (Autodesk.Revit.Exceptions.ArgumentException exception)
+        {
+            // Revit refuses some families outright, e.g. "3D view creation is not allowed in this family."
+            // for annotation families; the batch rolls back with this code.
+            throw new RequestRejectedException("view_creation_not_allowed", exception.Message.Split('\r', '\n')[0]);
+        }
         if (change.Name is not null)
             view.Name = change.Name;
         return view;
