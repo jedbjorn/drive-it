@@ -6,7 +6,7 @@
 //   { "kinds": [{ "label", "path", "viewId", optional "ids": [fixture role ids] }],
 //     "snowdon": { "path", "plan", "elevation", "section", "threeD", "cutaway", "perspective",
 //       "unmarkedId", optional "shaded" },
-//     "fixture": { "path", "perspective", "referencePlane", "iso", "plan", "covered": [ids], "scopeIds": [ids],
+//     "fixture": { "path", "perspective", "referencePlane", "iso", "plan", "covered": [[viewId, id]], "scopeIds": [ids],
 //       "symbolPath", "symbolPlan", "symbolFamily", "symbolCategory" } }
 // Every observation prints one JSON line; marked images and legends are copied to <out-dir>; the
 // process exits nonzero if any check fails.
@@ -161,10 +161,13 @@ try {
     check(`${label}: the union marks what either scope marks`, both.value.marks.legend.every(row => union.has(row.elementId)),
       { union: union.size, both: both.value.marks.legend.length });
   }
-  const covered = await capture("scope-covered", fixture.path, fixture.iso, { markElementIds: fixture.covered });
-  check("covered elements stay unmarked when what covers them is outside the scope",
-    !covered.error && covered.value.marks.legend.length === 0 && covered.value.marks.notMarked.every(row => row.reason === "not_visible"),
-  covered.value?.marks ?? covered.error);
+  // Each pair is a view and an element construction-covered in that view by elements outside the scope.
+  for (const [viewId, id] of fixture.covered) {
+    const covered = await capture(`scope-covered-${viewId}-${id}`, fixture.path, viewId, { markElementIds: [id] });
+    check(`covered element ${id} in view ${viewId} stays unmarked when what covers it is outside the scope`,
+      !covered.error && covered.value.marks.legend.length === 0 && covered.value.marks.notMarked[0]?.reason === "not_visible",
+    covered.value?.marks ?? covered.error);
+  }
 
   // --- No mark on blank image: Snowdon views with at least two category scopes each ---
   for (const [label, viewId] of [["snowdon-plan", snowdon.plan], ["snowdon-elevation", snowdon.elevation], ["snowdon-transverse", snowdon.section], ["snowdon-default-3d", snowdon.threeD]]) {
