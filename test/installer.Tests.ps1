@@ -82,9 +82,6 @@ Assert-InstallerTest ($configuration.mcpServers.'drive-it'.command -eq $node) "M
 Assert-InstallerTest ($configuration.mcpServers.'drive-it'.args[0] -eq $server) 'MCP configuration does not use the installed server.'
 Assert-InstallerTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_DATA_DIR -eq $InstallRoot) 'MCP configuration has the wrong data directory.'
 Assert-InstallerTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_PYTHON -eq $python) 'MCP configuration does not use private Python.'
-$launchRoot = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Drive-It'
-Assert-InstallerTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_LAUNCH_ROOT -eq $launchRoot) "MCP configuration has the wrong launch root: [$($configuration.mcpServers.'drive-it'.env.DRIVE_IT_LAUNCH_ROOT)]."
-Assert-InstallerTest ([IO.Directory]::Exists($launchRoot)) 'The reference-image launch root was not created.'
 
 $addinPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026\DriveIt.addin'
 Assert-InstallerTest ([IO.File]::Exists($addinPath)) 'The current-user Revit add-in was not registered.'

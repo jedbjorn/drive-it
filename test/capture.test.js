@@ -130,8 +130,8 @@ async function listTree(directory) {
 }
 
 test("launch root, retention mode, and PNG parsing", () => {
-  assert.equal(launchRootFrom({ DRIVE_IT_LAUNCH_ROOT: "  " }, "/work"), path.resolve("/work"));
-  assert.equal(launchRootFrom({ DRIVE_IT_LAUNCH_ROOT: "/docs/Drive-It" }, "/work"), path.resolve("/docs/Drive-It"));
+  assert.equal(launchRootFrom({ DRIVE_IT_LAUNCH_ROOT: "  " }, "/home/u"), path.resolve("/home/u/Drive-It"));
+  assert.equal(launchRootFrom({ DRIVE_IT_LAUNCH_ROOT: "/elsewhere" }, "/home/u"), path.resolve("/elsewhere"));
   const warnings = [];
   assert.equal(retentionFrom(undefined), "session");
   assert.equal(retentionFrom(" Keep "), "keep");

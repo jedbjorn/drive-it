@@ -10,7 +10,7 @@ import {
   lstatSync, readdirSync, readFileSync, rmdirSync, unlinkSync,
 } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import path from "node:path";
 import { canonicalPath } from "./workspace.js";
 
@@ -45,10 +45,10 @@ export function captureError(code, message, detail) {
   return error;
 }
 
-/** The launch root: DRIVE_IT_LAUNCH_ROOT when set, else the working directory at startup. */
-export function launchRootFrom(env = process.env, cwd = process.cwd()) {
+/** Where reference images go: %USERPROFILE%\Drive-It (outside OneDrive-synced folders), or DRIVE_IT_LAUNCH_ROOT. */
+export function launchRootFrom(env = process.env, home = homedir()) {
   const configured = env.DRIVE_IT_LAUNCH_ROOT?.trim();
-  return path.resolve(configured || cwd);
+  return path.resolve(configured || path.join(home, "Drive-It"));
 }
 
 /** DRIVE_IT_REFERENCE_RETENTION: session (default) or keep. Anything else falls back to session. */
