@@ -102,17 +102,20 @@ test("the CLI registers from the installer's mcp.json and honours CODEX_HOME", a
   assert.deepEqual(JSON.parse(removed).map(r => r.status), ["not_registered", "not_registered", "removed"]);
 });
 
-test("the Microsoft Store Claude Desktop is registered inside its package data", async (t) => {
+test("the Microsoft Store Claude Desktop is registered in its Claude-Data configuration", async (t) => {
   const locations = await profile(t);
-  const packages = path.join(locations.base, "Local", "Packages");
-  const store = path.join(packages, "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude");
+  const data = path.join(locations.base, "Local", "Claude-Data");
+  const store = path.join(data, "claude_pzs8sxrjxfjjc");
   await mkdir(store, { recursive: true });
-  await mkdir(path.join(packages, "ClaudeHelper_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude"), { recursive: true });
+  await mkdir(path.join(data, "claude-helper_pzs8sxrjxfjjc"), { recursive: true });
   const config = path.join(store, "claude_desktop_config.json");
+  await writeFile(config, JSON.stringify({ coworkUserFilesPath: "x", preferences: { sidebarMode: "a" } }));
 
   const registered = await registerClients(entry, locations);
   assert.deepEqual(registered.filter(row => row.status === "registered").map(row => row.file), [config]);
-  assert.deepEqual(JSON.parse(await readFile(config, "utf8")).mcpServers["drive-it"], entry);
+  const written = JSON.parse(await readFile(config, "utf8"));
+  assert.deepEqual(written.mcpServers["drive-it"], entry);
+  assert.deepEqual(written.preferences, { sidebarMode: "a" });
   assert.equal(await exists(path.join(locations.appData, "Claude")), false);
 
   const removed = await unregisterClients(locations);

@@ -12,20 +12,21 @@ const END = "# END drive-it";
 // execute_script accepts runs of up to 120 s; Codex otherwise stops waiting at 60 s.
 const CODEX_TOOL_TIMEOUT_SEC = 150;
 
-// The Microsoft Store (MSIX) build of Claude Desktop keeps its roaming data inside its
-// package, under <LocalAppData>\Packages\Claude_<publisher>\LocalCache\Roaming\Claude,
-// and never sees %APPDATA%\Claude. LocalAppData is the Roaming folder's sibling.
+// The Microsoft Store (MSIX) build of Claude Desktop reads its configuration from
+// <LocalAppData>\Claude-Data\claude_<publisher>\claude_desktop_config.json, a file the app
+// also writes its own preferences into, and never reads %APPDATA%\Claude (observed with
+// Claude 6.28899.6.0, which logged "Connected to drive-it" only from this location).
+// LocalAppData is the Roaming folder's sibling.
 async function storeClaudeDirectories(appData) {
-  const packages = path.join(path.dirname(appData), "Local", "Packages");
+  const root = path.join(path.dirname(appData), "Local", "Claude-Data");
   let names;
   try {
-    names = await readdir(packages);
+    names = await readdir(root);
   } catch (error) {
     if (error.code === "ENOENT") return [];
     throw error;
   }
-  return names.filter(name => /^Claude_[a-z0-9]+$/i.test(name))
-    .map(name => path.join(packages, name, "LocalCache", "Roaming", "Claude"));
+  return names.filter(name => /^claude_[a-z0-9]+$/i.test(name)).map(name => path.join(root, name));
 }
 
 export async function clientTargets({ userProfile, appData, codexHome }) {
