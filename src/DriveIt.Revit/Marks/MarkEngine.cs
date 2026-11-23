@@ -963,7 +963,10 @@ internal sealed class MarkEngine
         }
     }
 
-    /// <summary>A level or grid is marked on its drawn line, as near its bubble end as a free spot allows.</summary>
+    /// <summary>
+    /// A level or grid is marked on its drawn line near its bubble end, a few mark diameters in so
+    /// the head and its name stay readable, then further along the line until a free spot is found.
+    /// </summary>
     private void PlaceDatum(Candidate candidate, int radius, SpatialHash placed, bool[] drawn)
     {
         var datum = (DatumPlane)candidate.Element;
@@ -979,13 +982,18 @@ internal sealed class MarkEngine
             candidate.Reason = "not_visible";
             return;
         }
-        double[] steps = [0.04, 0.08, 0.12, 0.2, 0.3, 0.5, 0.7, 0.8, 0.88, 0.92, 0.96];
+        double[] diameters = [3, 4, 5.5, 7.5, 10];
+        double[] fractions = [0.3, 0.5, 0.7, 0.85];
         var spacing = radius * 2 + 2;
         var seen = false;
         foreach (var curve in curves)
         {
             projection.Project(V3.Of(curve.GetEndPoint(0)), out var ax, out var ay, out _);
             projection.Project(V3.Of(curve.GetEndPoint(1)), out var bx, out var by, out _);
+            var length = Math.Sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+            if (length < 1)
+                continue;
+            var steps = diameters.Select(d => d * 2 * radius / length).Where(t => t < 0.3).Concat(fractions);
             foreach (var step in steps)
             {
                 var t = bubbleAtEnd1 ? 1 - step : step;
