@@ -33,7 +33,7 @@ On a pushed tag, `_build.yml` can Authenticode-sign the first-party `DriveIt.*.d
 Signing is **off** until the operator turns it on. While it is off, a tag still releases, unsigned, and the release workflow warns that RST must not pin it. To turn it on, once, in the repository settings:
 
 1. Create the environment `signing` (Settings › Environments), limited to tags `v*`.
-2. Federate it with Azure: an Entra app registration with a federated credential for subject `repo:jedbjorn/drive-it:environment:signing`, holding the Artifact Signing Certificate Profile Signer role on the signing account (the same account and profile as the sibling companions).
+2. Federate it with Azure: an Entra app registration with a federated credential for this repository's OIDC subject plus `:environment:signing`. The repository uses immutable subjects, so it is `repo:jedbjorn@267177294/drive-it@1466262028:environment:signing` (read the prefix with `gh api repos/jedbjorn/drive-it/actions/oidc/customization/sub`), holding the Artifact Signing Certificate Profile Signer role on the signing account (the same account and profile as the sibling companions).
 3. Add these environment variables to `signing`: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `SIGNING_ENDPOINT`, `SIGNING_ACCOUNT`, `SIGNING_PROFILE`. They are identifiers, not secrets; no secret is used.
 4. Add the repository variable `SIGNING_ENABLED` = `true` (Settings › Secrets and variables › Actions › Variables).
 
