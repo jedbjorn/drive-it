@@ -25,14 +25,6 @@ $env:DRIVE_IT_OPERATOR_NODE = $NodePath
 $env:DRIVE_IT_OPERATOR_SCRIPT = $OperatorScript
 Import-Module $ModulePath -Force -DisableNameChecking
 
-$tokens = $null
-$parseErrors = $null
-$operatorUi = Join-Path (Split-Path -Parent $ModulePath) 'DriveIt.Operator.ps1'
-[void][System.Management.Automation.Language.Parser]::ParseFile($operatorUi, [ref]$tokens, [ref]$parseErrors)
-if ($parseErrors.Count -ne 0) {
-    throw "Drive It operator UI has PowerShell syntax errors: $parseErrors"
-}
-
 function Assert-OperatorTest {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) {

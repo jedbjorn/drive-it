@@ -50,7 +50,7 @@ graph LR
 
 ## Workspace and outside-root decisions
 
-Select the persistent workspace through the operator surface. During development, the equivalent direct commands are:
+Select the persistent workspace in the Drive-It window (Start Menu, or **Add-Ins › Drive-It** in Revit). During development, the equivalent direct commands are:
 
 ```powershell
 node server/operator.js workspace set C:\DriveIt
@@ -108,7 +108,7 @@ Revit is required to use the add-in, but not to run the Node.js tests or compile
 
 1. Download `DriveIt-<version>-x64.msi` from the [latest release](https://github.com/jedbjorn/drive-it/releases) and run it. It is a per-user install and needs no administrator account. The alpha MSI is unsigned, so Windows SmartScreen may warn you first: choose **More info**, then **Run anyway**.
 2. Start Revit 2026. Revit asks about the unsigned Drive It add-in the first time; choose **Always Load**.
-3. Open **Drive It** from the Start Menu and select your workspace folder.
+3. Open **Drive-It** from the Start Menu, or click **Drive-It** on Revit's **Add-Ins** tab, and select your workspace folder.
 4. Restart Claude or Codex so it picks up the new `drive-it` MCP server.
 
 The MSI registers Drive It with every supported MCP client it finds for your Windows user, and leaves everything else in their configuration unchanged:
@@ -136,9 +136,9 @@ Both installers place the application, private Node.js/Python runtimes, and loca
 
 With the script installer, pass `-McpConfigPath <path>` to merge the same entry into another MCP client configuration while preserving its other servers. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
 
-Drive It opens from the Start Menu for first-run root selection. The same surface changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests.
+The Drive-It window opens from the Start Menu (`Drive-It`) and from the **Drive-It** panel on Revit's **Add-Ins** tab; inside Revit it follows Revit's light or dark theme, and from the Start Menu the Windows app theme. Use it for first-run root selection. The same window changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests.
 
-The operator surface uses the installed private Node runtime to call `server/operator.js` directly: `workspace get|set`, `decisions list|approve|deny`, and `history list`. These commands are not MCP tools. The shared local state contract is:
+The window (`app\operator\DriveIt.Operator.exe` and `DriveIt.UI.dll` in the add-in folder) uses the installed private Node runtime to call `server/operator.js` directly: `workspace get|set`, `decisions list|approve|deny`, and `history list`. Runs and pending requests are listed by their display name when they carry one, with the run ID in the details. These commands are not MCP tools. The shared local state contract is:
 
 - `workspace.json`: the selected root used for future operations.
 - `decisions/<id>.json`: pending, approved, denied, or consumed requests with canonical `operation` and `paths` details. Approval is consumed once and never reused for another request.
@@ -155,7 +155,7 @@ dotnet build src/DriveIt.Revit -c Release
 $build = "src/DriveIt.Revit/bin/Release/net8.0-windows"
 $addins = Join-Path $env:APPDATA "Autodesk/Revit/Addins/2026"
 New-Item -ItemType Directory -Force "$addins/DriveIt" | Out-Null
-Copy-Item "$build/DriveIt.Revit.dll" "$addins/DriveIt/"
+Copy-Item "$build/DriveIt.Revit.dll", "$build/DriveIt.UI.dll", "$build/DriveIt.Core.dll" "$addins/DriveIt/"
 Copy-Item "$build/DriveIt.addin" "$addins/"
 ```
 
@@ -229,9 +229,10 @@ Build the self-contained installer package on a development machine with `instal
 - `server/runtime.js` owns execution, broker policy retries, receipts, and idempotent replay.
 - `server/worker.py` mediates Python file and typed Revit operations and blocks package/process installation paths.
 - `server/workspace.js`, `server/decisions.js`, and `server/history.js` persist policy and run evidence outside the selected workspace.
-- `src/DriveIt.Revit/App.cs` serves the session greeting and typed requests. `Broker/RevitBroker.cs` raises an external event, and `Broker/DocumentDispatcher.cs` executes document and model operations in Revit's API context.
+- `src/DriveIt.Revit/App.cs` serves the session greeting and typed requests, and adds the **Drive-It** panel (button `DriveIt.OpenOperator`) to the Add-Ins tab. `Broker/RevitBroker.cs` raises an external event, and `Broker/DocumentDispatcher.cs` executes document and model operations in Revit's API context.
 - `npm test` exercises real stdio discovery, isolated Python execution, policy and failure paths, replay, operator commands, and temporary-file cleanup. Windows runs also exercise the named-pipe session, newline-JSON broker contract, operator state, approvals, and run history.
-- `dotnet build src/DriveIt.Revit -c Release` compiles the Revit 2026 add-in.
+- `dotnet build src/DriveIt.Revit -c Release` compiles the Revit 2026 add-in. The operator window is `src/DriveIt.UI` (WPF, the family theme copied from Splash-It), hosted in Revit and by `src/DriveIt.Operator` (the Start Menu exe); its operator.js client and labels are in `src/DriveIt.Core`, tested by `dotnet test test/DriveIt.Core.Tests` on any OS.
+- `DriveIt.Operator.exe --self-test <report.json>` opens and closes the window in both themes against the installed operator.js; the installer and MSI tests run it.
 - CI builds the Windows alpha package and MSI, runs the script installer tests, then installs and uninstalls the MSI silently and checks the add-in, Claude/Codex registrations, and preserved user data.
 - `test/clients.test.js` covers the Claude Desktop, Claude Code, and Codex configuration merges and their removal.
 - `test/revit-broker.integration.ps1` exercises the live broker against a running Revit process. Copy a project template to `C:\DriveIt\broker-fixtures\broker-project.rte` and a family template to `broker-family.rft`, then run `powershell -ExecutionPolicy Bypass -File test/revit-broker.integration.ps1 -ProcessId <pid>`. It writes JSONL receipts to that workspace and uses only disposable model files.

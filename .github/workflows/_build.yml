@@ -37,7 +37,10 @@ jobs:
       - name: Run Node.js tests
         run: npm test
 
-      - name: Build Revit add-in
+      - name: Run operator window unit tests
+        run: dotnet test test/DriveIt.Core.Tests -c Release --nologo
+
+      - name: Build Revit add-in and operator window
         shell: pwsh
         run: |
           $buildArgs = @("src/DriveIt.Revit", "-c", "Release", "--nologo")
@@ -45,6 +48,11 @@ jobs:
             $buildArgs += "-p:Version=${{ inputs.version }}"
           }
           dotnet build @buildArgs
+          $operatorArgs = @("src/DriveIt.Operator", "-c", "Release", "--nologo")
+          if ("${{ inputs.version }}") {
+            $operatorArgs += "-p:Version=${{ inputs.version }}"
+          }
+          dotnet build @operatorArgs
 
       - name: Build the Windows alpha package
         shell: pwsh
@@ -94,7 +102,10 @@ jobs:
           $build = "src/DriveIt.Revit/bin/Release/net8.0-windows"
           $stage = "stage/DriveIt"
           New-Item -ItemType Directory -Force "$stage/DriveIt", "$stage/server" | Out-Null
-          Copy-Item "$build/DriveIt.Revit.dll" "$stage/DriveIt/"
+          Copy-Item "$build/DriveIt.Revit.dll", "$build/DriveIt.UI.dll", "$build/DriveIt.Core.dll" "$stage/DriveIt/"
+          if (Test-Path "$build/Resources/icons") {
+            Copy-Item "$build/Resources" "$stage/DriveIt/" -Recurse
+          }
           Copy-Item "$build/DriveIt.addin" "$stage/"
           Copy-Item "server/index.js" "$stage/server/"
           Copy-Item "package.json", "package-lock.json", "README.md", "LICENSE" "$stage/"

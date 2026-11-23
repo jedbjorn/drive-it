@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DriveIt.UI: the Drive-It operator window (workspace root, outside-root requests, run
+    history) with the RST family theme copied from splash-it (Theme.xaml, Theming/). No Revit
+    references: the Revit add-in passes its detected theme and main-window handle in, and
+    DriveIt.Operator.exe hosts the same window from the Start Menu. The operator.js client
+    and labels live in DriveIt.Core so they are unit tested on any OS.
+    Builds on Linux/macOS via EnableWindowsTargeting.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Library</OutputType>
+    <RootNamespace>DriveIt.UI</RootNamespace>
+    <AssemblyName>DriveIt.UI</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DriveIt.Core\DriveIt.Core.csproj" />
+  </ItemGroup>
+
+</Project>

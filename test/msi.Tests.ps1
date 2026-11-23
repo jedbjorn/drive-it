@@ -15,7 +15,9 @@ $msi = (Resolve-Path -LiteralPath $MsiPath).ProviderPath
 $install = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DriveIt'
 $app = Join-Path $install 'app'
 $addinPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026\DriveIt.addin'
-$shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drive It.lnk'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drive-It.lnk'
+$previousShortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drive It.lnk'
+$operatorExe = Join-Path $app 'operator\DriveIt.Operator.exe'
 $mcpPath = Join-Path $install 'mcp.json'
 
 function Assert-MsiTest {
@@ -23,6 +25,33 @@ function Assert-MsiTest {
     if (-not $Condition) {
         throw $Message
     }
+}
+
+function Invoke-OperatorSelfTest {
+    # Opens and closes the installed WPF window in both themes against the installed operator.js.
+    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Report)
+    if ([IO.File]::Exists($Report)) {
+        Remove-Item -LiteralPath $Report -Force
+    }
+    $process = Start-Process -FilePath $Exe -ArgumentList @('--self-test', ('"' + $Report + '"')) -PassThru
+    if (-not $process.WaitForExit(180000)) {
+        $process.Kill()
+        throw 'The operator window self-test did not finish.'
+    }
+    $text = if ([IO.File]::Exists($Report)) { [IO.File]::ReadAllText($Report) } else { '(no report)' }
+    if ($process.ExitCode -ne 0) {
+        throw "The operator window self-test failed ($($process.ExitCode)): $text"
+    }
+    $result = $text | ConvertFrom-Json
+    if (-not $result.passed -or @($result.windows).Count -ne 2) {
+        throw "The operator window self-test did not open both themes: $text"
+    }
+    foreach ($window in @($result.windows)) {
+        if ($window.title -ne 'Drive-It' -or $null -ne $window.error) {
+            throw "The operator window reported a problem: $text"
+        }
+    }
+    return $result
 }
 
 function Invoke-Msiexec {
@@ -72,6 +101,9 @@ Assert-MsiTest ($configuration.mcpServers.'drive-it'.command -eq $node) 'MCP con
 Assert-MsiTest ($configuration.mcpServers.'drive-it'.args[0] -eq $server) 'MCP configuration does not use the installed server.'
 Assert-MsiTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_PYTHON -eq $python) 'MCP configuration does not use the installed private Python.'
 Assert-MsiTest ([IO.File]::Exists($shortcutPath)) 'The operator shortcut was not created.'
+Assert-MsiTest ((New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath).TargetPath -eq $operatorExe) 'The shortcut does not open the operator window.'
+# The window finds the install's Node.js, operator.js, and data directory from its own folder and mcp.json.
+$selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test.json')
 Assert-MsiTest (-not (Get-ChildItem -LiteralPath $install -Filter '.staging-*' -Force)) 'The in-place registration left a staging directory.'
 
 Assert-MsiTest ((Get-Content -LiteralPath $claudeDesktop -Raw | ConvertFrom-Json).mcpServers.'drive-it'.command -eq $node) 'Claude Desktop was not registered.'
@@ -83,6 +115,8 @@ Assert-MsiTest ($codexText.Contains('[mcp_servers.drive-it]') -and $codexText.Co
 
 $userData = Join-Path $install 'user-data.sentinel'
 [IO.File]::WriteAllText($userData, 'keep')
+# An earlier build's shortcut is removed by uninstall as well.
+[IO.File]::WriteAllText($previousShortcut, 'stale')
 
 Invoke-Msiexec -Operation '/x' -Log 'uninstall.log'
 
@@ -91,6 +125,7 @@ Assert-MsiTest (-not [IO.File]::Exists($server)) 'Uninstall left the MCP server 
 Assert-MsiTest (-not [IO.File]::Exists($node)) 'Uninstall left private Node.js behind.'
 Assert-MsiTest (-not [IO.File]::Exists($addinPath)) 'Uninstall left the Revit add-in registered.'
 Assert-MsiTest (-not [IO.File]::Exists($shortcutPath)) 'Uninstall left the operator shortcut.'
+Assert-MsiTest (-not [IO.File]::Exists($previousShortcut)) 'Uninstall left the earlier operator shortcut.'
 Assert-MsiTest (-not [IO.File]::Exists($mcpPath)) 'Uninstall left the Drive It MCP configuration.'
 Assert-MsiTest ([IO.File]::Exists($userData)) 'Uninstall removed user data.'
 Assert-MsiTest ($null -eq (Get-Content -LiteralPath $claudeDesktop -Raw | ConvertFrom-Json).mcpServers.PSObject.Properties['drive-it']) 'Uninstall left Drive It in Claude Desktop.'

@@ -46,6 +46,8 @@ function Write-JsonAtomic {
 function Test-DotnetRuntime {
     param([Parameter(Mandatory)][string]$DotnetPath)
 
+    # The Revit add-in runs in Revit; DriveIt.Operator.exe (the Start Menu window) is a
+    # framework-dependent WPF app, so both the base and the Windows Desktop runtime 8+ are required.
     if (-not [IO.File]::Exists($DotnetPath)) {
         return $false
     }
@@ -53,35 +55,74 @@ function Test-DotnetRuntime {
     if ($LASTEXITCODE -ne 0) {
         return $false
     }
+    $hasCore = $false
+    $hasDesktop = $false
     foreach ($line in $runtimes) {
         if ($line -match '^Microsoft\.NETCore\.App\s+(\d+)\.' -and [int]$Matches[1] -ge 8) {
-            return $true
+            $hasCore = $true
+        }
+        if ($line -match '^Microsoft\.WindowsDesktop\.App\s+(\d+)\.' -and [int]$Matches[1] -ge 8) {
+            $hasDesktop = $true
         }
     }
-    return $false
+    return ($hasCore -and $hasDesktop)
 }
 
 function Install-DotnetRuntime {
     param([Parameter(Mandatory)][string]$Destination)
 
-    $command = Get-Command dotnet.exe -ErrorAction SilentlyContinue
-    if ($null -ne $command -and (Test-DotnetRuntime -DotnetPath $command.Source)) {
-        return
-    }
-
+    # Returns the dotnet.exe whose runtimes satisfy Drive It. The machine location is what
+    # DriveIt.Operator.exe's host finds on its own; any other one is passed to it explicitly.
     $machineDotnet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
     if (Test-DotnetRuntime -DotnetPath $machineDotnet) {
-        return
+        return $machineDotnet
+    }
+
+    $command = Get-Command dotnet.exe -ErrorAction SilentlyContinue
+    if ($null -ne $command -and (Test-DotnetRuntime -DotnetPath $command.Source)) {
+        return $command.Source
+    }
+
+    $privateDotnet = Join-Path $Destination 'dotnet.exe'
+    if (Test-DotnetRuntime -DotnetPath $privateDotnet) {
+        return $privateDotnet
     }
 
     $download = Join-Path $Destination 'dotnet-install.ps1'
     [IO.Directory]::CreateDirectory($Destination) | Out-Null
     Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $download
-    & $download -Runtime dotnet -Channel 8.0 -InstallDir $Destination -NoPath
-    if ($LASTEXITCODE -ne 0 -or -not (Test-DotnetRuntime -DotnetPath (Join-Path $Destination 'dotnet.exe'))) {
+    foreach ($runtime in @('dotnet', 'windowsdesktop')) {
+        & $download -Runtime $runtime -Channel 8.0 -InstallDir $Destination -NoPath | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Drive It could not provision the required .NET 8 runtime ($runtime)."
+        }
+    }
+    if (-not (Test-DotnetRuntime -DotnetPath $privateDotnet)) {
         throw 'Drive It could not provision the required .NET 8 runtime.'
     }
     Remove-Item -LiteralPath $download -Force
+    return $privateDotnet
+}
+
+function Get-OperatorLaunch {
+    param(
+        [Parameter(Mandatory)][string]$Application,
+        [Parameter(Mandatory)][string]$Dotnet
+    )
+
+    # The Start Menu window. With the machine .NET it is the exe itself; with another
+    # dotnet.exe the window's DLL runs through it, from a hidden PowerShell so no console shows.
+    $exe = Join-Path $Application 'operator\DriveIt.Operator.exe'
+    $machineDotnet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
+    if ($Dotnet -ieq $machineDotnet) {
+        return [pscustomobject]@{ FilePath = $exe; Arguments = '' }
+    }
+    $quote = { param($Text) "'" + $Text.Replace("'", "''") + "'" }
+    $dll = Join-Path $Application 'operator\DriveIt.Operator.dll'
+    return [pscustomobject]@{
+        FilePath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        Arguments = '-NoProfile -WindowStyle Hidden -Command "& ' + (& $quote $Dotnet) + ' ' + (& $quote $dll) + '"'
+    }
 }
 
 $source = (Resolve-Path -LiteralPath $SourcePath).ProviderPath
@@ -133,7 +174,13 @@ try {
     $server = Join-Path $stagedApp 'server\index.js'
     $smokeTest = Join-Path $stagedApp 'server\install-smoke.mjs'
     $addinTemplate = Join-Path $stagedApp 'addin\DriveIt.addin'
-    foreach ($required in @($node, $python, $server, $smokeTest, $addinTemplate, (Join-Path $stagedApp 'addin\DriveIt.Revit.dll'))) {
+    $requiredFiles = @(
+        $node, $python, $server, $smokeTest, $addinTemplate,
+        (Join-Path $stagedApp 'addin\DriveIt.Revit.dll'),
+        (Join-Path $stagedApp 'addin\DriveIt.UI.dll'),
+        (Join-Path $stagedApp 'operator\DriveIt.Operator.exe')
+    )
+    foreach ($required in $requiredFiles) {
         if (-not [IO.File]::Exists($required)) {
             throw "The Drive It package is incomplete: $required is missing."
         }
@@ -148,7 +195,7 @@ try {
         throw 'The private Python runtime failed its installation check.'
     }
 
-    Install-DotnetRuntime -Destination (Join-Path $stagedApp 'runtimes\dotnet')
+    $dotnet = Install-DotnetRuntime -Destination (Join-Path $stagedApp 'runtimes\dotnet')
 
     $env:DRIVE_IT_DATA_DIR = $dataDirectory
     & $node $smokeTest $server $dataDirectory $python
@@ -236,13 +283,24 @@ try {
         Set-DriveItWorkspace -Root $WorkspaceRoot | Out-Null
     }
 
-    $shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drive It.lnk'
-    [IO.Directory]::CreateDirectory((Split-Path -Parent $shortcutPath)) | Out-Null
+    # A private runtime provisioned while staging now lives under the installed app.
+    if ($dotnet.StartsWith($stagedApp + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        $dotnet = Join-Path $app $dotnet.Substring($stagedApp.Length + 1)
+    }
+    $launch = Get-OperatorLaunch -Application $app -Dotnet $dotnet
+    $programs = [Environment]::GetFolderPath('Programs')
+    [IO.Directory]::CreateDirectory($programs) | Out-Null
+    $previousShortcut = Join-Path $programs 'Drive It.lnk'
+    if ([IO.File]::Exists($previousShortcut)) {
+        Remove-Item -LiteralPath $previousShortcut -Force
+    }
+    $shortcutPath = Join-Path $programs 'Drive-It.lnk'
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $shortcut.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $app 'operator\DriveIt.Operator.ps1') + '"'
-    $shortcut.WorkingDirectory = $app
+    $shortcut.TargetPath = $launch.FilePath
+    $shortcut.Arguments = $launch.Arguments
+    $shortcut.WorkingDirectory = Join-Path $app 'operator'
+    $shortcut.Description = 'Choose the workspace, approve requests, and review what the agent ran.'
     $shortcut.Save()
 
     if ([IO.Directory]::Exists($backup)) {
@@ -250,15 +308,18 @@ try {
     }
 
     if (-not $NoLaunch) {
-        Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @(
-            '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', '"' + (Join-Path $app 'operator\DriveIt.Operator.ps1') + '"'
-        )
+        if ([string]::IsNullOrEmpty($launch.Arguments)) {
+            Start-Process -FilePath $launch.FilePath -WorkingDirectory (Join-Path $app 'operator')
+        } else {
+            Start-Process -FilePath $launch.FilePath -ArgumentList $launch.Arguments -WorkingDirectory (Join-Path $app 'operator')
+        }
     }
 
     [ordered]@{
         installed = $true
         application = $app
         addin = $addinPath
+        shortcut = $shortcutPath
         mcpConfiguration = $McpConfigPath
         mcpClients = $clients
         dataDirectory = $dataDirectory

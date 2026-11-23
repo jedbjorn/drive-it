@@ -54,6 +54,17 @@ try {
         throw 'dotnet could not build the Drive It Revit add-in.'
     }
 
+    # The Start Menu window, beside the PowerShell operator module the installer uses.
+    $operatorProject = Join-Path $repository 'src\DriveIt.Operator\DriveIt.Operator.csproj'
+    & dotnet restore $operatorProject --source 'https://api.nuget.org/v3/index.json'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'dotnet could not restore the Drive-It operator window.'
+    }
+    & dotnet publish $operatorProject -c Release --no-self-contained --no-restore -o (Join-Path $app 'operator')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'dotnet could not build the Drive-It operator window.'
+    }
+
     $nodeArchive = Join-Path $downloads 'node.zip'
     Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/node-v$nodeVersion-win-x64.zip" -OutFile $nodeArchive
     $nodeExtract = Join-Path $downloads 'node'
