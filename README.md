@@ -35,7 +35,7 @@ Drive-It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 t
 - `capture_revit_view` exports an existing Revit view to a PNG and returns the image so the agent can check its own work (see [View capture](#view-capture)).
 - `get_api_reference` returns local, versioned references for the callable Drive-It file, check, and Revit operations. `get_guidance` is not registered.
 
-Generated Python receives `args`, `files`, `revit`, and `checks`. It does not receive raw Revit objects. Typed model operations use the Drive-It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt. Scripts can import only the modules in `ALLOWED_MODULES` in `server/worker.py` (in-memory data, text, math, and date utilities plus `os`/`pathlib` for mediated file access); every other import or module load is denied. This is a guardrail for generated code, not an operating-system sandbox.
+Generated Python receives `args`, `files`, `revit`, `checks`, and `units`. It does not receive raw Revit objects. Typed model operations use the Drive-It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt. Scripts can import only the modules in `ALLOWED_MODULES` in `server/worker.py` (in-memory data, text, math, and date utilities plus `os`/`pathlib` for mediated file access); every other import or module load is denied. This is a guardrail for generated code, not an operating-system sandbox.
 
 Drive-It is in early development. The Windows alpha MSI is the recommended way to install it; the script installer, source build, and release bundle below remain available.
 
@@ -89,6 +89,26 @@ Each workspace root has its own script library in `<root>\.drive-it\scripts`. Ch
 - `search_scripts` returns active revisions by default; pass `includeDrafts` or `includeRetired` to see more. `get_script` returns one revision with its source and its linked run receipts.
 
 A missing or unreadable library is reported as an error (`LIBRARY_NOT_FOUND`, `LIBRARY_UNREADABLE`), not an empty catalog. The first `save_script` creates the library.
+
+## Built-in primitives
+
+Common Revit work is one line in a script. The primitives ship with the add-in and are the same in every workspace; `get_api_reference` lists each one with its arguments, returned shape, effects, and an example.
+
+```python
+revit.get_active_document()                      # the model or family open in Revit's window
+walls = revit.find_elements(category="Walls")    # {total, returned, offset, truncated, elements}
+params = revit.get_parameters([w["id"] for w in walls["elements"]], names=["Unconnected Height"])
+selected = revit.get_selection()                 # what the user has selected
+```
+
+- `get_active_document()` returns the full response. Its `document` is the active document's snapshot plus `isModified`, `activeView`, and `openDocuments`, and later calls in the script target it. With no active document it fails with `no_active_document` and lists the open documents.
+- `find_elements(category, kind="instance", levelId=None, typeName=None, limit=200, offset=0)` pages elements of a category in element-id order. `category` is a `BuiltInCategory` name (`"OST_Walls"`) or the name the document shows (`"Walls"`). An unknown name fails with `unknown_category` and the closest names.
+- `get_parameters(elementIds, names=None, includeType=True)` returns each element's parameters (`name`, `builtIn`, `guid`, `storageType`, raw `value` in internal units, `display`, `readOnly`, `hasValue`) and its type's. A missing id fails the whole call with `element_not_found`.
+- `list_types(category)` lists a category's types, and `list_views(viewTypes=None, includeSheets=True, includeTemplates=False)` lists views and sheets with `capturable` for `capture_revit_view`.
+- `get_selection()` reads and `set_selection(elementIds)` replaces the UI selection of the active document. Another document fails with `document_not_active`. `set_selection` starts no transaction, leaves the document unmodified and the view unchanged, and checks the selection it set (`selection_readback`).
+- `units.to_internal(value, unit)` and `units.from_internal(value, unit)` convert lengths (`mm`, `cm`, `m`, `in`, `ft`), areas (`mm2`, `m2`, `in2`, `ft2`), and angles (`deg`, `rad`) to and from Revit's internal feet, square feet, and radians.
+
+Read primitives (`find_elements`, `get_parameters`, `list_types`, `list_views`, `get_selection`) return their output directly. All other operations return the full broker response. Reads start no transaction and never change the model. `limit` is at most 2000, and so is the number of element ids per call. A larger request fails with `limit_exceeded` and is never silently cut. Element ids are integers. Linked models are not queried.
 
 ## View capture
 
@@ -246,7 +266,7 @@ The current-user named pipe `\\.\pipe\drive-it-<pid>` retains its session greeti
 }
 ```
 
-Document operations are `open_document`, `create_document`, `read_document`, `save_document`, `save_as_document`, `close_document`, and `delete_document`. Typed model changes are `create_level`, `create_wall`, `create_3d_view`, `create_family_type`, and `delete_element`. `create_3d_view` creates an isometric 3D view (optional unique `name`) and returns it in `createdViews` as `{id, name, type}` (also collected on the `execute_script` receipt and in run history), so the id can go straight to `capture_revit_view`. An empty name or one with a character Revit forbids in names fails with `invalid_model_change`. A name already used by a 3D view (not a view template; names are case-sensitive, as in Revit) or repeated in the batch fails with `duplicate_view_name`; validation sees the document as it was before the batch, so deleting a view and reusing its name needs two calls. a family in which Revit allows no 3D view (for example an annotation family) fails with `view_creation_not_allowed` and the batch rolls back. Consecutive model changes run in one Revit transaction through `ExternalEvent`. The response's `document.uniqueId` remains bound to the same Revit document across save-as.
+Built-in primitives are `get_active_document`, `find_elements`, `get_parameters`, `list_types`, `list_views`, `get_selection`, and `set_selection`. They carry no policy paths and start no transaction. Every `model.execute` response carries `results`, with one entry per operation in batch order: a read primitive's output, or `null` for any other operation and for every operation after a failure. Document operations are `open_document`, `create_document`, `read_document`, `save_document`, `save_as_document`, `close_document`, and `delete_document`. Typed model changes are `create_level`, `create_wall`, `create_3d_view`, `create_family_type`, and `delete_element`. `create_3d_view` creates an isometric 3D view (optional unique `name`) and returns it in `createdViews` as `{id, name, type}` (also collected on the `execute_script` receipt and in run history), so the id can go straight to `capture_revit_view`. An empty name or one with a character Revit forbids in names fails with `invalid_model_change`. A name already used by a 3D view (not a view template; names are case-sensitive, as in Revit) or repeated in the batch fails with `duplicate_view_name`; validation sees the document as it was before the batch, so deleting a view and reusing its name needs two calls. a family in which Revit allows no 3D view (for example an annotation family) fails with `view_creation_not_allowed` and the batch rolls back. Consecutive model changes run in one Revit transaction through `ExternalEvent`. The response's `document.uniqueId` remains bound to the same Revit document across save-as.
 
 Responses have `succeeded`, `failed`, `partially_applied`, or `policy_required` status and list observed `changes`, `affectedFiles`, `affectedElements`, and `checks`. Before any mutation, the broker canonicalizes the complete batch, including links and junctions. An uncovered outside-root read or effect returns `policy_required` with `policyRequests`. Node can retry with an operator decision:
 
