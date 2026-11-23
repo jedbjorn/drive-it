@@ -13,7 +13,9 @@ function pipeName(processId) {
 
 // The add-in serves one connection at a time and re-creates its pipe after each one, so a
 // connection made right after another can briefly find no pipe (ENOENT) or a busy one (EBUSY).
-async function openPipe(processId, attempts = 8) {
+// waitMs extends the retries for callers that may queue behind another client's slow request.
+async function openPipe(processId, { attempts = 8, waitMs = 0 } = {}) {
+  const deadline = Date.now() + waitMs;
   for (let attempt = 1; ; attempt += 1) {
     const pipe = createConnection(pipeName(processId));
     try {
@@ -24,17 +26,17 @@ async function openPipe(processId, attempts = 8) {
       return pipe;
     } catch (error) {
       pipe.destroy();
-      if (!["ENOENT", "EBUSY"].includes(error.code) || attempt >= attempts) throw error;
-      await new Promise(resolve => setTimeout(resolve, 25 * attempt));
+      if (!["ENOENT", "EBUSY"].includes(error.code) || (attempt >= attempts && Date.now() >= deadline)) throw error;
+      await new Promise(resolve => setTimeout(resolve, Math.min(25 * attempt, 250)));
     }
   }
 }
 
-async function connect(processId, timeoutMs) {
+async function connect(processId, timeoutMs, connectWaitMs = 0) {
   if (process.platform !== "win32") {
     throw new Error("Run the MCP server on the Windows machine hosting Revit.");
   }
-  const pipe = await openPipe(processId);
+  const pipe = await openPipe(processId, { waitMs: connectWaitMs });
   pipe.setEncoding("utf8");
   const iterator = pipe[Symbol.asyncIterator]();
   let buffered = "";
@@ -80,8 +82,8 @@ export async function readSession(processId, { timeoutMs = 4000 } = {}) {
   }
 }
 
-export async function executeBroker(processId, envelope, { timeoutMs = 30000 } = {}) {
-  const connection = await connect(processId, timeoutMs);
+export async function executeBroker(processId, envelope, { timeoutMs = 30000, connectWaitMs = 0 } = {}) {
+  const connection = await connect(processId, timeoutMs, connectWaitMs);
   try {
     validateSession(await connection.readJson(4096), processId);
     await connection.writeJson(envelope);

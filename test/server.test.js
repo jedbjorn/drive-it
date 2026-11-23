@@ -33,7 +33,7 @@ test("discover the Unguided tools and schemas over stdio", async (t) => {
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(tool => tool.name), [
     "get_revit_session", "execute_script", "save_script", "search_scripts", "get_script",
-    "promote_script", "retire_script", "get_api_reference",
+    "promote_script", "retire_script", "capture_revit_view", "get_api_reference",
   ]);
   assert.ok(!tools.some(tool => tool.name === "get_guidance"));
   const execute = tools.find(tool => tool.name === "execute_script");
