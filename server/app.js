@@ -349,7 +349,7 @@ export function createDriveItServer(options = {}) {
       retain: z.boolean().optional().describe("Keep this image after the session ends so the user can review it"),
       marks: z.boolean().optional().describe("Draw a numbered red circle on each visible element and return marks.legend mapping each number to elementId, category, family, type, and pixel bounds. Default false: use it when you need element ids, not for judging the drawing. Not available in perspective 3D views"),
       markElementIds: z.array(z.string().max(64)).max(1000).optional()
-        .describe("Element ids as decimal strings, e.g. the ids a run affected. Turns marks on and marks only these; marks.notMarked gives each id that got no mark a reason: not_found, not_markable, not_in_view, not_visible, or not_placed. not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted"),
+        .describe("Element ids as decimal strings, e.g. the ids a run affected. Turns marks on and marks only these; marks.notMarked gives each id that got no mark a reason: not_found, not_markable, not_in_view, not_visible, or not_placed. No mark never means the element is absent: not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted"),
     },
     outputSchema: {
       ...captureMetadata,

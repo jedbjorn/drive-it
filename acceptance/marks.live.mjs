@@ -119,7 +119,7 @@ try {
   const asked = await capture("snowdon-transverse-requested", snowdon.path, snowdon.section, { markElementIds: [snowdon.unmarkedId] });
   check(`element ${snowdon.unmarkedId} requested: not_visible`, asked.value?.marks.notMarked?.[0]?.reason === "not_visible", asked.value?.marks ?? asked.error);
   check(`element ${snowdon.unmarkedId} requested: notes say not_visible may be unestablished`,
-    asked.value?.marks.notes.some(note => note.startsWith("not_visible also covers an element whose visibility could not be established")), asked.value?.marks.notes);
+    asked.value?.marks.notes.some(note => note.startsWith("not_visible means no mark could be confirmed")), asked.value?.marks.notes);
   if (fixture.symbolPlan && fixture.symbolFamily) {
     // A family drawn only as a symbol in plan: its visibility is not established, so the result
     // says so in notes and counts it in omitted.
@@ -127,7 +127,7 @@ try {
     const row = symbol.value?.marks.notMarked?.[0];
     check(`symbol-only family ${fixture.symbolFamily}: not_visible, said in notes, counted in omitted`,
       row?.reason === "not_visible" && symbol.value.marks.omitted === 1
-        && symbol.value.marks.notes.some(note => note.startsWith("not_visible also covers")), symbol.value?.marks ?? symbol.error);
+        && symbol.value.marks.notes.some(note => note.startsWith("not_visible means no mark could be confirmed")), symbol.value?.marks ?? symbol.error);
   }
 
   // --- Failures are explicit and leave no artifact ---

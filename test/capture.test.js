@@ -858,7 +858,7 @@ test("marks.notes say not_visible may mean visibility was not established, only 
   const brokerExecutor = async (processId, envelope, options) => fakeBroker({ receipt })(processId, envelope, options);
   const { client } = await connected(t, { launchRoot, brokerExecutor });
   const { MARK_NOTES } = await import("../server/capture.js");
-  assert.match(MARK_NOTES.notVisible, /^not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted/);
+  assert.match(MARK_NOTES.notVisible, /^not_visible means no mark could be confirmed, not that the element is absent: it also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted/);
   const cases = [
     ["FloorPlan", [{ elementId: "12", reason: "not_visible" }], 1, ["every", "plan", "notVisible"]],
     ["ThreeD", [{ elementId: "12", reason: "not_visible" }], 1, ["every", "threeD", "notVisible"]],
@@ -958,7 +958,7 @@ test("discovery carries brief marks guidance beside the intact visual QA rule", 
   assert.equal(tool.inputSchema.properties.marks.type, "boolean");
   assert.equal(tool.inputSchema.properties.markElementIds.type, "array");
   assert.match(tool.inputSchema.properties.markElementIds.description, /not_found, not_markable, not_in_view, not_visible, or not_placed/);
-  assert.match(tool.inputSchema.properties.markElementIds.description, /not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted/);
+  assert.match(tool.inputSchema.properties.markElementIds.description, /No mark never means the element is absent: not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted/);
   assert.deepEqual(tool.inputSchema.required, ["purpose"]);
   assert.ok(tool.outputSchema.properties.marks);
 });

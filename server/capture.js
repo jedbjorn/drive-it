@@ -47,7 +47,7 @@ export const MARK_NOTES = Object.freeze({
   every: "Each mark names the element in its legend row, and bounds is the pixel rectangle of that element's visible part. Rarely a mark sits on something the image does not show; if a mark looks wrong, check the element by its id before acting.",
   plan: "In plans another element's symbol can be drawn over a marked element; the row's category and bounds say which element the mark names.",
   threeD: "In 3D views with transparent graphics a mark can sit on faint lines of an element seen through another.",
-  notVisible: "not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted; look for such an element in the image before you treat it as not drawn.",
+  notVisible: "not_visible means no mark could be confirmed, not that the element is absent: it also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted. Look for the element in the image before you conclude it is not there.",
 });
 
 export function captureError(code, message, detail) {
