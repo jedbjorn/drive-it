@@ -245,12 +245,17 @@ try {
         }
     }
 
+    # The launch root for reference images (capture_revit_view): desktop clients start the server
+    # in a directory the user cannot write or find, so the entry names one under Documents.
+    $launchRoot = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Drive-It'
+    [IO.Directory]::CreateDirectory($launchRoot) | Out-Null
     $serverEntry = [ordered]@{
         command = $installedNode
         args = @($installedServer)
         env = [ordered]@{
             DRIVE_IT_DATA_DIR = $dataDirectory
             DRIVE_IT_PYTHON = $installedPython
+            DRIVE_IT_LAUNCH_ROOT = $launchRoot
         }
     }
     if ([IO.File]::Exists($McpConfigPath)) {

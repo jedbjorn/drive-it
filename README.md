@@ -32,6 +32,7 @@ Drive-It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 t
 - `get_revit_session` finds the running Revit (when only one has Drive-It loaded, no process ID is needed) and returns its version, build, named-pipe identity, the workspace root, and Revit's installed project templates, family template folders, and library folders, so the agent uses real paths instead of guessing.
 - `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker. Every call carries a required `displayName`: one plain-language line the agent writes for you, such as "Add Level 3 at 24 ft to the tower model". It is kept on the run receipt and on any outside-root request, and the operator surface lists runs and requests by it.
 - `save_script`, `search_scripts`, `get_script`, `promote_script`, and `retire_script` manage the workspace script library (see [Script library](#script-library)).
+- `capture_revit_view` exports an existing Revit view to a PNG and returns the image so the agent can check its own work (see [View capture](#view-capture)).
 - `get_api_reference` returns local, versioned references for the callable Drive-It file, check, and Revit operations. `get_guidance` is not registered.
 
 Generated Python receives `args`, `files`, `revit`, and `checks`. It does not receive raw Revit objects. Typed model operations use the Drive-It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt. Scripts can import only the modules in `ALLOWED_MODULES` in `server/worker.py` (in-memory data, text, math, and date utilities plus `os`/`pathlib` for mediated file access); every other import or module load is denied. This is a guardrail for generated code, not an operating-system sandbox.
@@ -88,6 +89,14 @@ Each workspace root has its own script library in `<root>\.drive-it\scripts`. Ch
 - `search_scripts` returns active revisions by default; pass `includeDrafts` or `includeRetired` to see more. `get_script` returns one revision with its source and its linked run receipts.
 
 A missing or unreadable library is reported as an error (`LIBRARY_NOT_FOUND`, `LIBRARY_UNREADABLE`), not an empty catalog. The first `save_script` creates the library.
+
+## View capture
+
+`capture_revit_view` exports an existing 3D, floor plan, ceiling plan, structural plan, elevation, section, or detail view of an open RVT or RFA document with Revit's own `Document.ExportImage` (not a screenshot), and returns the PNG as image content together with its metadata. Pass a `viewId`, or omit it to capture the document's active view. Sheets, schedules, legends, drafting views, and view templates are rejected with a specific error, and a failed selection lists the views that can be captured. The export starts no transaction and does not modify the model. The server instructions and the tool description ask the agent to finish every modeling round with structured checks and at least one capture when visible geometry changed, and to report missing visual evidence rather than claim a visual pass.
+
+The tool writes each image and a JSON sidecar (purpose, related run IDs, SHA-256, size and dimensions, Revit, document and view identity, and retention state) to `<launch root>\_reference-images\<session-id>\`. The launch root is `DRIVE_IT_LAUNCH_ROOT` when set, otherwise the server's working directory at startup; the installer sets it to `Documents\Drive-It` for every client it registers. It is separate from the modeling workspace. A `_reference-images` folder that is a link or junction is refused.
+
+By default, images are deleted when the MCP session ends; the response tells the agent whether an image will survive. Ask the agent to capture with `retain: true` to keep an image for review, or set `DRIVE_IT_REFERENCE_RETENTION=keep` in the client's server entry to keep every capture. Unretained images left behind by a session that ended abnormally are removed at the next startup once their owning process has exited; retained images and other sessions' files are never touched. Delete retained images yourself when you no longer need them.
 
 ## Requirements
 
@@ -233,6 +242,8 @@ Responses have `succeeded`, `failed`, `partially_applied`, or `policy_required` 
 ```
 
 Only the Node broker client may attach this payload; generated Python cannot approve its own request. Grants cover only the matching operation and canonical paths in that execution and are not persisted.
+
+A capture uses `"type": "view.capture"` with no `operations` and a `capture` object `{ "viewId": "<decimal id or null>", "pixelSize": 256-2048, "targetPath": "<server-created path>" }`. The target lies in an empty staging folder the server created under `_reference-images\<session-id>`; the add-in exports there and returns the view's id, name, and type, the document's modified state before and after, and, when the selection fails, `availableViews` and `otherViews`. The server then validates and publishes the PNG.
 
 ## Development
 
