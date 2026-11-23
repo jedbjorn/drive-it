@@ -16,8 +16,18 @@ async function subdirectories(directory) {
   return (await entries(directory)).filter(entry => entry.isDirectory()).map(entry => path.join(directory, entry.name));
 }
 
-export async function revitContent(version = "2026", programData = process.env.ProgramData || String.raw`C:\ProgramData`) {
-  const root = path.join(programData, "Autodesk", `RVT ${version}`);
+function contentRoot(version, programData) {
+  return path.join(programData || process.env.ProgramData || String.raw`C:\ProgramData`, "Autodesk", `RVT ${version}`);
+}
+
+// Folders Revit installs its own content into; Drive It reads these without a decision.
+export function revitContentFolders(version = "2026", programData) {
+  const root = contentRoot(version, programData);
+  return ["Templates", "Family Templates", "Libraries"].map(name => path.join(root, name));
+}
+
+export async function revitContent(version = "2026", programData) {
+  const root = contentRoot(version, programData);
   const projectTemplates = [];
   for (const folder of await subdirectories(path.join(root, "Templates"))) {
     for (const entry of await entries(folder)) {

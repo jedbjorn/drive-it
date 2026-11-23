@@ -57,7 +57,7 @@ node server/operator.js workspace set C:\DriveIt
 node server/operator.js workspace get
 ```
 
-Reads, creates, overwrites, renames, moves, and deletes inside the canonical root do not produce a Drive It prompt. Links and junctions are resolved at the point of use. An outside-root request returns a `pending` receipt and changes nothing in the requested batch. List the request and make a one-time decision:
+Reads, creates, overwrites, renames, moves, and deletes inside the canonical root do not produce a Drive It prompt. Reading Revit's own installed content also needs no prompt: reading files and folders, opening documents, and using a file as a template under `%ProgramData%\Autodesk\RVT 2026\Templates`, `Family Templates`, and `Libraries`. Writing there still needs a decision. Links and junctions are resolved at the point of use. An outside-root request returns a `pending` receipt and changes nothing in the requested batch. List the request and make a one-time decision:
 
 ```powershell
 node server/operator.js decisions list
