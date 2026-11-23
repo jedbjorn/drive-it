@@ -241,8 +241,9 @@ test("a capture returns the saved PNG bytes, metadata and a complete sidecar und
   assert.equal(marker.schema, MARKER_SCHEMA);
   assert.equal(marker.processId, process.pid);
   assert.equal(marker.hostname, hostname());
-  // The marker records the OS-reported start time, the same source the stale sweep compares.
-  assert.equal(marker.processStartSource, "os");
+  // The marker prefers the OS-reported start time; a loaded runner can time the lookup out and
+  // fall back to the estimate. The real lookup is proven in the reused-pid test below.
+  assert.ok(["os", "estimate"].includes(marker.processStartSource), marker.processStartSource);
   assert.ok(Math.abs(Date.parse(marker.processStartedAt) - (Date.now() - process.uptime() * 1000)) < 10_000);
   // The pipe budget fits the 150 s tool timeout of Codex and ChatGPT.
   assert.deepEqual(envelopes[0].options.connectWaitMs, BROKER_BUDGET.connectWaitMs);
