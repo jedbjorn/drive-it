@@ -50,7 +50,7 @@ test("discover the Unguided tools and schemas over stdio", async (t) => {
   assert.deepEqual(allReferences.structuredContent.entries, apiReference());
 
   const reference = await client.callTool({ name: "get_api_reference", arguments: { name: "revit.create_level" } });
-  assert.equal(reference.structuredContent.version, "revit-2026-alpha.1");
+  assert.equal(reference.structuredContent.version, "revit-2026-alpha.2");
   assert.equal(reference.structuredContent.entries.length, 1);
   assert.equal(reference.structuredContent.entries[0].name, "revit.create_level");
   assert.ok(reference.structuredContent.entries[0].example.includes("revit.create_level"));

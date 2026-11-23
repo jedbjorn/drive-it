@@ -2,6 +2,7 @@ import builtins
 import importlib.abc
 import io
 import json
+import math
 import os
 import stat as stat_module
 import sys
@@ -335,12 +336,38 @@ class Checks:
         return check["passed"]
 
 
+class Units:
+    """Converts between display units and Revit's internal units (feet, square feet, radians)."""
+
+    # Internal units per one of each unit.
+    FACTORS = {
+        "mm": 1 / 304.8, "cm": 1 / 30.48, "m": 1 / 0.3048, "in": 1 / 12, "ft": 1.0,
+        "mm2": 1 / 92903.04, "m2": 1 / 0.09290304, "in2": 1 / 144, "ft2": 1.0,
+        "deg": math.pi / 180, "rad": 1.0,
+    }
+
+    def _factor(self, unit):
+        if unit not in self.FACTORS:
+            raise ValueError(f"Unknown unit {unit!r}; valid units are {', '.join(self.FACTORS)}.")
+        return self.FACTORS[unit]
+
+    def to_internal(self, value, unit):
+        return value * self._factor(unit)
+
+    def from_internal(self, value, unit):
+        return value / self._factor(unit)
+
+
 class Revit:
     OPERATIONS = {
         "open_document", "create_document", "read_document", "save_document",
         "save_as_document", "close_document", "delete_document", "create_level",
         "create_wall", "create_3d_view", "create_family_type", "delete_element",
+        "get_active_document", "find_elements", "get_parameters", "list_types",
+        "list_views", "get_selection", "set_selection",
     }
+    # Read primitives return their output (the broker's results entry) instead of the full response.
+    READ_PRIMITIVES = {"find_elements", "get_parameters", "list_types", "list_views", "get_selection"}
 
     def __init__(self, process_id, document, policy_pending, policy_denied):
         self.process_id = process_id
@@ -378,6 +405,36 @@ class Revit:
         elif response.get("document"):
             self.document = response["document"]
         return response
+
+    def _primitive(self, name, document, arguments):
+        arguments = {key: value for key, value in arguments.items() if value is not None}
+        response = self.execute([{"type": name, "arguments": arguments}], document=document)
+        return response["results"][0] if name in self.READ_PRIMITIVES else response
+
+    def get_active_document(self, document=None):
+        return self._primitive("get_active_document", document, {})
+
+    def find_elements(self, category, kind="instance", levelId=None, typeName=None, limit=200, offset=0, document=None):
+        return self._primitive("find_elements", document, {
+            "category": category, "kind": kind, "levelId": levelId, "typeName": typeName, "limit": limit, "offset": offset,
+        })
+
+    def get_parameters(self, elementIds, names=None, includeType=True, document=None):
+        return self._primitive("get_parameters", document, {"elementIds": elementIds, "names": names, "includeType": includeType})
+
+    def list_types(self, category, document=None):
+        return self._primitive("list_types", document, {"category": category})
+
+    def list_views(self, viewTypes=None, includeSheets=True, includeTemplates=False, document=None):
+        return self._primitive("list_views", document, {
+            "viewTypes": viewTypes, "includeSheets": includeSheets, "includeTemplates": includeTemplates,
+        })
+
+    def get_selection(self, document=None):
+        return self._primitive("get_selection", document, {})
+
+    def set_selection(self, elementIds, document=None):
+        return self._primitive("set_selection", document, {"elementIds": elementIds})
 
     def __getattr__(self, name):
         if name not in self.OPERATIONS:
@@ -446,6 +503,7 @@ def main():
             "files": Files(policy),
             "revit": Revit(run["processId"], run.get("document"), policy_pending, policy_denied),
             "checks": Checks(),
+            "units": Units(),
             "result": None,
         }
         exec(compile(run["source"], "<drive-it-script>", "exec"), scope)
