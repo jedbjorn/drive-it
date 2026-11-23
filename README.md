@@ -29,7 +29,7 @@ purpose: MCP server and Revit add-in
 Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes these stdio MCP tools:
 
 - `get_revit_session` returns the selected process ID, version, build, and current-user named-pipe identity.
-- `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker.
+- `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker. Every call carries a required `displayName`: one plain-language line the agent writes for you, such as "Add Level 3 at 24 ft to the tower model". It is kept on the run receipt and on any outside-root request, and the operator surface lists runs and requests by it.
 - `save_script`, `search_scripts`, `get_script`, `promote_script`, and `retire_script` manage the workspace script library (see [Script library](#script-library)).
 - `get_api_reference` returns local, versioned references for the callable Drive It file, check, and Revit operations. `get_guidance` is not registered.
 
@@ -116,6 +116,7 @@ The MSI registers Drive It with every supported MCP client it finds for your Win
 | Client | Detected by | Configuration written |
 |---|---|---|
 | Claude Desktop | `%APPDATA%\Claude` exists | `mcpServers.drive-it` in `%APPDATA%\Claude\claude_desktop_config.json` |
+| Claude Desktop (Microsoft Store) | `%LOCALAPPDATA%\Claude-Data\claude_<id>` exists | `mcpServers.drive-it` in `claude_desktop_config.json` in that folder |
 | Claude Code | `%USERPROFILE%\.claude.json` exists | user-scope `mcpServers.drive-it` in `%USERPROFILE%\.claude.json` |
 | Codex (CLI and app) | `%USERPROFILE%\.codex` exists | a marked `[mcp_servers.drive-it]` block in `%USERPROFILE%\.codex\config.toml`, with a 150-second tool timeout |
 
@@ -141,7 +142,7 @@ The operator surface uses the installed private Node runtime to call `server/ope
 
 - `workspace.json`: the selected root used for future operations.
 - `decisions/<id>.json`: pending, approved, denied, or consumed requests with canonical `operation` and `paths` details. Approval is consumed once and never reused for another request.
-- `runs/<run-id>.json`: retained receipts displayed independently of the current root.
+- `runs/<run-id>.json`: retained receipts, each with the run's `displayName`, displayed independently of the current root.
 
 ### Source build
 

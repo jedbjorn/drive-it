@@ -262,13 +262,13 @@ test("library tools round-trip over MCP with schema-valid structured content", a
   const { scriptId, revision } = saved.structuredContent.script;
 
   const executed = await call("execute_script", {
-    processId: 123, script: { scriptId, revision }, arguments: { name: "L3" },
+    processId: 123, displayName: "Add level L3 to the test model", script: { scriptId, revision }, arguments: { name: "L3" },
     document: { path: path.join(root, "model.rvt") },
   });
   assert.ok(!executed.isError, executed.content[0].text);
   assert.equal(executed.structuredContent.savedScript.revision, revision);
 
-  const bad = await call("execute_script", { processId: 123, script: { scriptId, revision }, arguments: { name: 1 } });
+  const bad = await call("execute_script", { processId: 123, displayName: "Add a level with a bad name", script: { scriptId, revision }, arguments: { name: 1 } });
   assert.equal(bad.isError, true);
   assert.match(bad.content[0].text, /^INVALID_ARGUMENTS/);
 
@@ -288,6 +288,6 @@ test("library tools round-trip over MCP with schema-valid structured content", a
 
   const retired = await call("retire_script", { scriptId, revision });
   assert.equal(retired.structuredContent.script.state, "retired");
-  const blocked = await call("execute_script", { processId: 123, script: { scriptId, revision } });
+  const blocked = await call("execute_script", { processId: 123, displayName: "Run a retired script", script: { scriptId, revision } });
   assert.match(blocked.content[0].text, /^SCRIPT_RETIRED/);
 });

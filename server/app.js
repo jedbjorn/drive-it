@@ -80,6 +80,7 @@ export function createDriveItServer(options = {}) {
     description: "Run inline Python or an exact saved script revision in the isolated fixed worker. File and typed Revit effects follow the persistent workspace policy and return a durable receipt.",
     inputSchema: {
       processId: processId.describe("Windows process ID of the selected Revit.exe"),
+      displayName: z.string().trim().min(1).max(200).describe("Required. One plain-language line, written for the user, saying what this run does to their files or model, e.g. \"Add Level 3 at 24 ft to the tower model\". Shown in the Drive-It operator window's run history and approval requests"),
       source: z.string().min(1).optional().describe("Inline Python source; mutually exclusive with script"),
       script: scriptReference.optional().describe("Saved script reference; mutually exclusive with source. An exact draft or active revision, or \"latest\" for the newest active revision. Retired revisions are rejected"),
       arguments: z.record(z.string(), z.unknown()).optional().describe("JSON arguments exposed to Python as args; saved scripts validate them against the revision's inputSchema and apply its defaults"),
@@ -90,6 +91,7 @@ export function createDriveItServer(options = {}) {
     // Must list every receipt field: MCP clients reject structured content with undeclared properties.
     outputSchema: {
       runId: z.string(),
+      displayName: z.string().nullable(),
       idempotencyKey: z.string(),
       fingerprint: z.string(),
       codeHash: z.string(),

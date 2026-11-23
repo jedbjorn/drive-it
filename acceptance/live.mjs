@@ -41,7 +41,7 @@ async function call(name, args) {
   return { error: result.isError ? result.content[0].text : null, value: result.structuredContent };
 }
 async function run(args) {
-  return call("execute_script", { processId, timeoutMs: 120000, ...args });
+  return call("execute_script", { processId, timeoutMs: 120000, displayName: "Live acceptance run", ...args });
 }
 const code = text => (text || "").split(":")[0];
 
@@ -78,6 +78,7 @@ revit.close_document()
 checks.record("fixtures saved", True)`,
     arguments: { rte: projectTemplate, rft: familyTemplate, rvt, rfa },
   });
+  check("receipt keeps the run display name", fixtures.value?.displayName === "Live acceptance run", fixtures.value?.displayName);
   check("disposable RVT/RFA fixtures created", fixtures.value?.status === "succeeded" && existsSync(rvt) && existsSync(rfa), fixtures.value?.error || fixtures.error);
   check("fixture run needed no decision", fixtures.value?.policyDecisionIds.length === 0, fixtures.value?.policyDecisionIds);
 
@@ -215,6 +216,8 @@ checks.record("round trip", result == "two", result)`, arguments: { a: path.join
   const pending = await run(outsideArgs);
   check("outside-root write is pending", pending.value?.status === "pending", pending.value?.status);
   const decision = operator("decisions", "list").find(row => row.runId === pending.value.runId && row.status === "pending");
+  check("pending request carries the run display name", decision?.displayName === "Live acceptance run", decision?.displayName);
+  check("history lists the run by display name", operator("history", "list").find(row => row.runId === pending.value.runId)?.displayName === "Live acceptance run");
   operator("decisions", "deny", decision.id);
   const denied = await run(outsideArgs);
   check("denied outside-root write returns denied", denied.value?.status === "denied", denied.value?.status);

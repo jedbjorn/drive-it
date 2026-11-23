@@ -98,6 +98,7 @@ export class Runtime {
     const startedAt = new Date().toISOString();
     const receipt = {
       runId,
+      displayName: input.displayName ?? null,
       idempotencyKey,
       fingerprint,
       codeHash,
@@ -196,7 +197,7 @@ export class Runtime {
       return { recorded: true };
     }
     if (method === "workspace.authorize") {
-      const result = await this.policy.authorize(context.runId, [{ operation: params.operation, paths: params.paths }], context.workspaceRoot);
+      const result = await this.policy.authorize(context.runId, [{ operation: params.operation, paths: params.paths }], context.workspaceRoot, context.receipt.displayName);
       this.recordPolicy(context.receipt, context, result);
       return result;
     }
@@ -221,7 +222,7 @@ export class Runtime {
     let response = await this.brokerExecutor(context.processId, envelope, { timeoutMs: context.timeoutMs });
     if (response.status === "policy_required") {
       this.observeBroker(response, context);
-      const decision = await this.policy.authorize(context.runId, response.policyRequests || [], context.workspaceRoot);
+      const decision = await this.policy.authorize(context.runId, response.policyRequests || [], context.workspaceRoot, context.receipt.displayName);
       this.recordPolicy(context.receipt, context, decision);
       if (decision.status === "approved") {
         const approvedEnvelope = {
