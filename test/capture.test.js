@@ -847,8 +847,31 @@ test("markElementIds turns marks on, de-duplicates, and returns each unmarked id
   assert.deepEqual(marks.legend, [LEGEND[0]]);
   assert.deepEqual(marks.notMarked, notMarked);
   assert.equal(marks.omitted, 0);
-  assert.deepEqual(marks.notes.length, 1);
+  const { MARK_NOTES } = await import("../server/capture.js");
+  assert.deepEqual(marks.notes, [MARK_NOTES.every, MARK_NOTES.notVisible]);
   assert.match(result.content[1].text, /marks\.notMarked lists 5 requested ids without a mark/);
+});
+
+test("marks.notes say not_visible may mean visibility was not established, only when a requested id is not_visible", async (t) => {
+  const launchRoot = await base(t, "notvisible");
+  let receipt;
+  const brokerExecutor = async (processId, envelope, options) => fakeBroker({ receipt })(processId, envelope, options);
+  const { client } = await connected(t, { launchRoot, brokerExecutor });
+  const { MARK_NOTES } = await import("../server/capture.js");
+  assert.match(MARK_NOTES.notVisible, /^not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted/);
+  const cases = [
+    ["FloorPlan", [{ elementId: "12", reason: "not_visible" }], 1, ["every", "plan", "notVisible"]],
+    ["ThreeD", [{ elementId: "12", reason: "not_visible" }], 1, ["every", "threeD", "notVisible"]],
+    ["Section", [{ elementId: "12", reason: "not_visible" }], 0, ["every", "notVisible"]],
+    ["FloorPlan", [{ elementId: "11", reason: "not_in_view" }], 0, ["every", "plan"]],
+    ["FloorPlan", [], 0, ["every", "plan"]],
+  ];
+  for (const [viewType, notMarked, omitted, keys] of cases) {
+    receipt = { viewType, marks: marksReceipt({ legend: [LEGEND[0]], notMarked, omitted }) };
+    const result = await capture(client, { markElementIds: ["373532", ...notMarked.map(row => row.elementId)] });
+    assert.ok(!result.isError, result.content[0].text);
+    assert.deepEqual(result.structuredContent.marks.notes, keys.map(key => MARK_NOTES[key]), `${viewType} ${JSON.stringify(notMarked)}`);
+  }
 });
 
 test("a malformed element id is a specific error with no Revit call and no artifact", async (t) => {
@@ -935,6 +958,7 @@ test("discovery carries brief marks guidance beside the intact visual QA rule", 
   assert.equal(tool.inputSchema.properties.marks.type, "boolean");
   assert.equal(tool.inputSchema.properties.markElementIds.type, "array");
   assert.match(tool.inputSchema.properties.markElementIds.description, /not_found, not_markable, not_in_view, not_visible, or not_placed/);
+  assert.match(tool.inputSchema.properties.markElementIds.description, /not_visible also covers an element whose visibility could not be established, such as a family drawn only as a symbol in a plan, and these count in omitted/);
   assert.deepEqual(tool.inputSchema.required, ["purpose"]);
   assert.ok(tool.outputSchema.properties.marks);
 });

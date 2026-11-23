@@ -979,6 +979,10 @@ internal sealed class MarkEngine
         }
         catch (Exception)
         {
+            // Visibility not established: counted in omitted as possibly visible, like a model
+            // element whose geometry cannot be read.
+            candidate.NoGeometry = true;
+            candidate.InFrame = true;
             candidate.Reason = "not_visible";
             return;
         }
