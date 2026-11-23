@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { revitContent } from "../server/content.js";
-import { listSessions, resolveProcessId } from "../server/session.js";
+import { EventEmitter } from "node:events";
+import { listSessions, openPipe, resolveProcessId } from "../server/session.js";
 
 const session = (processId, version = "2026") => ({ processId, version, build: "b", connectionIdentity: `pipe-${processId}` });
 
@@ -76,4 +77,57 @@ test("back-to-back reads ride out the add-in re-creating its pipe", { skip: proc
   const second = await readSession(processId);
   assert.equal(first.processId, processId);
   assert.equal(second.processId, processId);
+});
+
+// A connector that fails with the given codes in order, then connects.
+function scriptedConnector(codes) {
+  const calls = [];
+  const connector = name => {
+    calls.push(name);
+    const pipe = new EventEmitter();
+    pipe.destroy = () => {};
+    const code = codes.shift();
+    setImmediate(() => (code ? pipe.emit("error", Object.assign(new Error(code), { code })) : pipe.emit("connect")));
+    return pipe;
+  };
+  return { connector, calls };
+}
+
+test("a busy pipe is waited on for connectWaitMs; an absent one only briefly", async () => {
+  const busy = Array(20).fill("EBUSY");
+  const waited = scriptedConnector([...busy]);
+  await openPipe(1, { waitMs: 30_000, connector: waited.connector });
+  assert.equal(waited.calls.length, 21);
+
+  const impatient = scriptedConnector([...busy]);
+  await assert.rejects(openPipe(1, { connector: impatient.connector }), { code: "EBUSY" });
+  assert.equal(impatient.calls.length, 8);
+
+  // The gap between pipe instances (ENOENT) while queued does not end the wait.
+  const queued = scriptedConnector(["EBUSY", "EBUSY", "ENOENT", ...Array(12).fill("EBUSY"), "ENOENT", "ENOENT"]);
+  await openPipe(1, { waitMs: 30_000, connector: queued.connector });
+  assert.equal(queued.calls.length, 18);
+
+  // A pipe that stays absent means Revit is gone, however long the caller would wait.
+  const gone = scriptedConnector(Array(20).fill("ENOENT"));
+  const started = Date.now();
+  await assert.rejects(openPipe(1, { waitMs: 30_000, connector: gone.connector }), { code: "ENOENT" });
+  assert.equal(gone.calls.length, 8);
+  assert.ok(Date.now() - started < 5_000);
+
+  const refused = scriptedConnector(["EACCES"]);
+  await assert.rejects(openPipe(1, { waitMs: 30_000, connector: refused.connector }), { code: "EACCES" });
+  assert.equal(refused.calls.length, 1);
+});
+
+test("a Revit busy serving another client is still found", async () => {
+  const reader = async processId => {
+    if (processId === 7) throw Object.assign(new Error("connect EBUSY"), { code: "EBUSY" });
+    throw Object.assign(new Error("connect ENOENT"), { code: "ENOENT" });
+  };
+  const sessions = await listSessions({ pipeLister: async () => ["drive-it-7", "drive-it-9"], reader });
+  assert.deepEqual(sessions, [{ processId: 7, version: null, build: null, busy: true }]);
+  assert.equal(await resolveProcessId(undefined, { lister: async () => sessions }), 7);
+  await assert.rejects(resolveProcessId(undefined, { lister: async () => [...sessions, session(9)] }), error =>
+    /processId 7 \(busy\)/.test(error.message) && /processId 9 \(Revit 2026\)/.test(error.message));
 });

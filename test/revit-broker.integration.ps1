@@ -59,12 +59,14 @@ $canonicalOutsideRvt = Join-Path $outsideDirectory "broker-outside.rvt"
 $danglingLink = Join-Path $WorkspaceRoot "broker-dangling-$runId.rvt"
 $canonicalDanglingOutsideRvt = Join-Path $outsideDirectory "broker-dangling-outside.rvt"
 
-function Invoke-Broker([hashtable]$Request) {
+function Invoke-Broker([hashtable]$Request, [string]$Type = "model.execute") {
     if (-not $Request.ContainsKey("id")) {
         $Request.id = [guid]::NewGuid().ToString("N")
     }
-    $Request.type = "model.execute"
-    $Request.workspaceRoot = $WorkspaceRoot
+    $Request.type = $Type
+    if ($Type -eq "model.execute") {
+        $Request.workspaceRoot = $WorkspaceRoot
+    }
     $json = $Request | ConvertTo-Json -Depth 12 -Compress
     $pipe = $null
     $reader = $null
@@ -103,6 +105,86 @@ function Invoke-Broker([hashtable]$Request) {
 
 function Document-Target([string]$UniqueId) {
     return @{ uniqueId = $UniqueId; path = $null }
+}
+
+# view.capture mirrors the MCP server's file handoff: an empty staging directory under
+# _reference-images\<session>, and the add-in exports the one view into it.
+$captureRoot = Join-Path $WorkspaceRoot "_reference-images\integration-$runId"
+$capturedViews = [System.Collections.Generic.List[string]]::new()
+$rejectedViews = [System.Collections.Generic.List[string]]::new()
+
+# Set-StrictMode rejects absent properties; responses omit null fields.
+function Get-Field($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Invoke-Capture([string]$DocumentId, $ViewId, [int]$PixelSize = 512) {
+    $staging = Join-Path $captureRoot (".tmp-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force $staging | Out-Null
+    $target = Join-Path $staging "capture.png"
+    $viewValue = if ($null -eq $ViewId) { $null } else { [string]$ViewId }
+    $response = Invoke-Broker @{
+        document = Document-Target $DocumentId
+        capture = @{ viewId = $viewValue; pixelSize = $PixelSize; targetPath = $target }
+    } "view.capture"
+    Assert-True ($response.type -eq "view.capture") "The capture response type was $($response.type)."
+    $response | Add-Member -NotePropertyName stagingDirectory -NotePropertyValue $staging -Force
+    return $response
+}
+
+function Assert-Captured($Response, [string]$Label) {
+    Assert-Status $Response "succeeded"
+    $path = $Response.capture.outputPath
+    Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "${Label}: the exported PNG is missing."
+    Assert-True (@(Get-ChildItem -LiteralPath $Response.stagingDirectory -Force).Count -eq 1) "${Label}: the staging directory holds more than the PNG."
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $signature = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+    for ($index = 0; $index -lt 8; $index++) {
+        Assert-True ($bytes[$index] -eq $signature[$index]) "${Label}: the export is not a PNG."
+    }
+    Assert-True ($Response.capture.documentModifiedBefore -eq $Response.capture.documentModifiedAfter) "${Label}: the capture changed the document's modified state."
+    Assert-True (-not $Response.capture.temporaryViewCreated -and -not $Response.capture.transactionStarted) "${Label}: the capture reported a temporary view or transaction."
+    $width = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 16))
+    $height = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 20))
+    Assert-True ([Math]::Max($width, $height) -le 514) "${Label}: ${width}x${height} exceeds pixelSize 512 on its longer side."
+    $capturedViews.Add("$Label $($Response.capture.viewType) '$($Response.capture.viewName)' ($($Response.capture.viewId)) ${width}x${height} $path")
+}
+
+function Assert-CaptureRejected($Response, [string]$Code, [string]$Label) {
+    Assert-Status $Response "failed"
+    $errorCode = Get-Field (Get-Field $Response "error") "code"
+    Assert-True ($errorCode -eq $Code) "${Label}: expected $Code but received ${errorCode}: $(Get-Field (Get-Field $Response 'error') 'message')"
+    Assert-True ($null -eq (Get-Field (Get-Field $Response "capture") "outputPath")) "${Label}: a rejected capture reported an output path."
+    Assert-True (@(Get-ChildItem -LiteralPath $Response.stagingDirectory -Force).Count -eq 0) "${Label}: a rejected capture left a file."
+    $rejectedViews.Add("$Label -> $Code")
+}
+
+function Test-ViewCaptures([string]$DocumentId, [string]$Kind, [string[]]$Required) {
+    $noActive = Invoke-Capture $DocumentId $null
+    Assert-CaptureRejected $noActive "no_active_view" "$Kind background document without viewId"
+    $views = @($noActive.capture.availableViews)
+    Assert-True ($views.Count -gt 0) "$Kind listed no capturable views."
+    $types = @()
+    foreach ($type in @("ThreeD", "FloorPlan", "CeilingPlan", "EngineeringPlan", "Elevation", "Section", "Detail")) {
+        $view = $views | Where-Object { $_.type -eq $type } | Select-Object -First 1
+        if ($null -eq $view) { continue }
+        $shot = Invoke-Capture $DocumentId $view.id
+        Assert-Captured $shot "$Kind $type"
+        Assert-True ($shot.capture.viewId -eq $view.id) "$Kind ${type}: the receipt named another view."
+        $types += $type
+    }
+    foreach ($type in $Required) {
+        Assert-True ($types -contains $type) "$Kind has no capturable $type view (captured: $($types -join ', '))."
+    }
+    foreach ($view in @($noActive.capture.otherViews | Group-Object notCapturable | ForEach-Object { $_.Group[0] })) {
+        Assert-CaptureRejected (Invoke-Capture $DocumentId $view.id) $view.notCapturable "$Kind $($view.type) '$($view.name)'"
+    }
+    Assert-CaptureRejected (Invoke-Capture $DocumentId "999999999") "view_not_found" "$Kind missing view"
+    Assert-CaptureRejected (Invoke-Capture $DocumentId $views[0].id 100) "invalid_pixel_size" "$Kind pixelSize 100"
+    return $views
 }
 
 New-Item -ItemType Directory -Force $outsideDirectory | Out-Null
@@ -232,6 +314,28 @@ try {
     Assert-True ($model.document.levels.name -contains "Drive It Level") "The committed level was not observed in the project."
     Assert-True ($model.affectedElements.Count -eq 2) "The successful RVT batch did not identify both affected elements."
 
+    $rvtViews = @(Test-ViewCaptures $rvtId "RVT" @("FloorPlan"))
+    Assert-CaptureRejected (Invoke-Capture $rvtId $level.id) "not_a_view" "RVT level element"
+
+    # Element ids belong to one document: an RVT view id against an open RFA is not followed.
+    $crossFamily = Invoke-Broker @{
+        document = $null
+        operations = @(@{ type = "create_document"; arguments = @{ kind = "rfa"; templatePath = $familyTemplate } })
+    }
+    Assert-Status $crossFamily "succeeded"
+    $crossObserved = $null
+    foreach ($view in $rvtViews) {
+        $cross = Invoke-Capture $crossFamily.document.uniqueId $view.id
+        if ((Get-Field (Get-Field $cross "error") "code") -eq "not_a_view") { continue }
+        Assert-CaptureRejected $cross "view_in_other_document" "RVT view $($view.id) against the RFA"
+        $crossObserved = $cross
+        break
+    }
+    Assert-True ($null -ne $crossObserved) "No RVT view id was free in the RFA to prove cross-document rejection."
+    # With two documents open, a bare viewId is ambiguous and must name its document.
+    Assert-CaptureRejected (Invoke-Capture $null $rvtViews[0].id) "document_required" "viewId without document, two documents open"
+    Assert-Status (Invoke-Broker @{ document = Document-Target $crossFamily.document.uniqueId; operations = @(@{ type = "close_document"; arguments = @{} }) }) "succeeded"
+
     $rollback = Invoke-Broker @{
         document = Document-Target $rvtId
         operations = @(
@@ -249,6 +353,7 @@ try {
     Assert-Status $saved "succeeded"
     $closed = Invoke-Broker @{ document = Document-Target $rvtId; operations = @(@{ type = "close_document"; arguments = @{} }) }
     Assert-Status $closed "succeeded"
+    Assert-CaptureRejected (Invoke-Capture $rvtId $rvtViews[0].id) "stale_document_identity" "closed RVT"
 
     $reopened = Invoke-Broker @{
         document = $null
@@ -293,6 +398,7 @@ try {
     }
     Assert-Status $familyEdit "succeeded"
     Assert-True ($familyEdit.document.familyTypes -contains "Drive It Type") "The new family type was not observed."
+    Test-ViewCaptures $familyId "RFA" @("ThreeD") | Out-Null
     $familySaved = Invoke-Broker @{
         document = Document-Target $familyId
         operations = @(@{ type = "save_as_document"; arguments = @{ destinationPath = $rfaPath; overwrite = $true } })
@@ -324,6 +430,9 @@ try {
         revitBuild = $script:brokerSession.build
         revitWindowTitle = $revit.MainWindowTitle
         receiptLog = $receiptLog
+        captureDirectory = $captureRoot
+        capturedViews = @($capturedViews)
+        rejectedViews = @($rejectedViews)
         checks = @(
             "policy_required_preflight_and_junction_resolution",
             "approved_outside_root_save_and_delete",
@@ -333,7 +442,8 @@ try {
             "rvt_save_close_reopen_observed_effects",
             "partial_delete_close_observation",
             "rvt_and_rfa_delete",
-            "rfa_family_type_save_close_reopen"
+            "rfa_family_type_save_close_reopen",
+            "view_capture_rvt_rfa_export_and_rejections"
         )
     } | ConvertTo-Json -Depth 6
 }
