@@ -122,14 +122,18 @@ function Get-Field($Object, [string]$Name) {
     return $property.Value
 }
 
-function Invoke-Capture([string]$DocumentId, $ViewId, [int]$PixelSize = 512) {
+function Invoke-Capture([string]$DocumentId, $ViewId, [int]$PixelSize = 512, [hashtable]$Marks = $null) {
     $staging = Join-Path $captureRoot (".tmp-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force $staging | Out-Null
     $target = Join-Path $staging "capture.png"
     $viewValue = if ($null -eq $ViewId) { $null } else { [string]$ViewId }
+    $capture = @{ viewId = $viewValue; pixelSize = $PixelSize; targetPath = $target }
+    if ($null -ne $Marks) {
+        foreach ($key in $Marks.Keys) { $capture[$key] = $Marks[$key] }
+    }
     $response = Invoke-Broker @{
         document = Document-Target $DocumentId
-        capture = @{ viewId = $viewValue; pixelSize = $PixelSize; targetPath = $target }
+        capture = $capture
     } "view.capture"
     Assert-True ($response.type -eq "view.capture") "The capture response type was $($response.type)."
     $response | Add-Member -NotePropertyName stagingDirectory -NotePropertyValue $staging -Force
@@ -186,6 +190,51 @@ function Test-ViewCaptures([string]$DocumentId, [string]$Kind, [string[]]$Requir
     Assert-CaptureRejected (Invoke-Capture $DocumentId "999999999") "view_not_found" "$Kind missing view"
     Assert-CaptureRejected (Invoke-Capture $DocumentId $views[0].id 100) "invalid_pixel_size" "$Kind pixelSize 100"
     return $views
+}
+
+function Get-PngSize([string]$Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    return "$([System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 16)))x$([System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 20)))"
+}
+
+$markedViews = [System.Collections.Generic.List[string]]::new()
+
+# Element marks: a marked capture keeps the export's size and returns a well-formed legend, a
+# capture without marks returns none, requested ids get reasons, and a malformed id or a view kind
+# without marks fails with no file left. $NotMarkable is an existing id of a kind never marked here.
+function Test-Marks([string]$DocumentId, [string]$Kind, [object[]]$Views, [string]$NotMarkable) {
+    foreach ($type in @("FloorPlan", "ThreeD", "Elevation", "Section")) {
+        $view = $Views | Where-Object { $_.type -eq $type } | Select-Object -First 1
+        if ($null -eq $view) { continue }
+        $plain = Invoke-Capture $DocumentId $view.id
+        Assert-Captured $plain "$Kind $type without marks"
+        Assert-True ($null -eq (Get-Field $plain.capture "marks")) "$Kind ${type}: a capture without marks returned marks."
+        $shot = Invoke-Capture $DocumentId $view.id 512 @{ marks = $true }
+        Assert-Captured $shot "$Kind $type marked"
+        Assert-True ((Get-PngSize $shot.capture.outputPath) -eq (Get-PngSize $plain.capture.outputPath)) "$Kind ${type}: the marked image changed size."
+        $marks = Get-Field $shot.capture "marks"
+        Assert-True ($null -ne $marks) "$Kind ${type}: a marked capture returned no marks."
+        Assert-True ($null -eq (Get-Field $marks "notMarked")) "$Kind ${type}: notMarked without markElementIds."
+        Assert-True ([int]$marks.omitted -ge 0) "$Kind ${type}: omitted is missing."
+        $number = 0
+        foreach ($row in @(Get-Field $marks "legend")) {
+            $number++
+            Assert-True ($row.mark -eq $number -and $row.elementId -match '^[1-9][0-9]*$') "$Kind ${type}: legend row $number is malformed."
+            $bounds = Get-Field $row "bounds"
+            if ($null -ne $bounds) {
+                Assert-True ($row.x -ge $bounds.x -and $row.x -le $bounds.x + $bounds.width -and $row.y -ge $bounds.y -and $row.y -le $bounds.y + $bounds.height) "$Kind ${type}: mark $number lies outside its bounds."
+            }
+        }
+        $markedViews.Add("$Kind $type '$($view.name)' marks=$number omitted=$($marks.omitted)")
+    }
+    $view = $Views | Where-Object { $_.type -eq "ThreeD" } | Select-Object -First 1
+    $requested = Invoke-Capture $DocumentId $view.id 512 @{ markElementIds = @("999999999", $NotMarkable, "999999999") }
+    Assert-Captured $requested "$Kind 3D markElementIds"
+    $reasons = @{}
+    foreach ($row in @($requested.capture.marks.notMarked)) { $reasons[$row.elementId] = $row.reason }
+    Assert-True ($reasons["999999999"] -eq "not_found" -and $reasons[$NotMarkable] -eq "not_markable" -and $reasons.Count -eq 2) "$Kind markElementIds reasons were $($reasons | ConvertTo-Json -Compress)."
+    Assert-True (@($requested.capture.marks.legend).Count -eq 0) "$Kind markElementIds marked an element that was not requested."
+    Assert-CaptureRejected (Invoke-Capture $DocumentId $view.id 512 @{ markElementIds = @("12a") }) "invalid_element_id" "$Kind malformed mark id"
 }
 
 $modelRejections = [System.Collections.Generic.List[string]]::new()
@@ -367,6 +416,8 @@ try {
     Test-Create3DView $rvtId "RVT" | Out-Null
     $rvtViews = @(Test-ViewCaptures $rvtId "RVT" @("FloorPlan", "ThreeD"))
     Assert-CaptureRejected (Invoke-Capture $rvtId $level.id) "not_a_view" "RVT level element"
+    # Levels are not marked in 3D views.
+    Test-Marks $rvtId "RVT" $rvtViews ([string]$level.id)
 
     # Element ids belong to one document: an RVT view id against an open RFA is not followed.
     $crossFamily = Invoke-Broker @{
@@ -457,7 +508,9 @@ try {
     Assert-Status $familyEdit "succeeded"
     Assert-True ($familyEdit.document.familyTypes -contains "Drive It Type") "The new family type was not observed."
     Test-Create3DView $familyId "RFA" | Out-Null
-    Test-ViewCaptures $familyId "RFA" @("ThreeD") | Out-Null
+    $familyViews = @(Test-ViewCaptures $familyId "RFA" @("ThreeD"))
+    # A view is never marked.
+    Test-Marks $familyId "RFA" $familyViews ([string]$familyViews[0].id)
     $familySaved = Invoke-Broker @{
         document = Document-Target $familyId
         operations = @(@{ type = "save_as_document"; arguments = @{ destinationPath = $rfaPath; overwrite = $true } })
@@ -504,6 +557,7 @@ try {
         captureDirectory = $captureRoot
         capturedViews = @($capturedViews)
         rejectedViews = @($rejectedViews)
+        markedViews = @($markedViews)
         modelRejections = @($modelRejections)
         checks = @(
             "policy_required_preflight_and_junction_resolution",
@@ -517,7 +571,8 @@ try {
             "rfa_family_type_save_close_reopen",
             "view_capture_rvt_rfa_export_and_rejections",
             "create_3d_view_rvt_rfa_duplicate_rollback_capture",
-            "create_3d_view_name_rules_rollback_recreate_annotation_refusal"
+            "create_3d_view_name_rules_rollback_recreate_annotation_refusal",
+            "element_marks_legend_reasons_and_failures"
         )
     } | ConvertTo-Json -Depth 6
 }
