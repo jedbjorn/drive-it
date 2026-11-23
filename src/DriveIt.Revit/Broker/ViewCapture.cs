@@ -18,6 +18,7 @@ public sealed partial class DocumentDispatcher
     // Per view type, so a large model's many plans cannot crowd its 3D views and sections out.
     private const int MaximumListedViewsPerType = 20;
     private const int MaximumOtherViewsPerType = 5;
+    private const int PixelTolerance = 2;
 
     /// <summary>The graphical model views a capture accepts, in RVT and RFA documents alike.</summary>
     private static readonly HashSet<ViewType> CapturableViewTypes =
@@ -53,7 +54,7 @@ public sealed partial class DocumentDispatcher
                     $"pixelSize must be an integer from {MinimumPixelSize} through {MaximumPixelSize}.");
 
             // Identity is checked here, in the API context, not when the request was queued.
-            var state = ResolveCaptureDocument(application, request.Document);
+            var state = ResolveCaptureDocument(application, request.Document, capture.ViewId);
             document = state.Document;
             response.Document = IdentitySnapshot(state);
             var view = SelectView(application, document, capture.ViewId);
@@ -68,31 +69,29 @@ public sealed partial class DocumentDispatcher
             };
             response.Capture = receipt;
 
+            // pixelSize bounds the longer side. The fit direction is predicted from the view's
+            // outline; when Revit's actual export is longer on the other side, export once more
+            // fitting that side instead.
             var fit = LongerSideFit(view);
-            receipt.FitDirection = fit.ToString();
-            var options = new ImageExportOptions
+            var produced = ExportOnce(document, view, fit, capture.PixelSize, stagingDirectory);
+            var (width, height) = PngSize(produced);
+            if (Math.Max(width, height) > capture.PixelSize + PixelTolerance)
             {
-                ExportRange = ExportRange.SetOfViews,
-                ZoomType = ZoomFitType.FitToPage,
-                FitDirection = fit,
-                PixelSize = capture.PixelSize,
-                HLRandWFViewsFileType = ImageFileType.PNG,
-                ShadowViewsFileType = ImageFileType.PNG,
-                ImageResolution = ImageResolution.DPI_72,
-                // Revit appends the view name to this stem; the staging directory is empty, so the
-                // one file it holds afterwards is the export.
-                FilePath = Path.Combine(stagingDirectory, "export"),
-            };
-            options.SetViewsAndSheets(new List<ElementId> { view.Id });
-            document.ExportImage(options);
-
-            var produced = Directory.GetFiles(stagingDirectory);
-            if (produced.Length != 1 || !string.Equals(Path.GetExtension(produced[0]), ".png", StringComparison.OrdinalIgnoreCase))
-                throw new RequestRejectedException("export_output_unexpected",
-                    $"Revit's image export produced {produced.Length} file(s) instead of one PNG.");
-            File.Move(produced[0], target);
-            receipt.OutputPath = target;
+                File.Delete(produced);
+                fit = fit == FitDirectionType.Horizontal ? FitDirectionType.Vertical : FitDirectionType.Horizontal;
+                produced = ExportOnce(document, view, fit, capture.PixelSize, stagingDirectory);
+                (width, height) = PngSize(produced);
+                if (Math.Max(width, height) > capture.PixelSize + PixelTolerance)
+                    throw new RequestRejectedException("capture_size_exceeded",
+                        $"Revit exported {width}x{height} for view '{view.Name}', larger than pixelSize {capture.PixelSize} on its longer side with either fit direction.");
+            }
+            receipt.FitDirection = fit.ToString();
+            File.Move(produced, target);
             receipt.DocumentModifiedAfter = document.IsModified;
+            if (receipt.DocumentModifiedBefore == false && receipt.DocumentModifiedAfter == true)
+                throw new RequestRejectedException("document_modified_by_capture",
+                    $"'{document.Title}' became modified during the image export. No image is returned; the document now has unsaved changes Drive It did not intend.");
+            receipt.OutputPath = target;
             response.Status = "succeeded";
         }
         catch (RequestRejectedException exception)
@@ -106,6 +105,50 @@ public sealed partial class DocumentDispatcher
         return response;
     }
 
+    private static string ExportOnce(Document document, View view, FitDirectionType fit, int pixelSize, string stagingDirectory)
+    {
+        var options = new ImageExportOptions
+        {
+            ExportRange = ExportRange.SetOfViews,
+            ZoomType = ZoomFitType.FitToPage,
+            FitDirection = fit,
+            PixelSize = pixelSize,
+            HLRandWFViewsFileType = ImageFileType.PNG,
+            ShadowViewsFileType = ImageFileType.PNG,
+            ImageResolution = ImageResolution.DPI_72,
+            // Revit appends the view name to this stem; the staging directory is empty, so the
+            // one file it holds afterwards is the export.
+            FilePath = Path.Combine(stagingDirectory, "export"),
+        };
+        options.SetViewsAndSheets(new List<ElementId> { view.Id });
+        document.ExportImage(options);
+
+        var produced = Directory.GetFiles(stagingDirectory);
+        if (produced.Length != 1 || !string.Equals(Path.GetExtension(produced[0]), ".png", StringComparison.OrdinalIgnoreCase))
+            throw new RequestRejectedException("export_output_unexpected",
+                $"Revit's image export produced {produced.Length} file(s) instead of one PNG.");
+        return produced[0];
+    }
+
+    /// <summary>Width and height from the PNG IHDR chunk (big-endian at bytes 16 and 20).</summary>
+    private static (int Width, int Height) PngSize(string path)
+    {
+        var header = new byte[24];
+        using (var stream = File.OpenRead(path))
+        {
+            if (stream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false) < header.Length)
+                throw new RequestRejectedException("export_output_unexpected", "Revit's image export is not a PNG.");
+        }
+        int ReadInt(int offset) => (header[offset] << 24) | (header[offset + 1] << 16) | (header[offset + 2] << 8) | header[offset + 3];
+        return (ReadInt(16), ReadInt(20));
+    }
+
+    /// <summary>
+    /// A real link (symbolic link or junction). Cloud-file placeholders such as OneDrive's carry
+    /// FILE_ATTRIBUTE_REPARSE_POINT too, but have no link target and are ordinary folders here.
+    /// </summary>
+    private static bool IsLink(string directory) => new DirectoryInfo(directory).LinkTarget is not null;
+
     private void Fail(BrokerResponse response, string code, string message, Document? document, string? stagingDirectory)
     {
         response.Status = "failed";
@@ -115,9 +158,13 @@ public sealed partial class DocumentDispatcher
             response.Capture ??= new CaptureReceipt();
             try
             {
-                var (available, other) = ListViews(document);
-                response.Capture.AvailableViews = available;
-                response.Capture.OtherViews = other;
+                var lists = ListViews(document);
+                response.Capture.AvailableViews = lists.Available;
+                response.Capture.OtherViews = lists.Other;
+                response.Capture.AvailableViewsTotal = lists.AvailableTotal;
+                response.Capture.OtherViewsTotal = lists.OtherTotal;
+                response.Capture.ViewsListedPerType = MaximumListedViewsPerType;
+                response.Capture.OtherViewsListedPerType = MaximumOtherViewsPerType;
             }
             catch (Exception)
             {
@@ -147,24 +194,45 @@ public sealed partial class DocumentDispatcher
                 $"capture.targetPath must lie in a staging directory under {ReferenceImagesDirectoryName}\\<session>.");
         if (!Directory.Exists(staging))
             throw new RequestRejectedException("invalid_capture_target", "The capture staging directory does not exist.");
-        if ((File.GetAttributes(staging!) & FileAttributes.ReparsePoint) != 0)
+        if (IsLink(staging!))
             throw new RequestRejectedException("invalid_capture_target", "The capture staging directory is a link.");
         if (Directory.EnumerateFileSystemEntries(staging!).Any())
             throw new RequestRejectedException("invalid_capture_target", "The capture staging directory is not empty.");
         return target;
     }
 
-    private DocumentState ResolveCaptureDocument(UIApplication application, DocumentTarget? target)
+    private DocumentState ResolveCaptureDocument(UIApplication application, DocumentTarget? target, string? viewId)
     {
         if (!string.IsNullOrWhiteSpace(target?.UniqueId) || !string.IsNullOrWhiteSpace(target?.Path))
         {
             return TryResolveInitial(application, target) ??
                 throw new RequestRejectedException("document_not_open", "The selected document is not open in this Revit session.");
         }
+        // Element ids belong to one document, and the same id is often a view in another project
+        // made from the same template, so a bare viewId is only unambiguous with one document open.
+        if (!string.IsNullOrWhiteSpace(viewId))
+        {
+            var open = OpenDocuments(application).Where(document => !document.IsLinked).ToList();
+            if (open.Count > 1)
+                throw new RequestRejectedException("document_required",
+                    $"{open.Count} documents are open ({string.Join(", ", open.Select(DescribeForSelection))}); pass document {{\"uniqueId\": ...}} together with viewId so the id is looked up in the right one.");
+        }
         var active = application.ActiveUIDocument?.Document ??
             throw new RequestRejectedException("no_active_document",
                 "No document is active in Revit's window; pass document.uniqueId from an execute_script receipt.");
         return Register(active);
+    }
+
+    private string DescribeForSelection(Document document)
+    {
+        try
+        {
+            return $"'{document.Title}' uniqueId {Register(document).Id}";
+        }
+        catch (RequestRejectedException)
+        {
+            return $"'{document.Title}'";
+        }
     }
 
     private View SelectView(UIApplication application, Document document, string? viewId)
@@ -238,8 +306,10 @@ public sealed partial class DocumentDispatcher
     /// Capturable views, and the document's other views with the reason they cannot be captured,
     /// so a failed selection tells the agent what it can pick instead.
     /// </summary>
-    private static (List<ViewSummary> Available, List<ViewSummary> Other) ListViews(Document document)
+    private static (List<ViewSummary> Available, List<ViewSummary> Other, int AvailableTotal, int OtherTotal) ListViews(Document document)
     {
+        var availableTotal = 0;
+        var otherTotal = 0;
         var available = new List<ViewSummary>();
         var other = new List<ViewSummary>();
         var listed = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -254,6 +324,7 @@ public sealed partial class DocumentDispatcher
                 : !CapturableViewTypes.Contains(view.ViewType) ? "unsupported_view_type"
                 : !view.CanBePrinted ? "view_not_exportable"
                 : null;
+            if (reason is null) availableTotal++; else otherTotal++;
             var key = $"{reason}:{view.ViewType}";
             var count = listed.GetValueOrDefault(key);
             if (count >= (reason is null ? MaximumListedViewsPerType : MaximumOtherViewsPerType))
@@ -267,7 +338,7 @@ public sealed partial class DocumentDispatcher
                 NotCapturable = reason,
             });
         }
-        return (available, other);
+        return (available, other, availableTotal, otherTotal);
     }
 
     private static DocumentReceipt IdentitySnapshot(DocumentState state) => new()
@@ -286,7 +357,7 @@ public sealed partial class DocumentDispatcher
             return;
         try
         {
-            if ((File.GetAttributes(stagingDirectory) & FileAttributes.ReparsePoint) != 0)
+            if (IsLink(stagingDirectory))
                 return;
             foreach (var file in Directory.GetFiles(stagingDirectory))
                 File.Delete(file);

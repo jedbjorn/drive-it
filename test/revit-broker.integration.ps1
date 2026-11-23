@@ -149,6 +149,7 @@ function Assert-Captured($Response, [string]$Label) {
     Assert-True (-not $Response.capture.temporaryViewCreated -and -not $Response.capture.transactionStarted) "${Label}: the capture reported a temporary view or transaction."
     $width = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 16))
     $height = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 20))
+    Assert-True ([Math]::Max($width, $height) -le 514) "${Label}: ${width}x${height} exceeds pixelSize 512 on its longer side."
     $capturedViews.Add("$Label $($Response.capture.viewType) '$($Response.capture.viewName)' ($($Response.capture.viewId)) ${width}x${height} $path")
 }
 
@@ -331,6 +332,8 @@ try {
         break
     }
     Assert-True ($null -ne $crossObserved) "No RVT view id was free in the RFA to prove cross-document rejection."
+    # With two documents open, a bare viewId is ambiguous and must name its document.
+    Assert-CaptureRejected (Invoke-Capture $null $rvtViews[0].id) "document_required" "viewId without document, two documents open"
     Assert-Status (Invoke-Broker @{ document = Document-Target $crossFamily.document.uniqueId; operations = @(@{ type = "close_document"; arguments = @{} }) }) "succeeded"
 
     $rollback = Invoke-Broker @{

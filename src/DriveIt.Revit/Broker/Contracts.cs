@@ -117,6 +117,10 @@ public sealed class CaptureReceipt
     public bool TransactionStarted { get; set; }
     public List<ViewSummary>? AvailableViews { get; set; }
     public List<ViewSummary>? OtherViews { get; set; }
+    public int? AvailableViewsTotal { get; set; }
+    public int? OtherViewsTotal { get; set; }
+    public int? ViewsListedPerType { get; set; }
+    public int? OtherViewsListedPerType { get; set; }
 }
 
 public sealed class ViewSummary
