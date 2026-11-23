@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -15,8 +15,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createDriveItServer, SERVER_INSTRUCTIONS } from "../server/app.js";
 import {
-  launchRootFrom, MARKER_SCHEMA, MAX_IMAGE_BYTES, ownerState, pngDimensions, REFERENCE_DIRECTORY,
-  ReferenceImages, retentionFrom, SESSION_MARKER,
+  BROKER_BUDGET, launchRootFrom, MARKER_SCHEMA, MAX_IMAGE_BYTES, ownerState, pngDimensions, processStartTime,
+  REFERENCE_DIRECTORY, ReferenceImages, retentionFrom, SESSION_MARKER, sweepSession,
 } from "../server/capture.js";
 import { Runtime } from "../server/runtime.js";
 
@@ -62,10 +62,12 @@ const VIEW = { viewId: "312", viewUniqueId: "abc-312", viewName: "Level 1", view
 const DOCUMENT = { uniqueId: "doc-handle", title: "Tower", path: "C:\\models\\tower.rvt", kind: "rvt", isReadOnly: false };
 
 /** Plays the add-in: writes a PNG at the server's target and answers like ViewCapture.cs. */
-function fakeBroker({ bytes = png(64, 48), envelopes = [], respond } = {}) {
-  return async (processId, envelope) => {
-    envelopes.push({ processId, envelope });
-    if (respond) return respond(envelope);
+function fakeBroker({ bytes = png(64, 48), envelopes = [], respond, receipt = {} } = {}) {
+  return async (processId, envelope, options = {}) => {
+    envelopes.push({ processId, envelope, options });
+    // Like executeBroker: the pipe greeting of this connection names the Revit version.
+    options.onSession?.({ processId, version: "2026", build: "26.0.4.409", connectionIdentity: "test" });
+    if (respond) return respond(envelope, options);
     await writeFile(envelope.capture.targetPath, typeof bytes === "function" ? bytes(envelope) : bytes);
     return {
       id: envelope.id,
@@ -81,12 +83,17 @@ function fakeBroker({ bytes = png(64, 48), envelopes = [], respond } = {}) {
         documentModifiedAfter: false,
         temporaryViewCreated: false,
         transactionStarted: false,
+        ...receipt,
       },
     };
   };
 }
 
 const sessionReader = async processId => ({ processId, version: "2026", build: "26.0.4.409", connectionIdentity: "test" });
+// Capture must not open a second pipe connection for session info; this reader proves it.
+const forbiddenReader = async () => {
+  throw new Error("capture opened a separate session connection");
+};
 
 async function base(t, name) {
   const directory = await realpath(await mkdtemp(path.join(tmpdir(), `drive-it-${name}-`)));
@@ -162,11 +169,11 @@ test("a capture returns the saved PNG bytes, metadata and a complete sidecar und
   const launchRoot = path.join(directory, "launch");
   const workspace = path.join(directory, "workspace");
   await mkdir(workspace);
-  const runtime = new Runtime({ dataDir: path.join(directory, "data"), sessionReader });
+  const runtime = new Runtime({ dataDir: path.join(directory, "data") });
   await runtime.workspace.setRoot(workspace);
   const envelopes = [];
   const bytes = png(120, 80);
-  const { client, references } = await connected(t, { runtime, launchRoot, brokerExecutor: fakeBroker({ bytes, envelopes }) });
+  const { client, references } = await connected(t, { runtime, launchRoot, sessionReader: forbiddenReader, brokerExecutor: fakeBroker({ bytes, envelopes }) });
 
   const result = await capture(client, {
     processId: 777,
@@ -233,7 +240,13 @@ test("a capture returns the saved PNG bytes, metadata and a complete sidecar und
   const marker = JSON.parse(await readFile(path.join(sessionDirectory, SESSION_MARKER), "utf8"));
   assert.equal(marker.schema, MARKER_SCHEMA);
   assert.equal(marker.processId, process.pid);
-  assert.ok(Date.parse(marker.processStartedAt) <= Date.now());
+  assert.equal(marker.hostname, hostname());
+  // The marker records the OS-reported start time, the same source the stale sweep compares.
+  assert.equal(marker.processStartSource, "os");
+  assert.ok(Math.abs(Date.parse(marker.processStartedAt) - (Date.now() - process.uptime() * 1000)) < 10_000);
+  // The pipe budget fits the 150 s tool timeout of Codex and ChatGPT.
+  assert.deepEqual(envelopes[0].options.connectWaitMs, BROKER_BUDGET.connectWaitMs);
+  assert.ok(BROKER_BUDGET.connectWaitMs + BROKER_BUDGET.timeoutMs <= 135_000);
 });
 
 test("pixelSize is bounded to 256 through 2048", async (t) => {
@@ -328,8 +341,8 @@ test("a session directory swapped for a link after the first capture is rejected
 
 test("concurrent sessions keep separate directories, and one's shutdown leaves the other intact", async (t) => {
   const launchRoot = await base(t, "concurrent");
-  const first = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker({ bytes: png(10, 10, 1) }), sessionReader });
-  const second = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker({ bytes: png(10, 10, 2) }), sessionReader });
+  const first = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker({ bytes: png(10, 10, 1) }) });
+  const second = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker({ bytes: png(10, 10, 2) }) });
   assert.notEqual(first.sessionId, second.sessionId);
   const request = { processId: 1, purpose: "same document, two agents" };
   const results = await Promise.all([first, second, first, second].map(store => store.capture(request)));
@@ -365,7 +378,7 @@ test("session shutdown removes unretained pairs and keeps retained ones", async 
   assert.ok(existsSync(path.join(references.sessionDirectory, SESSION_MARKER)));
 
   // A session that only captured unretained images leaves no directory behind.
-  const other = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker(), sessionReader });
+  const other = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker() });
   await other.capture({ processId: 1, purpose: "temporary" });
   other.closeSync();
   assert.ok(!existsSync(other.sessionDirectory));
@@ -392,7 +405,7 @@ async function deadPid() {
 async function fakeSession(references, sessionId, marker, files = {}) {
   const directory = path.join(references, sessionId);
   await mkdir(directory, { recursive: true });
-  if (marker) await writeFile(path.join(directory, SESSION_MARKER), JSON.stringify({ schema: MARKER_SCHEMA, sessionId, ...marker }));
+  if (marker) await writeFile(path.join(directory, SESSION_MARKER), JSON.stringify({ schema: MARKER_SCHEMA, sessionId, hostname: hostname(), ...marker }));
   for (const [name, content] of Object.entries(files)) {
     await mkdir(path.dirname(path.join(directory, name)), { recursive: true });
     await writeFile(path.join(directory, name), content);
@@ -410,21 +423,28 @@ function pair(captureId, retained) {
 test("startup removes unretained artifacts only of provably dead sessions", async (t) => {
   const launchRoot = await base(t, "stale");
   const references = path.join(launchRoot, REFERENCE_DIRECTORY);
+  // A far-past start makes the owner dead whether the pid is gone or already reused.
   const pid = await deadPid();
-  const now = new Date().toISOString();
-  const dead = await fakeSession(references, "20261101T000000Z-0000000a", { processId: pid, processStartedAt: now }, {
+  const past = "2000-01-01T00:00:00.000Z";
+  const dead = await fakeSession(references, "20261101T000000Z-0000000a", { processId: pid, processStartedAt: past }, {
     ...pair("20261101T000001Z-00000001", false),
     ...pair("20261101T000002Z-00000002", true),
     "20261101T000003Z-00000003.png": png(2, 2),
     ".tmp-20261101T000004Z-00000004/export - 3D View - {3D}.png": png(2, 2),
     "notes.txt": "user file",
   });
-  const deadEmpty = await fakeSession(references, "20261101T000000Z-0000000b", { processId: pid, processStartedAt: now },
+  const deadEmpty = await fakeSession(references, "20261101T000000Z-0000000b", { processId: pid, processStartedAt: past },
     pair("20261101T000005Z-00000005", false));
+  const osStart = await processStartTime(process.pid);
+  assert.equal(typeof osStart, "number");
   const alive = await fakeSession(references, "20261101T000000Z-0000000c",
-    { processId: process.pid, processStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString() },
+    { processId: process.pid, processStartedAt: new Date(osStart).toISOString() },
     pair("20261101T000006Z-00000006", false));
   const unowned = await fakeSession(references, "20261101T000000Z-0000000d", null, pair("20261101T000007Z-00000007", false));
+  const foreign = await fakeSession(references, "20261101T000000Z-0000000e",
+    { hostname: `not-${hostname()}`, processId: pid, processStartedAt: past }, pair("20261101T000008Z-00000008", false));
+  const hostless = await fakeSession(references, "20261101T000000Z-0000000f",
+    { hostname: undefined, processId: pid, processStartedAt: past }, pair("20261101T000009Z-00000009", false));
   await writeFile(path.join(references, "unrelated.png"), "keep me");
   await mkdir(path.join(references, "my-folder"));
 
@@ -438,20 +458,31 @@ test("startup removes unretained artifacts only of provably dead sessions", asyn
   assert.ok(!existsSync(deadEmpty));
   assert.equal((await listTree(alive)).length, 3);
   assert.equal((await listTree(unowned)).length, 2);
+  // Another machine's session in a synced or redirected Documents folder is never swept.
+  assert.equal((await listTree(foreign)).length, 3);
+  assert.equal((await listTree(hostless)).length, 3);
   assert.ok(existsSync(path.join(references, "unrelated.png")));
   assert.ok(existsSync(path.join(references, "my-folder")));
 });
 
-test("a reused pid is dead; a live, matching or unreadable owner is not", async () => {
-  const startedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
+test("a reused pid is dead; a live, matching, unreadable, or foreign owner is not", async () => {
+  const host = hostname();
+  const osStart = await processStartTime(process.pid);
+  // The real lookup works and agrees with the uptime estimate.
+  assert.equal(typeof osStart, "number");
+  assert.ok(Math.abs(osStart - (Date.now() - process.uptime() * 1000)) < 10_000, `${osStart}`);
+  const startedAt = new Date(osStart).toISOString();
   const pid = await deadPid();
-  assert.equal(await ownerState({ processId: pid, processStartedAt: startedAt }), "dead");
-  assert.equal(await ownerState({ processId: process.pid, processStartedAt: "2000-01-01T00:00:00.000Z" }, { startTime: async () => Date.now() }), "dead");
-  assert.equal(await ownerState({ processId: process.pid, processStartedAt: startedAt }, { startTime: async () => Date.parse(startedAt) + 500 }), "alive");
-  assert.equal(await ownerState({ processId: process.pid, processStartedAt: startedAt }, { startTime: async () => null }), "alive");
-  assert.equal(await ownerState({ processId: "x" }), "unknown");
-  // The real OS start time of this process agrees with the marker's estimate.
-  assert.equal(await ownerState({ processId: process.pid, processStartedAt: startedAt }), "alive");
+  const past = "2000-01-01T00:00:00.000Z";
+  assert.equal(await ownerState({ hostname: host, processId: pid, processStartedAt: past }), "dead");
+  assert.equal(await ownerState({ hostname: host, processId: process.pid, processStartedAt: past }, { startTime: async () => Date.now() }), "dead");
+  assert.equal(await ownerState({ hostname: host, processId: process.pid, processStartedAt: startedAt }, { startTime: async () => osStart + 500 }), "alive");
+  assert.equal(await ownerState({ hostname: host, processId: process.pid, processStartedAt: startedAt }, { startTime: async () => null }), "alive");
+  assert.equal(await ownerState({ hostname: host, processId: "x" }), "unknown");
+  assert.equal(await ownerState({ processId: pid, processStartedAt: past }), "unknown");
+  assert.equal(await ownerState({ hostname: `not-${host}`, processId: pid, processStartedAt: past }), "foreign");
+  assert.equal(await ownerState({ hostname: host.toUpperCase(), processId: pid, processStartedAt: past }, { host: host.toLowerCase() }), "dead");
+  assert.equal(await ownerState({ hostname: host, processId: process.pid, processStartedAt: startedAt }), "alive");
 });
 
 async function waitFor(predicate, timeoutMs = 15000) {
@@ -469,7 +500,7 @@ test("the stdio server sweeps dead sessions at startup under DRIVE_IT_LAUNCH_ROO
   await mkdir(cwd);
   const pid = await deadPid();
   const dead = await fakeSession(path.join(launchRoot, REFERENCE_DIRECTORY), "20261101T000000Z-000000aa",
-    { processId: pid, processStartedAt: new Date().toISOString() }, pair("20261101T000001Z-000000a1", false));
+    { processId: pid, processStartedAt: "2000-01-01T00:00:00.000Z" }, pair("20261101T000001Z-000000a1", false));
   const client = new Client({ name: "drive-it-capture-stdio", version: "1" });
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -550,4 +581,132 @@ test("stdio capture through the pipe contract, then cleanup at client shutdown",
   }
   assert.ok(!existsSync(dropped.structuredContent.absolutePath));
   assert.ok(existsSync(kept.structuredContent.absolutePath));
+});
+
+// Windows types every reparse point as a symbolic link in Dirent, including OneDrive placeholders
+// that are plain files and folders; the sweep must classify by lstat.
+test("the sweep classifies entries by lstat, not by a Dirent that calls placeholders links", async (t) => {
+  const launchRoot = await base(t, "placeholder");
+  const references = path.join(launchRoot, REFERENCE_DIRECTORY);
+  const directory = await fakeSession(references, "20261101T000000Z-000000c1", { processId: process.pid, processStartedAt: new Date().toISOString() }, {
+    ...pair("20261101T000001Z-000000c1", false),
+    ...pair("20261101T000002Z-000000c2", true),
+    ".tmp-20261101T000003Z-000000c3/export.png": png(2, 2),
+  });
+  const placeholderDirents = target => readdirSync(target).map(name => ({
+    name,
+    isFile: () => false,
+    isDirectory: () => false,
+    isSymbolicLink: () => true,
+  }));
+  const result = sweepSession(directory, { readdir: placeholderDirents });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(await listTree(directory), [SESSION_MARKER, "20261101T000002Z-000000c2.json", "20261101T000002Z-000000c2.png"].sort());
+
+  // The same injection reaches shutdown cleanup through the store.
+  const store = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker(), readdir: placeholderDirents });
+  await store.capture({ processId: 1, purpose: "placeholder shutdown" });
+  store.closeSync();
+  assert.ok(!existsSync(store.sessionDirectory));
+});
+
+test("a failed marker write leaves no orphan folder and the next capture succeeds", async (t) => {
+  const launchRoot = await base(t, "marker");
+  class FlakyMarker extends ReferenceImages {
+    async writeAtomic(file, value, temporaryName) {
+      if (path.basename(file) === SESSION_MARKER && !this.failedOnce) {
+        this.failedOnce = true;
+        throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+      }
+      return super.writeAtomic(file, value, temporaryName);
+    }
+  }
+  const store = new FlakyMarker({ launchRoot, brokerExecutor: fakeBroker() });
+  await assert.rejects(store.capture({ processId: 1, purpose: "first" }), { code: "ARTIFACT_WRITE_FAILED" });
+  assert.ok(!existsSync(store.sessionDirectory));
+  const second = await store.capture({ processId: 1, purpose: "second" });
+  assert.ok(existsSync(second.absolutePath));
+  assert.ok(existsSync(path.join(store.sessionDirectory, SESSION_MARKER)));
+});
+
+test("a session folder deleted mid-session is recreated with its marker", async (t) => {
+  const launchRoot = await base(t, "recreate");
+  const store = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker() });
+  await store.capture({ processId: 1, purpose: "first" });
+  await rm(path.join(launchRoot, REFERENCE_DIRECTORY), { recursive: true });
+  const second = await store.capture({ processId: 1, purpose: "after the user emptied _reference-images" });
+  assert.ok(existsSync(second.absolutePath));
+  assert.ok(existsSync(path.join(store.sessionDirectory, SESSION_MARKER)));
+});
+
+test("broker, publish, size, modification, and shutdown failures leave no pair", async (t) => {
+  const launchRoot = await base(t, "paths");
+  const tree = store => listTree(store.sessionDirectory);
+
+  const throwing = new ReferenceImages({ launchRoot, brokerExecutor: async () => { throw new Error("Revit connection timed out."); } });
+  await assert.rejects(throwing.capture({ processId: 1, purpose: "timeout" }), error => error.code === "EXPORT_FAILED" && /timed out/.test(error.message));
+  assert.deepEqual(await tree(throwing), [SESSION_MARKER]);
+
+  class FailingSidecar extends ReferenceImages {
+    async writeAtomic(file, value, temporaryName) {
+      if (path.basename(file) !== SESSION_MARKER) throw new Error("ENOSPC: no space left on device");
+      return super.writeAtomic(file, value, temporaryName);
+    }
+  }
+  const publishing = new FailingSidecar({ launchRoot, brokerExecutor: fakeBroker() });
+  await assert.rejects(publishing.capture({ processId: 1, purpose: "disk full" }), error => error.code === "ARTIFACT_WRITE_FAILED" && error.detail.stage === "store");
+  assert.deepEqual(await tree(publishing), [SESSION_MARKER]);
+
+  const oversized = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker({ bytes: png(300, 6000) }) });
+  await assert.rejects(oversized.capture({ processId: 1, purpose: "tall", pixelSize: 256 }), { code: "CAPTURE_SIZE_EXCEEDED" });
+  assert.deepEqual(await tree(oversized), [SESSION_MARKER]);
+  const rounded = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker({ bytes: png(258, 100) }) });
+  assert.equal((await rounded.capture({ processId: 1, purpose: "rounding", pixelSize: 256 })).metadata.image.width, 258);
+
+  const dirtied = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker({ receipt: { documentModifiedAfter: true } }) });
+  await assert.rejects(dirtied.capture({ processId: 1, purpose: "dirty" }), { code: "DOCUMENT_MODIFIED_BY_CAPTURE" });
+  assert.deepEqual(await tree(dirtied), [SESSION_MARKER]);
+
+  // Shutdown while Revit is exporting: the late result is discarded and the folder goes.
+  let closing;
+  const inFlight = new ReferenceImages({
+    launchRoot,
+    brokerExecutor: async (processId, envelope, options) => {
+      const response = await fakeBroker()(processId, envelope, options);
+      closing.closeSync();
+      return response;
+    },
+  });
+  closing = inFlight;
+  await assert.rejects(inFlight.capture({ processId: 1, purpose: "shutdown" }), { code: "SESSION_CLOSING" });
+  assert.ok(!existsSync(inFlight.sessionDirectory));
+});
+
+test("selection errors pass view lists, totals, and an add-in restart hint through", async (t) => {
+  const launchRoot = await base(t, "lists");
+  const respond = code => envelope => ({
+    id: envelope.id,
+    type: "view.capture",
+    status: "failed",
+    document: DOCUMENT,
+    capture: {
+      availableViews: [{ id: "312", name: "Level 1", type: "FloorPlan" }],
+      otherViews: [{ id: "99", name: "A101", type: "DrawingSheet", notCapturable: "unsupported_view_type" }],
+      availableViewsTotal: 41, otherViewsTotal: 7, viewsListedPerType: 20, otherViewsListedPerType: 5,
+    },
+    error: { code, message: "View 'A101' (99) is a DrawingSheet view." },
+  });
+  const store = new ReferenceImages({ launchRoot, brokerExecutor: fakeBroker({ respond: respond("unsupported_view_type") }) });
+  await assert.rejects(store.capture({ processId: 1, purpose: "sheet", viewId: "99" }), error => {
+    assert.equal(error.code, "UNSUPPORTED_VIEW_TYPE");
+    assert.equal(error.detail.otherViews[0].notCapturable, "unsupported_view_type");
+    assert.equal(error.detail.availableViewsTotal, 41);
+    assert.equal(error.detail.otherViewsListedPerType, 5);
+    return true;
+  });
+  const stale = new ReferenceImages({
+    launchRoot,
+    brokerExecutor: fakeBroker({ respond: envelope => ({ id: envelope.id, status: "failed", error: { code: "unsupported_request", message: "The request type must be 'model.execute'." } }) }),
+  });
+  await assert.rejects(stale.capture({ processId: 1, purpose: "old add-in" }), error => error.code === "UNSUPPORTED_REQUEST" && /restart Revit/.test(error.message));
 });

@@ -70,7 +70,7 @@ const VISUAL_QA_RULE = "After each modeling round and before reporting it comple
 
 export const SERVER_INSTRUCTIONS = `Drive It drives a live Autodesk Revit 2026 session. Call get_revit_session first, model with execute_script, and keep its receipts and checks as the authoritative record. Visual self-QA every modeling turn: ${VISUAL_QA_RULE}`;
 
-const CAPTURE_DESCRIPTION = `Export an existing Revit view to a PNG with Revit's own renderer (Document.ExportImage, not a screenshot) and return the image for you to inspect. Supported: 3D, floor plan, ceiling plan, structural plan, elevation, section, and detail views in RVT and RFA documents; sheets, schedules, legends, drafting views, and view templates are rejected. It does not modify the Revit model; it writes a local reference image (PNG plus JSON metadata) under the server's launch root in _reference-images/<session>, deleted at session end unless retain is true or the operator keeps all captures. The view is exported as it is set up (orientation, crop, visibility); change a view through execute_script first if needed. Omit viewId to capture the document's active view; errors list capturable views with their ids. ${VISUAL_QA_RULE}`;
+const CAPTURE_DESCRIPTION = `Export an existing Revit view to a PNG with Revit's own renderer (Document.ExportImage, not a screenshot) and return the image for you to inspect. Supported: 3D, floor plan, ceiling plan, structural plan, elevation, section, and detail views in RVT and RFA documents; sheets, schedules, legends, drafting views, and view templates are rejected. It does not modify the Revit model; it writes a local reference image (PNG plus JSON metadata) under the server's launch root in _reference-images/<session>, deleted at session end unless retain is true or the operator keeps all captures. The view is exported as it is set up (orientation, crop, visibility); change a view through execute_script first if needed. Omit viewId to capture the document's active view; with a viewId, pass the document it belongs to whenever more than one document is open. Errors list capturable views with their ids. ${VISUAL_QA_RULE}`;
 
 export function createDriveItServer(options = {}) {
   const dataDir = options.dataDir || defaultDataDir();
@@ -85,7 +85,6 @@ export function createDriveItServer(options = {}) {
     launchRoot: options.launchRoot ?? launchRootFrom(),
     retention: options.referenceRetention ?? retentionFrom(process.env.DRIVE_IT_REFERENCE_RETENTION),
     brokerExecutor: options.brokerExecutor || executeBroker,
-    sessionReader,
   });
 
   server.registerTool("get_revit_session", {
@@ -300,7 +299,7 @@ export function createDriveItServer(options = {}) {
       width: z.number().int(),
       height: z.number().int(),
     }),
-    revit: z.object({ processId, version: z.string(), build: z.string() }),
+    revit: z.object({ processId, version: z.string().nullable(), build: z.string().nullable() }),
     document: z.object({
       uniqueId: z.string().nullable(),
       title: z.string().nullable(),

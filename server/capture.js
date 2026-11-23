@@ -10,6 +10,7 @@ import {
   lstatSync, readdirSync, readFileSync, rmdirSync, unlinkSync,
 } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import path from "node:path";
 import { canonicalPath } from "./workspace.js";
 
@@ -29,6 +30,11 @@ const SIDECAR = new RegExp(`^(${ID})\\.json$`);
 const PARTIAL_WRITE = new RegExp(`^\\.(?:${ID}\\.json|session)\\.[0-9a-f]+\\.tmp$`);
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const PNG_END = Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+// Revit may round the fitted side; anything beyond this is an export larger than requested.
+const PIXEL_TOLERANCE = 2;
+// Worst case must stay under the 150 s tool timeout of clients such as Codex and ChatGPT
+// (server/clients.js): up to 20 s queued behind another client on the pipe, then 110 s in Revit.
+export const BROKER_BUDGET = Object.freeze({ connectWaitMs: 20_000, timeoutMs: 110_000 });
 // A pid alive with a start time this far from the recorded one belongs to another process.
 const START_TOLERANCE_MS = 10_000;
 
@@ -93,10 +99,27 @@ function isPlainFile(file) {
   }
 }
 
+/**
+ * Directory entries classified by lstat, never by Dirent type: on Windows a Dirent reports every
+ * reparse point as a symbolic link, including OneDrive/cloud placeholders that are plain files
+ * and folders. lstat reports only real links and junctions as links.
+ */
+function entriesOf(directory, readdir = readdirSync) {
+  return readdir(directory).map(entry => {
+    const name = typeof entry === "string" ? entry : entry.name;
+    try {
+      const stat = lstatSync(path.join(directory, name));
+      return { name, link: stat.isSymbolicLink(), file: stat.isFile() && !stat.isSymbolicLink(), directory: stat.isDirectory() && !stat.isSymbolicLink() };
+    } catch {
+      return { name, link: false, file: false, directory: false };
+    }
+  });
+}
+
 /** Unlinks the plain files and links in a staging directory (never descending), then the directory. */
-function clearStaging(directory) {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isFile() || entry.isSymbolicLink()) unlinkSync(path.join(directory, entry.name));
+function clearStaging(directory, readdir = readdirSync) {
+  for (const entry of entriesOf(directory, readdir)) {
+    if (entry.file || entry.link) unlinkSync(path.join(directory, entry.name));
   }
   rmdirSync(directory);
 }
@@ -104,15 +127,16 @@ function clearStaging(directory) {
 /**
  * Removes a session directory's unretained pairs, staging directories and partial writes, then
  * the marker and directory once nothing else is left. Only names this module creates are touched;
- * an unreadable sidecar is kept, since its retention cannot be known.
+ * an unreadable sidecar is kept, since its retention cannot be known. readdir is injectable so
+ * tests can reproduce Windows' Dirent typing.
  */
-export function sweepSession(directory) {
+export function sweepSession(directory, { readdir = readdirSync } = {}) {
   const result = { removed: [], kept: [], errors: [] };
   let entries;
   try {
     const stat = lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return result;
-    entries = readdirSync(directory, { withFileTypes: true });
+    entries = entriesOf(directory, readdir);
   } catch (error) {
     if (error.code !== "ENOENT") result.errors.push({ path: directory, message: error.message });
     return result;
@@ -122,10 +146,10 @@ export function sweepSession(directory) {
     const full = path.join(directory, entry.name);
     try {
       let match;
-      if ((match = STAGING.exec(entry.name)) && entry.isDirectory()) {
-        clearStaging(full);
+      if ((match = STAGING.exec(entry.name)) && entry.directory) {
+        clearStaging(full, readdir);
         result.removed.push(entry.name);
-      } else if ((match = SIDECAR.exec(entry.name)) && entry.isFile()) {
+      } else if ((match = SIDECAR.exec(entry.name)) && entry.file) {
         const metadata = readJsonSync(full);
         if (!metadata || metadata.captureId !== match[1] || metadata.retention?.retained !== false) {
           result.kept.push(entry.name);
@@ -138,11 +162,11 @@ export function sweepSession(directory) {
         }
         unlinkSync(full);
         result.removed.push(entry.name);
-      } else if ((match = IMAGE.exec(entry.name)) && entry.isFile() && !names.has(`${match[1]}.json`)) {
+      } else if ((match = IMAGE.exec(entry.name)) && entry.file && !names.has(`${match[1]}.json`)) {
         // Published without a sidecar: an interrupted capture, never a completed pair.
         unlinkSync(full);
         result.removed.push(entry.name);
-      } else if (PARTIAL_WRITE.test(entry.name) && entry.isFile()) {
+      } else if (PARTIAL_WRITE.test(entry.name) && entry.file) {
         unlinkSync(full);
         result.removed.push(entry.name);
       }
@@ -151,7 +175,7 @@ export function sweepSession(directory) {
     }
   }
   try {
-    const rest = readdirSync(directory).filter(name => name !== SESSION_MARKER);
+    const rest = readdir(directory).map(entry => (typeof entry === "string" ? entry : entry.name)).filter(name => name !== SESSION_MARKER);
     if (rest.length === 0) {
       const marker = path.join(directory, SESSION_MARKER);
       if (isPlainFile(marker)) unlinkSync(marker);
@@ -181,12 +205,16 @@ export async function processStartTime(pid) {
 }
 
 /**
- * "dead" only when the owner is provably gone: no such pid, or that pid now belongs to a process
- * started at a different time. Anything uncertain is "alive" and its files are left alone.
+ * "dead" only when the owner is provably gone: same host, and either no such pid or that pid now
+ * belongs to a process started at a different time. A marker from another host (a synced or
+ * redirected Documents folder) or without a host is never dead. Anything uncertain is "alive"
+ * and its files are left alone.
  */
-export async function ownerState(marker, { startTime = processStartTime } = {}) {
+export async function ownerState(marker, { startTime = processStartTime, host = hostname() } = {}) {
   const pid = marker?.processId;
   if (!Number.isInteger(pid) || pid <= 0) return "unknown";
+  if (typeof marker.hostname !== "string") return "unknown";
+  if (marker.hostname.toLowerCase() !== host.toLowerCase()) return "foreign";
   try {
     process.kill(pid, 0);
   } catch (error) {
@@ -209,22 +237,37 @@ export class ReferenceImages {
     launchRoot = launchRootFrom(),
     retention = "session",
     brokerExecutor,
-    sessionReader,
+    startTime = processStartTime,
     processStart = Date.now() - process.uptime() * 1000,
     ownerInspector = ownerState,
+    readdir = readdirSync,
     log = message => console.error(message),
   } = {}) {
     this.launchRoot = path.resolve(launchRoot);
     this.retention = retention;
     this.brokerExecutor = brokerExecutor;
-    this.sessionReader = sessionReader;
-    this.processStartedAt = new Date(processStart).toISOString();
+    this.startTime = startTime;
+    this.estimatedStart = processStart;
     this.ownerInspector = ownerInspector;
+    this.readdir = readdir;
     this.log = log;
     this.sessionId = newId();
     this.sessionDirectory = path.join(this.launchRoot, REFERENCE_DIRECTORY, this.sessionId);
     this.sessionCreated = false;
+    this.directoryMade = false;
     this.closed = false;
+  }
+
+  /**
+   * This process's start time as the OS reports it, the same source the stale sweep compares
+   * against; the uptime-based estimate only when the OS cannot be asked.
+   */
+  async ownStart() {
+    this.ownStartPromise ||= Promise.resolve(this.startTime(process.pid)).catch(() => null).then(actual => (
+      actual === null
+        ? { processStartedAt: new Date(this.estimatedStart).toISOString(), processStartSource: "estimate" }
+        : { processStartedAt: new Date(actual).toISOString(), processStartSource: "os" }));
+    return this.ownStartPromise;
   }
 
   /** Creates or re-checks a directory that must be a real directory at exactly the expected place. */
@@ -254,28 +297,55 @@ export class ReferenceImages {
   }
 
   async ensureSession() {
-    // Concurrent first captures share one creation.
-    this.creating ||= this.createSession().catch(error => {
-      this.creating = null;
-      throw error;
-    });
-    const references = await this.creating;
-    await this.ownedDirectory(this.sessionDirectory, path.join(references, this.sessionId), { create: false });
-    return this.sessionDirectory;
+    for (let attempt = 0; ; attempt += 1) {
+      // Concurrent first captures share one creation.
+      this.creating ||= this.createSession().catch(error => {
+        this.creating = null;
+        throw error;
+      });
+      const references = await this.creating;
+      try {
+        await this.ownedDirectory(this.sessionDirectory, path.join(references, this.sessionId), { create: false });
+        return this.sessionDirectory;
+      } catch (error) {
+        // The user removed the session folder (or _reference-images) mid-session: start it again.
+        if (error.code !== "ENOENT" || attempt >= 1) throw error;
+        this.creating = null;
+        this.sessionCreated = false;
+        this.directoryMade = false;
+      }
+    }
   }
 
   async createSession() {
     const references = await this.referenceRoot();
     if (!this.sessionCreated) {
-      await this.ownedDirectory(this.sessionDirectory, path.join(references, this.sessionId), { create: true, exclusive: true });
-      await this.writeAtomic(path.join(this.sessionDirectory, SESSION_MARKER), {
-        schema: MARKER_SCHEMA,
-        sessionId: this.sessionId,
-        processId: process.pid,
-        processStartedAt: this.processStartedAt,
-        createdAt: new Date().toISOString(),
-        retentionMode: this.retention,
-      }, `.session.${randomBytes(4).toString("hex")}.tmp`);
+      const expected = path.join(references, this.sessionId);
+      try {
+        // A folder this instance already made (an earlier marker write failed) is reused.
+        await this.ownedDirectory(this.sessionDirectory, expected, { create: true, exclusive: !this.directoryMade });
+        this.directoryMade = true;
+        await this.writeAtomic(path.join(this.sessionDirectory, SESSION_MARKER), {
+          schema: MARKER_SCHEMA,
+          sessionId: this.sessionId,
+          hostname: hostname(),
+          processId: process.pid,
+          ...await this.ownStart(),
+          createdAt: new Date().toISOString(),
+          retentionMode: this.retention,
+        }, `.session.${randomBytes(4).toString("hex")}.tmp`);
+      } catch (error) {
+        // Without a marker no sweep would ever own the folder; remove it while it is empty.
+        if (this.directoryMade) {
+          try {
+            rmdirSync(this.sessionDirectory);
+            this.directoryMade = false;
+          } catch {
+            // Not empty or locked; the next attempt reuses it.
+          }
+        }
+        throw error;
+      }
       this.sessionCreated = true;
     }
     return references;
@@ -302,7 +372,6 @@ export class ReferenceImages {
     if (!Number.isInteger(pixelSize) || pixelSize < PIXEL_SIZE.min || pixelSize > PIXEL_SIZE.max) {
       throw captureError("INVALID_PIXEL_SIZE", `pixelSize must be an integer from ${PIXEL_SIZE.min} through ${PIXEL_SIZE.max}.`);
     }
-    const session = await this.sessionReader(processId);
     let directory;
     try {
       directory = await this.ensureSession();
@@ -310,6 +379,8 @@ export class ReferenceImages {
       if (error.code === "REFERENCE_DIRECTORY_LINKED") throw error;
       throw captureError("ARTIFACT_WRITE_FAILED", `Could not create the reference-image directory under ${this.launchRoot}: ${error.message}`, { stage: "store" });
     }
+    // Shutdown may have started while the folder was being prepared; ask Revit for nothing then.
+    if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; no capture was taken.");
 
     let captureId;
     let staging;
@@ -339,21 +410,41 @@ export class ReferenceImages {
         document: document ? { path: documentPath, uniqueId: document.uniqueId || null } : null,
         capture: { viewId: viewId ?? null, pixelSize, targetPath: target },
       };
+      // The Revit version and build come from the pipe greeting of this same connection, so no
+      // second connection competes for the single-instance pipe.
+      let session = null;
       let response;
       try {
-        response = await this.brokerExecutor(processId, envelope, { timeoutMs: 120_000, connectWaitMs: 30_000 });
+        response = await this.brokerExecutor(processId, envelope, {
+          ...BROKER_BUDGET,
+          onSession: value => { session = value; },
+        });
       } catch (error) {
         throw captureError("EXPORT_FAILED", `The capture did not complete in Revit: ${error.message}`, { stage: "export" });
       }
+      if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; the capture was discarded.", { stage: "export" });
       if (response?.status !== "succeeded") {
         const code = String(response?.error?.code || "export_failed").toUpperCase();
+        let message = response?.error?.message || "Revit did not export the view.";
+        if (code === "UNSUPPORTED_REQUEST") {
+          message += " The Drive-It add-in loaded in Revit predates view capture (Drive-It was updated while Revit was running); ask the user to restart Revit.";
+        }
         const detail = { stage: "export" };
         if (response?.document) detail.document = response.document;
-        if (response?.capture?.availableViews) detail.availableViews = response.capture.availableViews;
-        if (response?.capture?.otherViews?.length) detail.otherViews = response.capture.otherViews;
-        throw captureError(code, response?.error?.message || "Revit did not export the view.", detail);
+        const lists = response?.capture || {};
+        if (lists.availableViews) detail.availableViews = lists.availableViews;
+        if (lists.otherViews?.length) detail.otherViews = lists.otherViews;
+        for (const key of ["availableViewsTotal", "otherViewsTotal", "viewsListedPerType", "otherViewsListedPerType"]) {
+          if (lists[key] !== undefined && lists[key] !== null) detail[key] = lists[key];
+        }
+        throw captureError(code, message, detail);
       }
       const receipt = response.capture || {};
+      if (receipt.documentModifiedBefore === false && receipt.documentModifiedAfter === true) {
+        throw captureError("DOCUMENT_MODIFIED_BY_CAPTURE",
+          "Revit reports that the document became modified during the export. No image is returned; tell the user the document now has unsaved changes Drive It did not intend.",
+          { stage: "export", document: response.document ?? null });
+      }
       if (receipt.outputPath && !samePath(receipt.outputPath, target)) {
         throw captureError("INVALID_IMAGE", "Revit reported an export path other than the requested target.", { stage: "validate" });
       }
@@ -377,6 +468,11 @@ export class ReferenceImages {
       if (!dimensions || bytes.length !== stat.size) {
         throw captureError("INVALID_IMAGE", "The exported file is not a complete PNG image.", { stage: "validate" });
       }
+      if (Math.max(dimensions.width, dimensions.height) > pixelSize + PIXEL_TOLERANCE) {
+        throw captureError("CAPTURE_SIZE_EXCEEDED",
+          `Revit exported ${dimensions.width}x${dimensions.height}, larger than the requested pixelSize ${pixelSize} on its longer side.`,
+          { stage: "validate", width: dimensions.width, height: dimensions.height, pixelSize });
+      }
       const sha256 = createHash("sha256").update(bytes).digest("hex");
       const retention = this.retentionFor(retain);
       const metadata = {
@@ -395,7 +491,7 @@ export class ReferenceImages {
           width: dimensions.width,
           height: dimensions.height,
         },
-        revit: { processId, version: session.version, build: session.build },
+        revit: { processId, version: session?.version ?? null, build: session?.build ?? null },
         document: {
           uniqueId: response.document?.uniqueId ?? null,
           title: response.document?.title ?? null,
@@ -438,7 +534,7 @@ export class ReferenceImages {
       throw error;
     } finally {
       try {
-        clearStaging(staging);
+        clearStaging(staging, this.readdir);
       } catch (error) {
         if (error.code !== "ENOENT") this.log(`drive-it: could not remove capture staging ${staging}: ${error.message}`);
       }
@@ -449,7 +545,7 @@ export class ReferenceImages {
   closeSync() {
     this.closed = true;
     if (!this.sessionCreated) return null;
-    const result = sweepSession(this.sessionDirectory);
+    const result = sweepSession(this.sessionDirectory, { readdir: this.readdir });
     for (const error of result.errors) this.log(`drive-it: reference-image cleanup failed for ${error.path}: ${error.message}`);
     return result;
   }
@@ -461,19 +557,19 @@ export class ReferenceImages {
     try {
       const root = await realpath(this.launchRoot);
       await this.ownedDirectory(references, path.join(root, REFERENCE_DIRECTORY), { create: false });
-      entries = readdirSync(references, { withFileTypes: true });
+      entries = entriesOf(references, this.readdir);
     } catch (error) {
       if (error.code !== "ENOENT") this.log(`drive-it: skipped stale reference-image cleanup: ${error.message}`);
       return [];
     }
     const swept = [];
     for (const entry of entries) {
-      if (!entry.isDirectory() || !SESSION_ID.test(entry.name) || entry.name === this.sessionId) continue;
+      if (!entry.directory || !SESSION_ID.test(entry.name) || entry.name === this.sessionId) continue;
       const directory = path.join(references, entry.name);
       const marker = readJsonSync(path.join(directory, SESSION_MARKER));
       if (marker?.schema !== MARKER_SCHEMA || marker.sessionId !== entry.name) continue;
       if (await this.ownerInspector(marker) !== "dead") continue;
-      const result = sweepSession(directory);
+      const result = sweepSession(directory, { readdir: this.readdir });
       for (const error of result.errors) this.log(`drive-it: stale reference-image cleanup failed for ${error.path}: ${error.message}`);
       swept.push({ sessionId: entry.name, ...result });
     }
