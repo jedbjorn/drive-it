@@ -5,6 +5,7 @@ import path from "node:path";
 import { DecisionStore } from "./decisions.js";
 import { HistoryStore } from "./history.js";
 import { ScriptCatalog, validateArguments } from "./library.js";
+import { revitContentFolders } from "./content.js";
 import { executeBroker, readSession } from "./session.js";
 import { defaultDataDir } from "./store.js";
 import { runWorker } from "./worker.js";
@@ -25,7 +26,7 @@ function append(target, values) {
 }
 
 export class Runtime {
-  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, sessionReader = readSession, workerRunner = runWorker, scriptResolver, scripts } = {}) {
+  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, sessionReader = readSession, workerRunner = runWorker, scriptResolver, scripts, contentFolders = revitContentFolders } = {}) {
     this.workspace = new WorkspaceStore(dataDir);
     this.decisions = new DecisionStore(dataDir);
     this.history = new HistoryStore(dataDir);
@@ -34,6 +35,7 @@ export class Runtime {
     this.brokerExecutor = brokerExecutor;
     this.sessionReader = sessionReader;
     this.workerRunner = workerRunner;
+    this.contentFolders = contentFolders;
     this.scripts = scripts || new ScriptCatalog({ workspace: this.workspace, history: this.history });
     this.scriptResolver = scriptResolver || ((reference, root) => this.scripts.resolve(reference, root));
     this.inFlight = new Map();
@@ -176,6 +178,10 @@ export class Runtime {
     return receipt;
   }
 
+  readableRoots(context) {
+    return this.contentFolders(context.receipt.session?.version || "2026");
+  }
+
   recordPolicy(receipt, context, detail) {
     if (detail.decisionId) context.decisionIds.add(detail.decisionId);
     if (detail.policyRequests) {
@@ -197,7 +203,7 @@ export class Runtime {
       return { recorded: true };
     }
     if (method === "workspace.authorize") {
-      const result = await this.policy.authorize(context.runId, [{ operation: params.operation, paths: params.paths }], context.workspaceRoot, context.receipt.displayName);
+      const result = await this.policy.authorize(context.runId, [{ operation: params.operation, paths: params.paths }], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
       this.recordPolicy(context.receipt, context, result);
       return result;
     }
@@ -222,12 +228,12 @@ export class Runtime {
     let response = await this.brokerExecutor(context.processId, envelope, { timeoutMs: context.timeoutMs });
     if (response.status === "policy_required") {
       this.observeBroker(response, context);
-      const decision = await this.policy.authorize(context.runId, response.policyRequests || [], context.workspaceRoot, context.receipt.displayName);
+      const decision = await this.policy.authorize(context.runId, response.policyRequests || [], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
       this.recordPolicy(context.receipt, context, decision);
-      if (decision.status === "approved") {
+      if (decision.status === "approved" || decision.grants?.length) {
         const approvedEnvelope = {
           ...envelope,
-          outsideRootApproval: { decisionId: decision.decisionId, grants: decision.grants },
+          outsideRootApproval: { decisionId: decision.decisionId || "revit-content", grants: decision.grants },
         };
         response = await this.brokerExecutor(context.processId, approvedEnvelope, { timeoutMs: context.timeoutMs });
       } else {

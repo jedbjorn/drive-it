@@ -49,12 +49,15 @@ export class WorkspaceStore {
   }
 }
 
+// Operations that only read the target (opening a document or using it as a template included).
+const READ_ONLY = new Set(["read_file", "read_directory", "read_document", "open_document", "create_document"]);
+
 export class WorkspacePolicy {
   constructor(decisions) {
     this.decisions = decisions;
   }
 
-  async authorize(runId, requests, root, displayName = null) {
+  async authorize(runId, requests, root, displayName = null, readableRoots = []) {
     const canonical = [];
     for (const request of requests) {
       const paths = [];
@@ -65,15 +68,21 @@ export class WorkspacePolicy {
       !pathIsInside(root, scopePath(request.operation, target, root, path), path)));
     if (outside.length === 0) return { status: "allowed", requests: canonical, root };
 
-    const decision = await this.decisions.request(runId, outside, displayName);
+    // Reading Revit's own installed content needs no decision; it rides along as a grant.
+    const readable = outside.filter(request => READ_ONLY.has(request.operation)
+      && request.paths.every(target => readableRoots.some(folder => pathIsInside(folder, target))));
+    const decided = outside.filter(request => !readable.includes(request));
+    if (decided.length === 0) return { status: "allowed", requests: canonical, root, grants: readable };
+
+    const decision = await this.decisions.request(runId, decided, displayName);
     if (decision.status === "pending" || decision.status === "denied") {
-      return { status: decision.status, decisionId: decision.id, requests: canonical, policyRequests: outside, root };
+      return { status: decision.status, decisionId: decision.id, requests: canonical, policyRequests: decided, root };
     }
     await this.decisions.consume(decision.id);
     return {
       status: "approved",
       decisionId: decision.id,
-      grants: outside,
+      grants: [...decided, ...readable],
       requests: canonical,
       root,
     };

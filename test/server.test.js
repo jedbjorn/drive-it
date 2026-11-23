@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -80,12 +80,21 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
     await once(bridge, "listening");
     t.after(() => new Promise(resolve => bridge.close(resolve)));
 
-    const result = await call();
-    assert.ok(!result.isError, result.content[0].text);
-    assert.deepEqual(result.structuredContent, {
+    const expected = {
       ...info,
       connectionIdentity: `current-user:named-pipe:drive-it-${processId}`,
-    });
+      workspaceRoot: null,
+    };
+    const result = await call();
+    assert.ok(!result.isError, result.content[0].text);
+    const { content, ...session } = result.structuredContent;
+    assert.deepEqual(session, expected);
+    assert.ok(Array.isArray(content.projectTemplates));
+
+    // Without a processId, the real \\.\pipe listing finds the only Drive It session.
+    const found = await client.callTool({ name: "get_revit_session", arguments: {} });
+    assert.ok(!found.isError, found.content[0].text);
+    assert.equal(found.structuredContent.processId, processId);
   }
 });
 
@@ -163,4 +172,77 @@ test("execute_script uses the greeting and newline JSON broker contract", { skip
   assert.equal(envelopes[0].type, "model.execute");
   assert.equal(envelopes[0].operations[0].type, "create_level");
   assert.equal(envelopes[0].outsideRootApproval, undefined);
+});
+
+test("the session tool finds the only Revit and tells the agent where to work", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "drive-it-find-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const runtime = new Runtime({ dataDir: base });
+  await runtime.workspace.setRoot(base);
+  const content = { projectTemplates: ["C:/T/default.rte"], familyTemplateFolders: ["C:/F"], libraryFolders: ["C:/L"] };
+  const { server } = createDriveItServer({
+    runtime,
+    processResolver: async processId => processId ?? 4321,
+    sessionReader: async processId => ({ processId, version: "2026", build: "b", connectionIdentity: `pipe-${processId}` }),
+    contentReader: async () => content,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "drive-it-find-test", version: "1" });
+  await client.connect(clientTransport);
+  t.after(() => client.close());
+  await client.listTools();
+
+  const result = await client.callTool({ name: "get_revit_session", arguments: {} });
+  assert.ok(!result.isError, result.content[0].text);
+  assert.equal(result.structuredContent.processId, 4321);
+  assert.equal(result.structuredContent.workspaceRoot, await runtime.workspace.getRoot());
+  assert.deepEqual(result.structuredContent.content, content);
+
+  const fresh = new Runtime({ dataDir: path.join(base, "fresh") });
+  const { server: freshServer } = createDriveItServer({
+    runtime: fresh,
+    processResolver: async processId => processId ?? 4321,
+    sessionReader: async processId => ({ processId, version: "2026", build: "b", connectionIdentity: `pipe-${processId}` }),
+    contentReader: async () => content,
+  });
+  const [freshClientTransport, freshServerTransport] = InMemoryTransport.createLinkedPair();
+  await freshServer.connect(freshServerTransport);
+  const freshClient = new Client({ name: "drive-it-fresh-test", version: "1" });
+  await freshClient.connect(freshClientTransport);
+  t.after(() => freshClient.close());
+  await freshClient.listTools();
+  const unset = await freshClient.callTool({ name: "get_revit_session", arguments: {} });
+  assert.ok(!unset.isError, unset.content[0].text);
+  assert.equal(unset.structuredContent.workspaceRoot, null);
+});
+
+test("a pending run tells the agent to resume with the same idempotency key", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "drive-it-resume-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = path.join(base, "root");
+  const runtime = new Runtime({
+    dataDir: path.join(base, "data"),
+    sessionReader: async processId => ({ processId, version: "2026", build: "test", connectionIdentity: "test-session" }),
+  });
+  await mkdir(root);
+  await runtime.workspace.setRoot(root);
+  const { server } = createDriveItServer({ runtime, processResolver: async processId => processId ?? 123 });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "drive-it-resume-test", version: "1" });
+  await client.connect(clientTransport);
+  t.after(() => client.close());
+  await client.listTools();
+
+  const result = await client.callTool({ name: "execute_script", arguments: {
+    displayName: "Write a note outside the workspace",
+    source: "files.write(args['path'], 'x')",
+    arguments: { path: path.join(base, "outside.txt") },
+    idempotencyKey: "resume-me",
+  } });
+  assert.equal(result.structuredContent.status, "pending");
+  assert.equal(result.structuredContent.session.processId, 123);
+  assert.match(result.content[0].text, /^WAITING FOR THE USER/);
+  assert.match(result.content[0].text, /idempotencyKey "resume-me"/);
 });

@@ -28,7 +28,7 @@ purpose: MCP server and Revit add-in
 
 Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes these stdio MCP tools:
 
-- `get_revit_session` returns the selected process ID, version, build, and current-user named-pipe identity.
+- `get_revit_session` finds the running Revit (when only one has Drive It loaded, no process ID is needed) and returns its version, build, named-pipe identity, the workspace root, and Revit's installed project templates, family template folders, and library folders, so the agent uses real paths instead of guessing.
 - `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker. Every call carries a required `displayName`: one plain-language line the agent writes for you, such as "Add Level 3 at 24 ft to the tower model". It is kept on the run receipt and on any outside-root request, and the operator surface lists runs and requests by it.
 - `save_script`, `search_scripts`, `get_script`, `promote_script`, and `retire_script` manage the workspace script library (see [Script library](#script-library)).
 - `get_api_reference` returns local, versioned references for the callable Drive It file, check, and Revit operations. `get_guidance` is not registered.
@@ -57,7 +57,7 @@ node server/operator.js workspace set C:\DriveIt
 node server/operator.js workspace get
 ```
 
-Reads, creates, overwrites, renames, moves, and deletes inside the canonical root do not produce a Drive It prompt. Links and junctions are resolved at the point of use. An outside-root request returns a `pending` receipt and changes nothing in the requested batch. List the request and make a one-time decision:
+Reads, creates, overwrites, renames, moves, and deletes inside the canonical root do not produce a Drive It prompt. Reading Revit's own installed content also needs no prompt: reading files and folders, opening documents, and using a file as a template under `%ProgramData%\Autodesk\RVT 2026\Templates`, `Family Templates`, and `Libraries`. Writing there still needs a decision. Links and junctions are resolved at the point of use. An outside-root request returns a `pending` receipt and changes nothing in the requested batch. List the request and make a one-time decision:
 
 ```powershell
 node server/operator.js decisions list
@@ -178,7 +178,7 @@ The installed alpha supplies its own Node and fixed Python runtime. `DRIVE_IT_PY
 
 ## Use
 
-`get_revit_session` and `execute_script` need the Windows process ID of the Revit instance to drive. Run `Get-Process Revit | Select-Object Id, MainWindowTitle` in PowerShell and give the ID to your agent, or let an agent that can run shell commands find it. Pass it as `processId` to `get_revit_session` or `execute_script`.
+`get_revit_session` and `execute_script` find the running Revit on their own when only one Revit has the Drive It add-in loaded. With several Revit windows open, the agent is told which process IDs are running and asks which to use; it then passes that `processId`. When a run needs an outside-root approval, the tool tells the agent to ask you to decide in the Drive-It window and to resume with the same `idempotencyKey`.
 
 A successful session response contains the selected Revit process and its version information:
 

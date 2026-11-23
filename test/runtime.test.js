@@ -627,6 +627,59 @@ test("typed Revit calls preserve the broker envelope and observed effects", asyn
   assert.equal(envelopes[0].envelope.outsideRootApproval, undefined);
 });
 
+test("Revit's installed content is readable without a decision but not writable", async (t) => {
+  const { root, outside, runtime } = await fixture(t, { contentFolders: () => [path.join(outside, "Templates")] });
+  await mkdir(path.join(outside, "Templates"));
+  const template = path.join(outside, "Templates", "default.rte");
+  await writeFile(template, "template");
+  const read = await runtime.execute(request(root, { idempotencyKey: "content-read", source: "result = files.read(args['path'])", arguments: { path: template } }));
+  assert.equal(read.status, "succeeded", read.error?.message);
+  assert.equal(read.result, "template");
+  assert.deepEqual(read.policyDecisionIds, []);
+  const write = await runtime.execute(request(root, { idempotencyKey: "content-write", source: "files.write(args['path'], 'x')", arguments: { path: template } }));
+  assert.equal(write.status, "pending");
+  assert.equal((await runtime.decisions.list()).length, 1);
+});
+
+test("a stock template rides along as a grant and only the outside write needs a decision", async (t) => {
+  const calls = [];
+  let template;
+  let target;
+  const { root, outside, runtime } = await fixture(t, {
+    contentFolders: () => [path.join(outside, "Templates")],
+    brokerExecutor: async (processId, envelope) => {
+      calls.push(envelope);
+      const required = [{ operation: "create_document", paths: [template] }];
+      if (envelope.operations.some(operation => operation.type === "save_as_document")) required.push({ operation: "save_as_document", paths: [target] });
+      const covered = required.every(request => envelope.outsideRootApproval?.grants?.some(grant =>
+        grant.operation === request.operation && request.paths.every(item => grant.paths.includes(item))));
+      if (!covered) return { id: envelope.id, status: "policy_required", policyRequests: required };
+      return { id: envelope.id, status: "succeeded", changes: [], affectedFiles: [], affectedElements: [], checks: [] };
+    },
+  });
+  await mkdir(path.join(outside, "Templates"));
+  template = path.join(outside, "Templates", "default.rte");
+  target = path.join(outside, "model.rvt");
+  await writeFile(template, "");
+
+  const created = await runtime.execute(request(root, { idempotencyKey: "stock", source: "revit.create_document(templatePath=args['t'], kind='rvt')", arguments: { t: template } }));
+  assert.equal(created.status, "succeeded", created.error?.message);
+  assert.deepEqual(created.policyDecisionIds, []);
+  assert.equal((await runtime.decisions.list()).length, 0);
+  assert.equal(calls.at(-1).outsideRootApproval.decisionId, "revit-content");
+
+  const source = "revit.create_document(templatePath=args['t'], kind='rvt')\nrevit.save_as_document(destinationPath=args['d'])";
+  const mixed = { idempotencyKey: "mixed", source, arguments: { t: template, d: target } };
+  const pending = await runtime.execute(request(root, mixed));
+  assert.equal(pending.status, "pending");
+  const [decision] = await runtime.decisions.list();
+  assert.deepEqual(decision.requests.map(row => row.operation), ["save_as_document"]);
+  await runtime.decisions.decide(decision.id, true);
+  const approved = await runtime.execute(request(root, mixed));
+  assert.equal(approved.status, "succeeded", approved.error?.message);
+  assert.deepEqual(calls.at(-1).outsideRootApproval.grants.map(grant => grant.operation).sort(), ["create_document", "save_as_document"]);
+});
+
 test("broker policy preflight attaches only a Node-generated one-time grant", async (t) => {
   const calls = [];
   const { root, outside, runtime: runtimeWithBroker } = await fixture(t, {
