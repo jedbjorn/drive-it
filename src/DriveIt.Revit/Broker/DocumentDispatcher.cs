@@ -4,7 +4,7 @@ using Autodesk.Revit.UI;
 
 namespace DriveIt.Revit.Broker;
 
-public sealed class DocumentDispatcher
+public sealed partial class DocumentDispatcher
 {
     private static readonly JsonSerializerOptions ArgumentJsonOptions = new()
     {
@@ -15,6 +15,9 @@ public sealed class DocumentDispatcher
 
     public BrokerResponse Dispatch(UIApplication application, BrokerRequest request)
     {
+        if (request.Type == CaptureRequestType)
+            return Capture(application, request);
+
         var response = new BrokerResponse
         {
             Id = request.Id,
