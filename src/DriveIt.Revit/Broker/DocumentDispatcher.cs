@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 
@@ -23,6 +24,7 @@ public sealed partial class DocumentDispatcher
         {
             Id = request.Id,
             WorkspaceRoot = request.WorkspaceRoot,
+            Results = request.Operations.Select(_ => (JsonNode?)null).ToList(),
         };
 
         try
@@ -80,6 +82,13 @@ public sealed partial class DocumentDispatcher
             if (operation is null || string.IsNullOrWhiteSpace(operation.Type))
                 throw new RequestRejectedException("invalid_operation", "Every operation requires a type.");
             var item = new PreparedOperation(operation.Type);
+            if (IsQuery(operation.Type))
+            {
+                // Queries and selection carry no policy paths and never change currentPath.
+                item.Query = PrepareQuery(operation);
+                prepared.Add(item);
+                continue;
+            }
             if (IsModelChange(operation.Type))
             {
                 item.ModelChange = Deserialize<ModelChangeRequest>(operation.Arguments);
@@ -133,6 +142,11 @@ public sealed partial class DocumentDispatcher
         for (var index = 0; index < prepared.Count; index++)
         {
             var operation = prepared[index];
+            if (IsQuery(operation.Type))
+            {
+                current = ExecuteQuery(application, operation, current, response, index);
+                continue;
+            }
             if (IsModelChange(operation.Type))
             {
                 current = RequireDocument(current);
@@ -563,10 +577,12 @@ public sealed partial class DocumentDispatcher
         return state;
     }
 
-    private static DocumentReceipt Snapshot(DocumentState state)
+    private static DocumentReceipt Snapshot(DocumentState state) => Snapshot<DocumentReceipt>(state);
+
+    private static T Snapshot<T>(DocumentState state) where T : DocumentReceipt, new()
     {
         var document = state.Document;
-        var receipt = new DocumentReceipt
+        var receipt = new T
         {
             UniqueId = state.Id,
             Title = document.Title,
@@ -707,6 +723,8 @@ public sealed partial class DocumentDispatcher
         public string Type { get; } = type;
         public DocumentOperationArguments DocumentArguments { get; set; } = new();
         public ModelChangeRequest? ModelChange { get; set; }
+        /// <summary>The parsed, bounded arguments of a query or selection operation.</summary>
+        public object? Query { get; set; }
         public List<string> PolicyPaths { get; } = [];
     }
 
