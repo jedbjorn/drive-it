@@ -432,8 +432,18 @@ public sealed partial class DocumentDispatcher
             // for annotation families; the batch rolls back with this code.
             throw new RequestRejectedException("view_creation_not_allowed", exception.Message.Split('\r', '\n')[0]);
         }
-        if (change.Name is not null)
+        if (change.Name is null)
+            return view;
+        try
+        {
             view.Name = change.Name;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException exception)
+        {
+            // Revit is the authority on view-name conflicts that validation cannot see.
+            throw new RequestRejectedException("duplicate_view_name",
+                $"Revit refused the 3D view name '{change.Name}': {exception.Message.Split('\r', '\n')[0]}");
+        }
         return view;
     }
 
@@ -467,11 +477,15 @@ public sealed partial class DocumentDispatcher
                 case "create_3d_view":
                     if (change.Name is not null && string.IsNullOrWhiteSpace(change.Name))
                         throw new RequestRejectedException("invalid_model_change", "create_3d_view name must not be empty; omit it to let Revit name the view.");
+                    if (change.Name is not null && !NamingUtils.IsValidName(change.Name))
+                        throw new RequestRejectedException("invalid_model_change",
+                            $"create_3d_view name '{change.Name}' contains a character Revit does not allow in names: \\ : {{ }} [ ] | ; < > ? ` ~");
                     if (ThreeDimensionalViewType(document) is null)
                         throw new RequestRejectedException("view_type_not_found",
                             $"This {DocumentKind(document)} document has no 3D view family type, so a 3D view cannot be created.");
                     if (change.Name is not null && (!newViewNames.Add(change.Name) ||
-                        new FilteredElementCollector(document).OfClass(typeof(View3D)).Any(view => view.Name == change.Name)))
+                        new FilteredElementCollector(document).OfClass(typeof(View3D)).Cast<View3D>()
+                            .Any(view => !view.IsTemplate && view.Name == change.Name)))
                         throw new RequestRejectedException("duplicate_view_name", $"A 3D view named '{change.Name}' already exists or is created earlier in this batch.");
                     break;
                 case "create_family_type":
