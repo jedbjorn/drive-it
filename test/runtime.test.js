@@ -154,6 +154,24 @@ files.delete(args["c"])
   assert.deepEqual(await runtime.decisions.list(), []);
 });
 
+test("the run display name is kept on the receipt, its decision, and history", async (t) => {
+  const { root, outside, runtime } = await fixture(t);
+  const displayName = "Copy the client spec sheet into the project";
+  const pending = await runtime.execute(request(root, {
+    idempotencyKey: "named-run",
+    displayName,
+    source: "files.write(args[\"path\"], \"x\")",
+    arguments: { path: path.join(outside, "named.txt") },
+  }));
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.displayName, displayName);
+  const decision = (await runtime.decisions.list()).find(row => row.runId === pending.runId);
+  assert.equal(decision.displayName, displayName);
+  assert.equal((await runtime.history.get(pending.runId)).displayName, displayName);
+  const unnamed = await runtime.execute(request(root, { idempotencyKey: "unnamed-run" }));
+  assert.equal(unnamed.displayName, null);
+});
+
 test("outside-root denial leaves the target unchanged", async (t) => {
   const { root, outside, runtime } = await fixture(t);
   const target = path.join(outside, "denied.txt");

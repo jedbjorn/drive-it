@@ -54,7 +54,7 @@ export class WorkspacePolicy {
     this.decisions = decisions;
   }
 
-  async authorize(runId, requests, root) {
+  async authorize(runId, requests, root, displayName = null) {
     const canonical = [];
     for (const request of requests) {
       const paths = [];
@@ -65,7 +65,7 @@ export class WorkspacePolicy {
       !pathIsInside(root, scopePath(request.operation, target, root, path), path)));
     if (outside.length === 0) return { status: "allowed", requests: canonical, root };
 
-    const decision = await this.decisions.request(runId, outside);
+    const decision = await this.decisions.request(runId, outside, displayName);
     if (decision.status === "pending" || decision.status === "denied") {
       return { status: decision.status, decisionId: decision.id, requests: canonical, policyRequests: outside, root };
     }

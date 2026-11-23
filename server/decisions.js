@@ -27,7 +27,7 @@ export class DecisionStore {
     return rows.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  async request(runId, requests) {
+  async request(runId, requests, displayName = null) {
     const fingerprint = requestFingerprint(requests);
     const existing = (await this.list()).find(row => row.runId === runId
       && row.fingerprint === fingerprint && row.status !== "consumed");
@@ -36,6 +36,7 @@ export class DecisionStore {
     const row = {
       id: randomUUID(),
       runId,
+      displayName,
       fingerprint,
       requests,
       status: "pending",

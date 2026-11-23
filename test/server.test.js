@@ -40,6 +40,11 @@ test("discover the Unguided tools and schemas over stdio", async (t) => {
   assert.ok(execute.inputSchema.properties.source);
   assert.ok(execute.inputSchema.properties.script);
   assert.ok(execute.inputSchema.properties.idempotencyKey);
+  assert.ok(execute.inputSchema.required.includes("displayName"));
+
+  const unnamed = await client.callTool({ name: "execute_script", arguments: { processId: 123, source: "result = 1" } });
+  assert.equal(unnamed.isError, true);
+  assert.match(unnamed.content[0].text, /displayName/);
 
   const allReferences = await client.callTool({ name: "get_api_reference", arguments: {} });
   assert.deepEqual(allReferences.structuredContent.entries, apiReference());
@@ -52,7 +57,7 @@ test("discover the Unguided tools and schemas over stdio", async (t) => {
 
   const ambiguous = await client.callTool({
     name: "execute_script",
-    arguments: { processId: 123, source: "result = 1", script: { scriptId: "saved", revision: 1 } },
+    arguments: { processId: 123, displayName: "Ambiguous run", source: "result = 1", script: { scriptId: "saved", revision: 1 } },
   });
   assert.equal(ambiguous.isError, true);
   assert.match(ambiguous.content[0].text, /exactly one/);
@@ -102,8 +107,9 @@ test("execute_script receipts validate against the advertised output schema", as
   // listTools caches the output schemas the SDK client then enforces on every call.
   await client.listTools();
   for (const source of ["result = {'answer': 42}", "raise ValueError('expected failure')"]) {
-    const result = await client.callTool({ name: "execute_script", arguments: { processId: 123, source } });
+    const result = await client.callTool({ name: "execute_script", arguments: { processId: 123, displayName: "Check the receipt schema", source } });
     assert.ok(result.structuredContent.runId, result.content[0].text);
+    assert.equal(result.structuredContent.displayName, "Check the receipt schema");
   }
 });
 
@@ -145,6 +151,7 @@ test("execute_script uses the greeting and newline JSON broker contract", { skip
     name: "execute_script",
     arguments: {
       processId,
+      displayName: "Add level L2",
       source: "result = revit.create_level(name=\"L2\", elevation=4.0)",
       idempotencyKey: "windows-broker-contract",
     },
