@@ -15,7 +15,9 @@ param(
 #   - with no Revit 2026 the launch condition blocks a first install;
 #   - with a stub Revit 2026 (C:\Program Files\Autodesk\Revit 2026\Revit.exe) the lower version
 #     installs; this MSI upgrades it with 0 while Drive-It's own node.exe and python.exe hold
-#     files in the install folder (stopped by StopDriveItProcesses, not queued for a reboot);
+#     files in the install folder (stopped by StopDriveItProcesses, not queued for a reboot),
+#     and with DriveIt.Revit.dll on disk at a higher file version than this MSI's (as
+#     alpha.1/alpha.2 shipped 1.0.0.0), which must still be replaced;
 #   - one product and one Settings > Apps entry remain: DisplayName 'Drive-It', DisplayVersion =
 #     this MSI's ProductVersion;
 #   - one .addin in Addins\2026 with Drive-It's ClientId, VendorId DSOS, Name Drive-It, and
@@ -256,10 +258,19 @@ foreach ($file in @($claudeDesktop, $claudeCode, $codex)) {
 # The previous release, then this one over it while Drive-It's runtimes hold files open.
 Invoke-Msiexec -Operation '/i' -Package $lowerMsi -Log 'install-lower.log' | Out-Null
 Assert-InstalledVersion -Version $lowerVersion -When 'After installing the lower version'
+# Stand in for a previous release whose add-in DLL had a higher file version: any system DLL
+# with a high version will do. Without REINSTALLMODE=amus the upgrade skips the "older" new
+# file, removes the old one with the old version, and fails with nothing installed.
+$revitDll = Join-Path $app 'addin\DriveIt.Revit.dll'
+$packagedHash = (Get-FileHash -LiteralPath $revitDll -Algorithm SHA256).Hash
+Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\msi.dll') -Destination $revitDll -Force
+$higher = [Diagnostics.FileVersionInfo]::GetVersionInfo($revitDll)
+Assert-MsiTest ($higher.FileMajorPart -ge 1) "The stand-in DLL has file version $($higher.FileVersion), expected 1.0 or higher."
 $holders = Start-Holder
 Invoke-Msiexec -Operation '/i' -Log 'upgrade.log' | Out-Null
 Assert-HoldersStopped -Holders $holders -When 'The upgrade'
 Assert-InstalledVersion -Version $version -When 'After the upgrade'
+Assert-MsiTest ([IO.File]::Exists($revitDll) -and (Get-FileHash -LiteralPath $revitDll -Algorithm SHA256).Hash -eq $packagedHash) 'The upgrade did not replace a DriveIt.Revit.dll that had a higher file version.'
 
 $node = Join-Path $app 'runtimes\node\node.exe'
 $python = Join-Path $app 'runtimes\python\python.exe'

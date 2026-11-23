@@ -14,7 +14,8 @@
     - C2: UpgradeCode is 6561188A-BD8D-43A9-B116-BA0894F8001B; Manufacturer is Designs/OS;
     - C3: the Upgrade table holds exactly the two MajorUpgrade rows: WIX_UPGRADE_DETECTED removes
       every version up to and including this one, WIX_DOWNGRADE_DETECTED only detects newer ones;
-      RemoveExistingProducts runs between InstallValidate and InstallInitialize;
+      RemoveExistingProducts runs between InstallValidate and InstallInitialize, and
+      REINSTALLMODE is 'amus' so a file whose version went down is still installed;
     - ProductName is exactly 'Drive-It' (= ARP DisplayName = RST registry name);
     - ProductVersion is 3-part numeric and equals the numeric a.b.c of -Version (for a full
       release tag, the tag without its v);
@@ -176,6 +177,9 @@ if ($null -eq $rep) {
   $problems += 'RemoveExistingProducts is not in InstallExecuteSequence'
 } elseif (-not ($execSeq['InstallValidate'] -lt $rep -and $rep -lt $execSeq['InstallInitialize'])) {
   $problems += "RemoveExistingProducts ($rep) is not between InstallValidate and InstallInitialize"
+}
+if ($props['REINSTALLMODE'] -ne 'amus') {
+  $problems += "REINSTALLMODE is '$($props['REINSTALLMODE'])', expected 'amus' (an upgrade over a higher file version would drop that file)"
 }
 
 # No-reboot upgrade and uninstall (C4): Drive-It's own processes stop before InstallValidate.

@@ -28,6 +28,12 @@
          new is installed. A newer installed version is never downgraded (C3). -->
     <MajorUpgrade AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <!-- Lay down every file whatever version is on disk. Files are costed while the old version
+         is still installed, so a DLL whose file version went down (alpha.1/alpha.2 shipped
+         1.0.0.0; builds now carry the package version) was skipped as "older", then deleted
+         with the old version, and RegisterDriveIt failed with Drive-It uninstalled. Every file
+         is private to %LOCALAPPDATA%\DriveIt, so forcing them touches nothing shared. -->
+    <Property Id="REINSTALLMODE" Value="amus" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <!-- Settings > Apps identity and links, as the sibling companions. -->
