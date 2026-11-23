@@ -19,6 +19,7 @@ purpose: MCP server and Revit add-in
 [![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white)](#build-and-install)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#requirements)
 [![Open in md-converter](https://img.shields.io/badge/Open%20in-md--converter-6b46c1?style=flat-square)](https://md-converter.designs-os.com/?url=https://github.com/jedbjorn/drive-it/blob/main/README.md)
+[![jedbjorn/drive-it MCP server](https://glama.ai/mcp/servers/jedbjorn/drive-it/badges/score.svg)](https://glama.ai/mcp/servers/jedbjorn/drive-it)
 
 **Topics:** `revit` · `revit-addin` · `bim` · `mcp` · `model-context-protocol` · `dotnet` · `nodejs` · `autodesk`
 
