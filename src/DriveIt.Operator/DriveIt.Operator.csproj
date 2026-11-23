@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DriveIt.Operator.exe: the Start Menu host of the operator window (DriveIt.UI). Framework-
+    dependent on the Windows Desktop Runtime 8 (Revit 2026 installs it; Install-DriveIt.ps1
+    checks for it). The package publishes it to app\operator, so the window finds
+    app\runtimes\node and app\server\operator.js one folder up, as the add-in does from app\addin.
+    RollForward=Major lets a newer desktop runtime run it when 8 is absent.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <RollForward>Major</RollForward>
+    <RootNamespace>DriveIt.Operator</RootNamespace>
+    <AssemblyName>DriveIt.Operator</AssemblyName>
+    <Product>Drive-It</Product>
+    <AssemblyTitle>Drive-It</AssemblyTitle>
+    <IsPackable>false</IsPackable>
+    <StartupObject>DriveIt.Operator.Program</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DriveIt.UI\DriveIt.UI.csproj" />
+  </ItemGroup>
+
+</Project>

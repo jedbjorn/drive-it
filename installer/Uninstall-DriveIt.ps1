@@ -33,10 +33,23 @@ if ([IO.File]::Exists($addinPath)) {
     }
 }
 
-$shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drive It.lnk'
-if ([IO.File]::Exists($shortcutPath)) {
-    Remove-Item -LiteralPath $shortcutPath -Force
+# 'Drive-It.lnk' opens the WPF window; 'Drive It.lnk' is the PowerShell window's shortcut from earlier builds.
+foreach ($shortcutName in @('Drive-It.lnk', 'Drive It.lnk')) {
+    $shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) $shortcutName
+    if ([IO.File]::Exists($shortcutPath)) {
+        Remove-Item -LiteralPath $shortcutPath -Force
+    }
 }
+
+# Close an open Start Menu window from this install so its files can be removed.
+$operatorDirectory = Join-Path $app 'operator'
+Get-Process -Name 'DriveIt.Operator' -ErrorAction SilentlyContinue | Where-Object {
+    try {
+        $_.Path -and $_.Path.StartsWith($operatorDirectory + '\', [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        $false
+    }
+} | Stop-Process -Force -ErrorAction SilentlyContinue
 
 $mcpPath = Join-Path $install 'mcp.json'
 if ([IO.File]::Exists($mcpPath)) {
