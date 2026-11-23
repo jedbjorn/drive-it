@@ -76,7 +76,10 @@ result = {
   });
   const receipt = run.structuredContent;
   check("execute_script succeeded", !run.isError && receipt?.status === "succeeded", run.isError ? run.content[0].text : { status: receipt.status, error: receipt.error });
-  check("every script check passed", receipt?.checks?.length === 3 && receipt.checks.every(item => item.passed), receipt?.checks);
+  // The broker adds its own checks (document_identity) beside the script's three.
+  const scriptChecks = ["active document is the open fixture", "openDocuments lists it as active", "find_elements without a document argument returns the fixture's walls"];
+  check("every check passed, the script's three included",
+    scriptChecks.every(name => receipt?.checks?.some(item => item.name === name)) && receipt.checks.every(item => item.passed), receipt?.checks);
   check("receipt document is the fixture", receipt?.document?.path?.toLowerCase() === fixture.toLowerCase(), receipt?.document);
   const heights = expected.walls.map(wall => Math.round(wall.height * 304.8 * 1000) / 1000).sort();
   check("heights read through units", JSON.stringify([...(receipt?.result?.heightsMm || [])].sort()) === JSON.stringify(heights), receipt?.result?.heightsMm);
