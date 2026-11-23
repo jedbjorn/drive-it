@@ -31,7 +31,10 @@ test("discover the Unguided tools and schemas over stdio", async (t) => {
   const client = await clientFor(t, dataDir);
 
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name), ["get_revit_session", "execute_script", "get_api_reference"]);
+  assert.deepEqual(tools.map(tool => tool.name), [
+    "get_revit_session", "execute_script", "save_script", "search_scripts", "get_script",
+    "promote_script", "retire_script", "get_api_reference",
+  ]);
   assert.ok(!tools.some(tool => tool.name === "get_guidance"));
   const execute = tools.find(tool => tool.name === "execute_script");
   assert.ok(execute.inputSchema.properties.source);
@@ -49,7 +52,7 @@ test("discover the Unguided tools and schemas over stdio", async (t) => {
 
   const ambiguous = await client.callTool({
     name: "execute_script",
-    arguments: { processId: 123, source: "result = 1", script: { id: "saved", revision: 1 } },
+    arguments: { processId: 123, source: "result = 1", script: { scriptId: "saved", revision: 1 } },
   });
   assert.equal(ambiguous.isError, true);
   assert.match(ambiguous.content[0].text, /exactly one/);

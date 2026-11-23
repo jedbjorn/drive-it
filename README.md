@@ -26,10 +26,11 @@ purpose: MCP server and Revit add-in
 
 ## Overview
 
-Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes three stdio MCP tools:
+Drive It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes these stdio MCP tools:
 
 - `get_revit_session` returns the selected process ID, version, build, and current-user named-pipe identity.
-- `execute_script` runs inline Python, or an exact saved revision when the script library integration is installed, in an isolated fixed Python worker.
+- `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker.
+- `save_script`, `search_scripts`, `get_script`, `promote_script`, and `retire_script` manage the workspace script library (see [Script library](#script-library)).
 - `get_api_reference` returns local, versioned references for the callable Drive It file, check, and Revit operations. `get_guidance` is not registered.
 
 Generated Python receives `args`, `files`, `revit`, and `checks`. It does not receive raw Revit objects. Typed model operations use the Drive It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt. Scripts can import only the modules in `ALLOWED_MODULES` in `server/worker.py` (in-memory data, text, math, and date utilities plus `os`/`pathlib` for mediated file access); every other import or module load is denied. This is a guardrail for generated code, not an operating-system sandbox.
@@ -74,6 +75,18 @@ node server/operator.js history get <run-id>
 ```
 
 Completed idempotent requests return their original receipt without repeating effects. Receipts distinguish pending, denied, failed, timed-out, partially applied, and succeeded runs.
+
+## Script library
+
+Each workspace root has its own script library in `<root>\.drive-it\scripts`. Changing the root selects that root's library and leaves the other in place. Library operations need no Drive It approval.
+
+- `save_script` stores a new **draft** script, or a new immutable integer revision of an existing one, with its source, code hash, purpose, domain, document kind (`rvt` or `rfa`), JSON Schema for its arguments, expected effects, and provenance. Saves never edit an existing revision. Retrying the same `idempotencyKey` returns the revision already saved.
+- `execute_script` runs `{"scriptId": "...", "revision": 2}` for an exact draft or active revision, or `"revision": "latest"` for the newest **active** revision. Arguments are validated against the revision's schema and its defaults are applied. Retired revisions are rejected.
+- `promote_script` makes a draft **active** when the supplied run is a checked successful run of that exact revision in the same workspace: status `succeeded`, at least one check, every check passed, the same code hash, and the declared document kind. No human approval is involved. A rejection names each unmet condition and leaves the draft unchanged.
+- `retire_script` soft-retires a draft or active revision. Its source, metadata, and receipts are kept and remain visible through `get_script`, but it leaves default search and `latest` and cannot run.
+- `search_scripts` returns active revisions by default; pass `includeDrafts` or `includeRetired` to see more. `get_script` returns one revision with its source and its linked run receipts.
+
+A missing or unreadable library is reported as an error (`LIBRARY_NOT_FOUND`, `LIBRARY_UNREADABLE`), not an empty catalog. The first `save_script` creates the library.
 
 ## Requirements
 
@@ -164,7 +177,7 @@ The installed alpha supplies its own Node and fixed Python runtime. `DRIVE_IT_PY
 
 ## Use
 
-Both tools need the Windows process ID of the Revit instance to drive. Run `Get-Process Revit | Select-Object Id, MainWindowTitle` in PowerShell and give the ID to your agent, or let an agent that can run shell commands find it. Pass it as `processId` to `get_revit_session` or `execute_script`.
+`get_revit_session` and `execute_script` need the Windows process ID of the Revit instance to drive. Run `Get-Process Revit | Select-Object Id, MainWindowTitle` in PowerShell and give the ID to your agent, or let an agent that can run shell commands find it. Pass it as `processId` to `get_revit_session` or `execute_script`.
 
 A successful session response contains the selected Revit process and its version information:
 

@@ -103,22 +103,23 @@ test("ordinary runtime and permission errors remain script failures", async (t) 
 
 test("saved references resolve exact revisions and ambiguous calls are rejected", async (t) => {
   const { root, runtime } = await fixture(t, {
-    scriptResolver: async script => {
-      assert.deepEqual(script, { id: "area", revision: 7 });
-      return { source: "result = args[\"value\"] * 2" };
+    scriptResolver: async (script, resolvedRoot) => {
+      assert.deepEqual(script, { scriptId: "area", revision: 7 });
+      assert.equal(resolvedRoot, root);
+      return { scriptId: "area", revision: 7, state: "draft", source: "result = args[\"value\"] * 2" };
     },
   });
   const receipt = await runtime.execute(request(root, {
     source: undefined,
-    script: { id: "area", revision: 7 },
+    script: { scriptId: "area", revision: 7 },
     arguments: { value: 4 },
   }));
   assert.equal(receipt.status, "succeeded", receipt.error?.message);
   assert.equal(receipt.result, 8);
-  assert.deepEqual(receipt.savedScript, { id: "area", revision: 7, codeHash: receipt.codeHash });
+  assert.deepEqual(receipt.savedScript, { scriptId: "area", revision: 7, codeHash: receipt.codeHash, state: "draft", requested: 7 });
   await assert.rejects(runtime.execute(request(root, {
     source: "result = 1",
-    script: { id: "area", revision: 7 },
+    script: { scriptId: "area", revision: 7 },
   })), error => error.code === "AMBIGUOUS_SCRIPT");
 });
 
@@ -542,6 +543,40 @@ test("every published Revit example matches the typed broker contract and execut
       }
     }
   }
+});
+
+test("closing a document clears the selected handle for the next open or create", async (t) => {
+  const envelopes = [];
+  const { root, runtime } = await fixture(t, {
+    brokerExecutor: async (processId, envelope) => {
+      envelopes.push(envelope);
+      const type = envelope.operations[0].type;
+      return {
+        id: envelope.id,
+        status: "succeeded",
+        document: { path: null, uniqueId: `doc-${envelopes.length}`, kind: type === "create_document" ? envelope.operations[0].arguments.kind : "rvt" },
+        changes: [], affectedFiles: [], affectedElements: [], checks: [],
+      };
+    },
+  });
+  const receipt = await runtime.execute(request(root, {
+    source: [
+      "revit.create_document(templatePath=args['rte'], kind='rvt')",
+      "revit.close_document()",
+      "revit.create_document(templatePath=args['rft'], kind='rfa')",
+      "revit.delete_document()",
+      "revit.open_document(path=args['rvt'])",
+    ].join("\n"),
+    arguments: { rte: path.join(root, "p.rte"), rft: path.join(root, "f.rft"), rvt: path.join(root, "m.rvt") },
+  }));
+  assert.equal(receipt.status, "succeeded", JSON.stringify(receipt.error));
+  assert.deepEqual(envelopes.map(envelope => [envelope.operations[0].type, envelope.document.uniqueId]), [
+    ["create_document", null],
+    ["close_document", "doc-1"],
+    ["create_document", null],
+    ["delete_document", "doc-3"],
+    ["open_document", null],
+  ]);
 });
 
 test("typed Revit calls preserve the broker envelope and observed effects", async (t) => {
