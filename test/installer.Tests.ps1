@@ -102,7 +102,7 @@ $drawerData = Join-Path $FixtureDirectory 'drawer-data'
 [IO.Directory]::CreateDirectory($drawerData) | Out-Null
 $env:DRIVE_IT_DATA_DIR = $drawerData
 try {
-    Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $FixtureDirectory 'operator-self-test-drawer.json') -DrawerWrites | Out-Null
+    Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $FixtureDirectory 'operator-self-test-drawer.json') -DrawerWrites -StagedActions | Out-Null
 } finally {
     $env:DRIVE_IT_DATA_DIR = $InstallRoot
 }
