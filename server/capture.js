@@ -32,11 +32,13 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const PNG_END = Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
 // Revit may round the fitted side; anything beyond this is an export larger than requested.
 const PIXEL_TOLERANCE = 2;
-// Worst case must stay under the 150 s tool timeout of clients such as Codex and ChatGPT
-// (server/clients.js). A capture queues up to 125 s behind another client on the pipe, which
-// covers a run holding Revit for the default 120 s script time limit (spec #15: capture waits for
-// a hold to end); Revit then gets what is left of 135 s, at most 110 s.
-export const BROKER_BUDGET = Object.freeze({ connectWaitMs: 125_000, timeoutMs: 110_000, totalMs: 135_000 });
+// The add-in ends every hold within 600 s, the top of the Script time limit setting
+// (HoldSignal.MaximumTimeLimit). A capture queues up to 610 s behind another client on the pipe,
+// which covers a run holding Revit for that long and its rollback (spec #15: capture waits for a
+// hold to end); Revit then gets what is left of 620 s, at most 110 s. The worst case stays under the
+// tool timeout the installer sets for Codex and ChatGPT (server/clients.js).
+export const MAX_HOLD_MS = 600_000;
+export const BROKER_BUDGET = Object.freeze({ connectWaitMs: MAX_HOLD_MS + 10_000, timeoutMs: 110_000, totalMs: 620_000 });
 // A pid alive with a start time this far from the recorded one belongs to another process.
 const START_TOLERANCE_MS = 10_000;
 
@@ -542,7 +544,7 @@ export class ReferenceImages {
         });
       } catch (error) {
         const message = error.code === "EBUSY"
-          ? `Revit stayed busy for ${BROKER_BUDGET.connectWaitMs / 1000} s, most likely held by a script run; capture again after that run ends.`
+          ? `Revit stayed busy for ${BROKER_BUDGET.connectWaitMs / 1000} s, longer than a script run may hold it; capture again once Revit responds.`
           : `The capture did not complete in Revit: ${error.message}`;
         throw captureError("EXPORT_FAILED", message, { stage: "export" });
       }

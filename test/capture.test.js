@@ -15,8 +15,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createDriveItServer, SERVER_INSTRUCTIONS } from "../server/app.js";
+import { CODEX_TOOL_TIMEOUT_SEC } from "../server/clients.js";
 import {
-  BROKER_BUDGET, launchRootFrom, MARKER_SCHEMA, MAX_IMAGE_BYTES, ownerState, pngDimensions, processStartTime,
+  BROKER_BUDGET, launchRootFrom, MARKER_SCHEMA, MAX_HOLD_MS, MAX_IMAGE_BYTES, ownerState, pngDimensions, processStartTime,
   REFERENCE_DIRECTORY, ReferenceImages, retentionFrom, SESSION_MARKER, sweepSession,
 } from "../server/capture.js";
 import { Runtime } from "../server/runtime.js";
@@ -284,10 +285,12 @@ test("a capture returns the saved PNG bytes, metadata and a complete sidecar und
   // fall back to the estimate. The real lookup is proven in the reused-pid test below.
   assert.ok(["os", "estimate"].includes(marker.processStartSource), marker.processStartSource);
   assert.ok(Math.abs(Date.parse(marker.processStartedAt) - (Date.now() - process.uptime() * 1000)) < 10_000);
-  // The pipe budget waits through a hold at the default 120 s script limit and fits the 150 s
-  // tool timeout of Codex and ChatGPT; the hold tests below prove the wait on a busy pipe.
+  // The pipe budget waits through the longest hold the add-in allows (600 s) and fits the tool
+  // timeout the installer sets for Codex and ChatGPT; the hold tests below prove the wait on a busy pipe.
   assert.deepEqual(envelopes[0].options, { ...BROKER_BUDGET, onSession: envelopes[0].options.onSession });
-  assert.ok(BROKER_BUDGET.connectWaitMs > 120_000 && BROKER_BUDGET.totalMs <= 135_000);
+  assert.equal(MAX_HOLD_MS, 600_000);
+  assert.ok(BROKER_BUDGET.connectWaitMs > MAX_HOLD_MS && BROKER_BUDGET.totalMs - BROKER_BUDGET.connectWaitMs >= 10_000);
+  assert.ok(BROKER_BUDGET.totalMs + 10_000 <= CODEX_TOOL_TIMEOUT_SEC * 1000);
 });
 
 /**
@@ -298,7 +301,7 @@ test("a capture returns the saved PNG bytes, metadata and a complete sidecar und
 function heldPipe(holdMs, { answer = true } = {}) {
   const served = [];
   const revit = fakeBroker();
-  const pipe = { served, firstAttemptAt: null };
+  const pipe = { served, answer, firstAttemptAt: null, connected: false };
   pipe.connector = () => {
     pipe.firstAttemptAt ??= Date.now();
     if (Date.now() < pipe.firstAttemptAt + holdMs) {
@@ -307,6 +310,7 @@ function heldPipe(holdMs, { answer = true } = {}) {
       setImmediate(() => busy.emit("error", Object.assign(new Error("connect EBUSY"), { code: "EBUSY" })));
       return busy;
     }
+    pipe.connected = true;
     const [client, addIn] = duplexPair();
     setImmediate(() => client.emit("connect"));
     addIn.setEncoding("utf8");
@@ -338,7 +342,8 @@ async function heldCapture(t, launchRoot, pipe) {
     .then(value => { outcome = { value }; }, error => { outcome = { error }; });
   while (!outcome) {
     await new Promise(resolve => setImmediate(resolve));
-    t.mock.timers.tick(250);
+    // Once Revit answers, the export's real file I/O must not race the mocked clock.
+    if (!pipe.connected || !pipe.answer) t.mock.timers.tick(250);
   }
   // The budget runs from the first pipe attempt; the mocked clock also ticks through file setup.
   return { ...outcome, pipeMs: Date.now() - (pipe.firstAttemptAt ?? started) };
@@ -347,8 +352,9 @@ async function heldCapture(t, launchRoot, pipe) {
 test("a capture waits for a run's hold to end and then captures", async (t) => {
   const launchRoot = await base(t, "held");
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
-  // Longer than the old 20 s pipe budget, and the whole default 120 s script time limit.
-  for (const holdMs of [30_000, 120_000]) {
+  // Longer than the old 20 s pipe budget, the default 120 s script time limit, the old 125 s wait,
+  // and the whole 600 s top of the setting's range.
+  for (const holdMs of [30_000, 120_000, 300_000, MAX_HOLD_MS]) {
     const pipe = heldPipe(holdMs);
     const { value, error } = await heldCapture(t, launchRoot, pipe);
     assert.equal(error, undefined, `hold ${holdMs} ms: ${error?.message}`);
@@ -363,19 +369,19 @@ test("a capture waits for a run's hold to end and then captures", async (t) => {
 test("a capture behind a hold still answers within the client tool timeout", async (t) => {
   const launchRoot = await base(t, "held-limit");
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
-  // Revit takes the rest of the shared budget, not a fresh 110 s after a 30 s wait.
-  const silent = heldPipe(30_000, { answer: false });
+  // Revit takes the rest of the shared budget, not a fresh 110 s after a 600 s wait.
+  const silent = heldPipe(MAX_HOLD_MS, { answer: false });
   const timedOut = await heldCapture(t, launchRoot, silent);
   assert.equal(timedOut.error?.code, "EXPORT_FAILED");
   assert.match(timedOut.error.message, /timed out/);
   assert.equal(silent.served.length, 1);
   assert.ok(timedOut.pipeMs >= BROKER_BUDGET.totalMs - 500 && timedOut.pipeMs <= BROKER_BUDGET.totalMs + 500, `${timedOut.pipeMs} ms`);
 
-  // A hold past the wait is reported as Revit being busy, without an export.
-  const long = heldPipe(600_000);
+  // Busy past the longest hold and its rollback is reported as Revit being busy, without an export.
+  const long = heldPipe(BROKER_BUDGET.connectWaitMs + 60_000);
   const busy = await heldCapture(t, launchRoot, long);
   assert.equal(busy.error?.code, "EXPORT_FAILED");
-  assert.match(busy.error.message, /Revit stayed busy for 125 s, most likely held by a script run/);
+  assert.match(busy.error.message, /Revit stayed busy for 610 s, longer than a script run may hold it/);
   assert.equal(long.served.length, 0);
   assert.ok(busy.pipeMs >= BROKER_BUDGET.connectWaitMs && busy.pipeMs < BROKER_BUDGET.totalMs, `${busy.pipeMs} ms`);
 });

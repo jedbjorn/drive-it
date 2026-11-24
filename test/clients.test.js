@@ -57,7 +57,7 @@ test("only detected clients are registered and their other settings survive inst
   assert.ok(codexText.startsWith(codexOriginal), "existing Codex settings must stay in place");
   assert.ok(codexText.includes('command = "C:\\\\Users\\\\a b\\\\AppData\\\\Local\\\\DriveIt\\\\app\\\\runtimes\\\\node\\\\node.exe"'));
   assert.ok(codexText.includes("[mcp_servers.drive-it.env]"));
-  assert.ok(codexText.includes("tool_timeout_sec = 150"));
+  assert.ok(codexText.includes("tool_timeout_sec = 630"));
   assert.ok(codexText.includes("startup_timeout_sec = 30"));
   assert.ok(!/[^\r]\n/.test(codexText), "the file's CRLF line endings are kept");
 
