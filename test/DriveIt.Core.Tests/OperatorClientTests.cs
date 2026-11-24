@@ -183,6 +183,41 @@ public class OperatorClientTests
     }
 
     [Fact]
+    public void HistoryMeta_LabelsADryRun_First()
+    {
+        var zone = TimeZoneInfo.CreateCustomTimeZone("Test+0", TimeSpan.Zero, "Test+0", "Test+0");
+        using var json = JsonDocument.Parse("""
+            { "runId": "r", "status": "succeeded", "startedAt": "2026-11-24T08:05:00.000Z", "displayName": "Delete the old stair",
+              "dryRun": true, "rolledBack": true, "held": { "ms": 1200, "calls": 40 } }
+            """);
+        var run = RunRecord.FromJson(json.RootElement, zone);
+
+        Assert.True(run.DryRun);
+        Assert.Equal("Dry run · succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Meta);
+        Assert.Equal("Delete the old stair · Dry run · succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Label);
+    }
+
+    [Theory]
+    [InlineData("""{ "runId": "r", "status": "succeeded", "dryRun": false, "rehearsedBy": null }""")]
+    [InlineData("""{ "runId": "r", "status": "succeeded" }""")]
+    [InlineData("""{ "runId": "r", "status": "succeeded", "dryRun": "true" }""")]
+    public void HistoryMeta_DoesNotLabelARealRun(string receipt)
+    {
+        using var json = JsonDocument.Parse(receipt);
+        var run = RunRecord.FromJson(json.RootElement);
+        Assert.False(run.DryRun);
+        Assert.Equal("succeeded", run.Meta);
+    }
+
+    [Fact]
+    public void HoldText_LabelsADryRun()
+    {
+        Assert.Equal("Drive-It · Dry run", HoldText.DryRunWindowTitle);
+        Assert.StartsWith("Dry run: Revit is paused until this finishes", HoldText.DryRunPauseSentence);
+        Assert.Contains("rolled back", HoldText.DryRunPauseSentence);
+    }
+
+    [Fact]
     public async Task ScriptTimeLimit_IsReadAndSavedThroughOperator()
     {
         var runner = new FakeRunner()

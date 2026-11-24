@@ -11,11 +11,60 @@ import { executeBroker, openHold, readSession } from "./session.js";
 import { SettingsStore } from "./settings.js";
 import { defaultDataDir } from "./store.js";
 import { runWorker } from "./worker.js";
-import { canonicalPath, WorkspacePolicy, WorkspaceStore } from "./workspace.js";
+import { canonicalPath, isOutsideRoot, WorkspacePolicy, WorkspaceStore } from "./workspace.js";
+import { PIXEL_SIZE } from "./capture.js";
 
 function hash(source) {
   return createHash("sha256").update(source).digest("hex");
 }
+
+// Spec #13 "The Call": a dry run exports at most this many views, named and created together.
+export const DRY_RUN_VIEW_LIMIT = 4;
+const VIEW_ID = /^[1-9][0-9]{0,18}$/;
+
+function dryRunError(message) {
+  const error = new Error(message);
+  error.code = "INVALID_DRY_RUN";
+  return error;
+}
+
+/** execute_script's dryRun as options: null for a real run (absent or false); true is a dry run with no images. */
+export function dryRunOptions(value) {
+  if (value === undefined || value === null || value === false) return null;
+  if (value === true) return { views: [], createdViews: false, pixelSize: PIXEL_SIZE.default };
+  if (typeof value !== "object" || Array.isArray(value)) throw dryRunError("dryRun takes true, false, or {views, createdViews, pixelSize}.");
+  const views = (value.views ?? []).map(String);
+  if (views.length > DRY_RUN_VIEW_LIMIT) throw dryRunError(`dryRun.views names ${views.length} views; a dry run exports at most ${DRY_RUN_VIEW_LIMIT}.`);
+  const invalid = views.find(id => !VIEW_ID.test(id));
+  if (invalid !== undefined) throw dryRunError(`dryRun.views holds ${JSON.stringify(invalid)}, which is not a Revit view id such as "312045".`);
+  const pixelSize = value.pixelSize ?? PIXEL_SIZE.default;
+  if (!Number.isInteger(pixelSize) || pixelSize < PIXEL_SIZE.min || pixelSize > PIXEL_SIZE.max) {
+    throw dryRunError(`dryRun.pixelSize must be an integer from ${PIXEL_SIZE.min} through ${PIXEL_SIZE.max}.`);
+  }
+  return { views: [...new Set(views)], createdViews: value.createdViews === true, pixelSize };
+}
+
+/**
+ * The call a run's fingerprint names, without its dry run options (spec #13 D12): a dry run and a real run of the
+ * same code or saved revision, arguments, Revit process and target document are the same call. A real run's
+ * fingerprint is its call.
+ */
+export function callOf(fingerprint) {
+  const { dryRun, ...call } = JSON.parse(fingerprint);
+  return JSON.stringify(call);
+}
+
+// Spec #13 "What Comes Back": fixed sentences for the model on every dry-run receipt.
+export const DRY_RUN_NOTES = Object.freeze({
+  rolledBack: "This was a dry run. Revit applied the script's changes, then every change was rolled back: nothing was kept and nothing was saved.",
+  notRolledBack: "This was a dry run, but Revit could not roll back every change; the receipt's error names the documents that may have changed.",
+  ids: "Element ids in this receipt (created elements, created views, transactions) no longer exist. Read ids again after the real run.",
+  realRun: "Running it for real is a second execution: call execute_script again with the same source or saved revision and the same arguments, without dryRun.",
+  skippedFileWrites: "File writes were skipped and are listed in skippedFileWrites; a file the script wrote earlier in the dry run was not there to read. The real run writes them, and asks about the paths outside the workspace root.",
+  devFiles: "Dev Mode: only files.* writes were skipped. Plain Python file I/O (open, os, pathlib) is not intercepted in Dev Mode and ran for real.",
+  released: document => `Drive-It released your borrowed elements in ${document} after the dry run (Relinquish, elements only), so the preview leaves nothing locked against colleagues. Revit cannot release single elements, so this includes unmodified elements you had borrowed before the dry run; elements you changed and have not synchronized stay yours.`,
+  notReleased: document => `Drive-It could not release the elements this dry run borrowed in ${document}; colleagues cannot edit them until you use Relinquish All Mine or Synchronize with Central in Revit.`,
+});
 
 function documentWithKind(document) {
   if (!document) return null;
@@ -59,7 +108,7 @@ function transactionLine(transaction) {
 }
 
 export class Runtime {
-  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, holdOpener = openHold, sessionReader = readSession, workerRunner = runWorker, scriptResolver, scripts, contentFolders = revitContentFolders, modeResolver = installMode } = {}) {
+  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, holdOpener = openHold, sessionReader = readSession, workerRunner = runWorker, scriptResolver, scripts, contentFolders = revitContentFolders, modeResolver = installMode, references = null } = {}) {
     this.workspace = new WorkspaceStore(dataDir);
     this.decisions = new DecisionStore(dataDir);
     this.history = new HistoryStore(dataDir);
@@ -74,6 +123,8 @@ export class Runtime {
     this.contentFolders = contentFolders;
     this.scripts = scripts || new ScriptCatalog({ workspace: this.workspace, history: this.history });
     this.scriptResolver = scriptResolver || ((reference, root) => this.scripts.resolve(reference, root));
+    // Where a dry run's images are published (capture.js ReferenceImages); the MCP server sets it.
+    this.references = references;
     this.inFlight = new Map();
   }
 
@@ -95,15 +146,18 @@ export class Runtime {
     }
 
     const idempotencyKey = input.idempotencyKey || randomUUID();
+    const dryRun = dryRunOptions(input.dryRun);
     // Saved references fingerprint the request as made, so a completed run replays even
-    // after its revision is retired or "latest" moves on.
-    const fingerprint = JSON.stringify({
+    // after its revision is retired or "latest" moves on. A dry run adds its options, so its key never
+    // answers a real run, or the reverse; a real run's fingerprint is the call alone (callOf).
+    const call = {
       codeHash: hasSource ? hash(input.source) : null,
       script: hasScript ? { scriptId: input.script.scriptId, revision: input.script.revision } : null,
       arguments: input.arguments || {},
       processId: input.processId,
       document: input.document || null,
-    });
+    };
+    const fingerprint = JSON.stringify(dryRun ? { ...call, dryRun } : call);
     const previous = await this.history.findIdempotent(idempotencyKey);
     if (previous && previous.fingerprint !== fingerprint) {
       const error = new Error("The idempotency key was already used for a different request.");
@@ -145,6 +199,7 @@ export class Runtime {
       savedScript,
       // From the install's resolver only; the request has no say (spec #10 "Mode Selection").
       mode: await this.modeResolver(),
+      dryRun: Boolean(dryRun),
       status: "failed",
       session: null,
       document: documentWithKind(input.document),
@@ -184,6 +239,8 @@ export class Runtime {
       heldCalls: 0,
       uncommitted: null,
       workerStatus: null,
+      dryRun,
+      skippedFileWrites: [],
     };
     let temporary;
 
@@ -199,6 +256,7 @@ export class Runtime {
         document: input.document || null,
         runId,
         mode: receipt.mode,
+        dryRun: Boolean(dryRun),
         pythonPath: this.pythonPath,
         cwd: temporary,
         timeoutMs: input.timeoutMs || 30000,
@@ -214,7 +272,8 @@ export class Runtime {
         logs: workerReceipt.logs || "",
         error: workerReceipt.error || null,
       });
-      if (["failed", "denied"].includes(receipt.status) && receipt.changes.length > 0) {
+      // A dry run never reads partially_applied: nothing it did is kept.
+      if (["failed", "denied"].includes(receipt.status) && receipt.changes.length > 0 && !dryRun) {
         receipt.status = "partially_applied";
       }
       if (workerReceipt.policy) this.recordPolicy(receipt, context, workerReceipt.policy);
@@ -228,7 +287,13 @@ export class Runtime {
         if (receipt.mode !== DEV) throw error;
       });
     }
+    // A succeeded dry run that never reached Revit still exports the views it named, as the model stands.
+    if (dryRun && receipt.status === "succeeded" && !context.holdPromise && (dryRun.views.length > 0 || dryRun.createdViews)) {
+      await this.ensureHold(context).catch(() => {});
+    }
     if (context.holdPromise) await this.endHold(receipt, context);
+    if (dryRun) this.completeDryRun(receipt, context);
+    else receipt.rehearsedBy = null;
 
     receipt.policyDecisionIds = [...context.decisionIds];
     receipt.policyRequests = context.policyRequests;
@@ -268,6 +333,7 @@ export class Runtime {
       this.recordPolicy(context.receipt, context, result);
       return result;
     }
+    if (method === "file.skip") return this.skipFileWrite(params, context);
     if (method === "bridge.call") return this.bridgeCall(params, context);
     if (method !== "broker.execute") throw new Error(`Unknown worker request: ${method}`);
 
@@ -287,6 +353,14 @@ export class Runtime {
       workspaceRoot: context.workspaceRoot,
       operations,
     };
+    // A dry run holds Revit from its first request, built-in or bridge, so every change it makes is rolled back.
+    if (context.dryRun && !context.hold) {
+      try {
+        await this.ensureHold(context);
+      } catch (error) {
+        return { status: "failed", error: { code: error.code || "HOLD_FAILED", message: `Revit could not be held for this dry run: ${error.message}` } };
+      }
+    }
     // Once a run holds Revit, its built-in operations go through the hold and join its transaction groups.
     const execute = message => context.hold
       ? context.hold.send(message)
@@ -323,6 +397,20 @@ export class Runtime {
     return response;
   }
 
+  // Spec #13 D4: a dry run's workspace file write is skipped and listed, with no outside-root decision.
+  async skipFileWrite(params, context) {
+    if (!context.dryRun) throw new Error("Only a dry run skips file writes.");
+    for (const target of params.paths) {
+      const canonical = await canonicalPath(target);
+      context.skippedFileWrites.push({
+        operation: params.operation,
+        path: canonical,
+        outsideRoot: isOutsideRoot(params.operation, canonical, context.workspaceRoot),
+      });
+    }
+    return { skipped: true };
+  }
+
   async bridgeCall(params, context) {
     if (params.op === "describe") return this.describe(params, context);
     const call = { ...params };
@@ -336,6 +424,18 @@ export class Runtime {
     const paths = [...bridgePaths(call.args), ...bridgePaths(call.value)];
     if (paths.length) {
       const operation = BRIDGE_READS.has(call.member) ? "read_file" : "write_file";
+      // Spec #13 D4: a dry run never lets a bridge call write a file (an export, say). The paths are listed as
+      // skipped writes, no decision is asked, and the call is refused before it reaches Revit.
+      if (context.dryRun && operation === "write_file") {
+        await this.skipFileWrite({ operation, paths }, context);
+        return {
+          status: "failed",
+          error: {
+            code: "not_allowed_in_dry_run",
+            message: `${call.member} would write ${paths.join(", ")}, and a dry run writes no files, so it is not allowed in a dry run. The paths are listed in skippedFileWrites; the real run writes them.`,
+          },
+        };
+      }
       const decision = await this.policy.authorize(context.runId, [{ operation, paths }], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
       this.recordPolicy(context.receipt, context, decision);
       if (decision.status === "pending" || decision.status === "denied") return decision;
@@ -383,6 +483,7 @@ export class Runtime {
         runId: context.runId,
         displayName: context.receipt.displayName,
         timeLimitMs,
+        dryRun: Boolean(context.dryRun),
       });
       context.hold = hold;
       context.heldAt = Date.now();
@@ -420,8 +521,18 @@ export class Runtime {
       return;
     }
     let summary = null;
+    const dry = context.dryRun;
+    // A dry run always ends in a rollback. One that succeeded first has the add-in export its views and read its
+    // actions with the groups still open (spec #13 "How It Works").
+    const evidence = dry && receipt.status === "succeeded";
+    const slots = evidence ? await this.stageDryRunImages(context) : [];
     try {
-      summary = await hold.end(receipt.status === "succeeded" ? "commit" : "rollback");
+      summary = await hold.end(dry || receipt.status !== "succeeded" ? "rollback" : "commit", evidence ? {
+        dryRun: {
+          actions: true,
+          export: slots.length ? { ...this.exportRequest(context.dryRun), targets: slots.map(slot => slot.target) } : null,
+        },
+      } : undefined);
     } catch {
       // Revit is gone; what it kept is unknown.
     }
@@ -429,39 +540,134 @@ export class Runtime {
     receipt.warnings = summary?.warnings ?? [];
 
     const failedDocuments = (summary?.documents || []).filter(document => document.state.endsWith("_failed"));
+    if (dry) {
+      await this.endDryRun(receipt, context, summary, failedDocuments, evidence ? slots : null);
+      return;
+    }
     if (summary?.outcome !== "committed") {
       for (const key of PROVISIONAL) {
         for (const entry of context.uncommitted.filter(item => item.key === key).sort((left, right) => right.position - left.position)) {
           context[key].splice(entry.position, 1);
         }
       }
-      if (receipt.status === "succeeded" || !summary) {
-        const code = summary?.outcome === "stopped_by_user" ? "stopped_by_user" : summary?.outcome === "timed_out" ? "RUN_TIMEOUT" : "HOLD_LOST";
-        receipt.status = code === "RUN_TIMEOUT" ? "timed_out" : "failed";
-        receipt.error = {
-          code,
-          message: code === "stopped_by_user" ? "Stopped from the Drive-It window; the run's changes were rolled back."
-            : code === "RUN_TIMEOUT" ? `Script exceeded ${context.timeoutMs} ms and was stopped.`
-              : "Revit's hold ended before the run did; what Revit kept is unknown.",
-        };
-      }
+      if (receipt.status === "succeeded" || !summary) this.holdEndedEarly(receipt, context, summary);
       // Effects the rollback removed no longer make the run partial; nothing else changes the status rule.
       if (receipt.status === "partially_applied" && receipt.changes.length === 0) {
         receipt.status = context.workerStatus === "denied" ? "denied" : "failed";
       }
     }
-    if (failedDocuments.length) {
-      const rollback = failedDocuments.some(document => document.state === "rollback_failed");
-      receipt.status = receipt.status === "succeeded" ? "failed" : receipt.status;
-      receipt.error = {
-        code: rollback ? "rollback_failed" : "commit_failed",
-        message: rollback
-          ? `Revit could not roll back this run's changes to ${failedDocuments.map(document => document.title).join(", ")}; those models may have changed.`
-          : `Revit could not keep this run's changes to ${failedDocuments.map(document => document.title).join(", ")}.`,
-        documents: failedDocuments,
-        cause: receipt.error,
-      };
+    if (failedDocuments.length) this.documentsFailed(receipt, failedDocuments);
+  }
+
+  // A run that succeeded, but whose hold the add-in ended on its own (Stop, deadline), or Revit is gone.
+  holdEndedEarly(receipt, context, summary) {
+    const code = summary?.outcome === "stopped_by_user" ? "stopped_by_user" : summary?.outcome === "timed_out" ? "RUN_TIMEOUT" : "HOLD_LOST";
+    receipt.status = code === "RUN_TIMEOUT" ? "timed_out" : "failed";
+    receipt.error = {
+      code,
+      message: code === "stopped_by_user" ? "Stopped from the Drive-It window; the run's changes were rolled back."
+        : code === "RUN_TIMEOUT" ? `Script exceeded ${context.timeoutMs} ms and was stopped.`
+          : "Revit's hold ended before the run did; what Revit kept is unknown.",
+    };
+  }
+
+  documentsFailed(receipt, failedDocuments) {
+    const rollback = failedDocuments.some(document => document.state === "rollback_failed");
+    receipt.status = receipt.status === "succeeded" ? "failed" : receipt.status;
+    receipt.error = {
+      code: rollback ? "rollback_failed" : "commit_failed",
+      message: rollback
+        ? `Revit could not roll back this run's changes to ${failedDocuments.map(document => document.title).join(", ")}; those models may have changed.`
+        : `Revit could not keep this run's changes to ${failedDocuments.map(document => document.title).join(", ")}.`,
+      documents: failedDocuments,
+      cause: receipt.error,
+    };
+  }
+
+  // The add-in's export request: the named views, then (with createdViews) views the script created, at most 4.
+  exportRequest(dryRun) {
+    return { views: dryRun.views, createdViews: dryRun.createdViews, pixelSize: dryRun.pixelSize };
+  }
+
+  // One empty staging directory per image the add-in may export: each named view, or the limit with createdViews.
+  async stageDryRunImages(context) {
+    const { views, createdViews } = context.dryRun;
+    const count = createdViews ? DRY_RUN_VIEW_LIMIT : views.length;
+    if (count === 0 || !this.references) return [];
+    try {
+      return await this.references.stageExports(count);
+    } catch (error) {
+      context.imageError = { code: error.code || "ARTIFACT_WRITE_FAILED", message: error.message };
+      return [];
     }
+  }
+
+  // Spec #13: the receipt keeps what would have happened; the hold's outcome decides rolledBack and the status.
+  // slots is null when the script did not succeed: then no view was exported.
+  async endDryRun(receipt, context, summary, failedDocuments, slots) {
+    context.rolledBack = Boolean(summary) && failedDocuments.length === 0
+      && (summary.documents || []).every(document => document.state === "rolled_back");
+    if (receipt.status === "succeeded" && summary?.outcome !== "rolled_back") this.holdEndedEarly(receipt, context, summary);
+    if (failedDocuments.length) this.documentsFailed(receipt, failedDocuments);
+    if (receipt.status === "succeeded") receipt.actions = summary?.actions ?? [];
+    if (summary?.worksharing?.length) receipt.worksharing = summary.worksharing;
+    receipt.images = slots ? await this.publishDryRunImages(receipt, context, summary?.images ?? [], slots) : [];
+  }
+
+  async publishDryRunImages(receipt, context, exported, slots) {
+    const images = [];
+    try {
+      for (const image of exported) {
+        const entry = { viewId: image.viewId ?? null, name: image.viewName ?? null, type: image.viewType ?? null, document: image.document?.title ?? null };
+        const slot = slots.find(candidate => candidate.target === image.targetPath);
+        if (image.error || !slot) {
+          images.push({ ...entry, error: String(image.error?.code || "export_failed").toUpperCase(), message: image.error?.message || "Revit did not export the view." });
+          continue;
+        }
+        try {
+          const published = await this.references.publishExport(slot, {
+            pixelSize: context.dryRun.pixelSize,
+            purpose: `Dry run: ${receipt.displayName ?? receipt.runId}`,
+            runId: receipt.runId,
+            revit: { processId: context.processId, version: receipt.session?.version ?? null, build: receipt.session?.build ?? null },
+            document: image.document,
+            view: { id: image.viewId, uniqueId: image.viewUniqueId, name: image.viewName, type: image.viewType },
+            fitDirection: image.fitDirection,
+          });
+          images.push({ ...entry, pixelSize: context.dryRun.pixelSize, width: published.metadata.image.width, height: published.metadata.image.height, path: published.absolutePath, sidecarPath: published.sidecarPath });
+        } catch (error) {
+          images.push({ ...entry, error: error.code || "ARTIFACT_WRITE_FAILED", message: error.message });
+        }
+      }
+    } finally {
+      if (slots.length) this.references.discardExports(slots);
+    }
+    // Named views the add-in did not report (Revit gone, or no staging) still get an entry each.
+    for (const viewId of context.dryRun.views) {
+      if (images.some(image => image.viewId === viewId)) continue;
+      const reason = context.imageError ?? (this.references
+        ? { code: "EXPORT_FAILED", message: "Revit did not export this view." }
+        : { code: "IMAGES_UNAVAILABLE", message: "This server has no reference-image folder, so no view was exported." });
+      images.push({ viewId, name: null, type: null, document: null, error: reason.code, message: reason.message });
+    }
+    return images;
+  }
+
+  // The dry-run fields every dry-run receipt carries, held or not (spec #13 "What Comes Back").
+  completeDryRun(receipt, context) {
+    // A dry run that never reached Revit changed nothing there.
+    receipt.rolledBack = context.rolledBack ?? true;
+    receipt.warnings ??= [];
+    receipt.images ??= [];
+    receipt.skippedFileWrites = context.skippedFileWrites;
+    if (receipt.status === "succeeded") receipt.actions ??= [];
+    const notes = [receipt.rolledBack ? DRY_RUN_NOTES.rolledBack : DRY_RUN_NOTES.notRolledBack, DRY_RUN_NOTES.ids, DRY_RUN_NOTES.realRun];
+    if (receipt.skippedFileWrites.length) notes.push(DRY_RUN_NOTES.skippedFileWrites);
+    if (receipt.mode === DEV) notes.push(DRY_RUN_NOTES.devFiles);
+    for (const entry of receipt.worksharing ?? []) {
+      notes.push(entry.released ? DRY_RUN_NOTES.released(entry.document) : DRY_RUN_NOTES.notReleased(entry.document));
+    }
+    receipt.notes = notes;
   }
 
   observeBroker(response, context) {

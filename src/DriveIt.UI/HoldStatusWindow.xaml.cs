@@ -19,16 +19,17 @@ public partial class HoldStatusWindow : Window
     private readonly DispatcherTimer _clock;
     private bool _closingByHost;
 
-    public HoldStatusWindow(string? displayName, DateTimeOffset startedAt, TimeSpan limit, Action stop)
+    public HoldStatusWindow(string? displayName, DateTimeOffset startedAt, TimeSpan limit, Action stop, bool dryRun = false)
     {
         InitializeComponent();
         DarkTitleBar.Attach(this);
         _startedAt = startedAt;
         _limit = limit;
         _stop = stop;
-        Title = HoldText.WindowTitle;
+        // A dry run is labelled as one (spec #13 "How It Works"): its changes are rolled back whatever happens.
+        Title = dryRun ? HoldText.DryRunWindowTitle : HoldText.WindowTitle;
         NameText.Text = HoldText.Name(displayName);
-        PauseText.Text = HoldText.PauseSentence;
+        PauseText.Text = dryRun ? HoldText.DryRunPauseSentence : HoldText.PauseSentence;
         StopButton.Content = HoldText.StopLabel;
         _clock = new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Normal, (_, _) => Tick(), Dispatcher);
         Tick();

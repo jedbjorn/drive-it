@@ -103,6 +103,35 @@ export function pngDimensions(bytes) {
   return width > 0 && height > 0 ? { width, height } : null;
 }
 
+/** The exported PNG at a staging target, checked as a plain, complete PNG within the size and pixel limits. */
+async function readExport(target, pixelSize, kind = "exported") {
+  let stat;
+  try {
+    stat = await lstat(target);
+  } catch {
+    throw captureError("INVALID_IMAGE", "Revit reported success but the exported PNG is missing.", { stage: "validate" });
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw captureError("INVALID_IMAGE", "The exported image is not a plain file.", { stage: "validate" });
+  }
+  if (stat.size > MAX_IMAGE_BYTES) {
+    throw captureError("CAPTURE_TOO_LARGE",
+      `The ${kind} PNG is ${stat.size} bytes, over the ${MAX_IMAGE_BYTES}-byte (8 MiB) limit. Retry with a smaller pixelSize.`,
+      { stage: "validate", byteSize: stat.size, pixelSize });
+  }
+  const bytes = await readFile(target);
+  const dimensions = pngDimensions(bytes);
+  if (!dimensions || bytes.length !== stat.size) {
+    throw captureError("INVALID_IMAGE", "The exported file is not a complete PNG image.", { stage: "validate" });
+  }
+  if (Math.max(dimensions.width, dimensions.height) > pixelSize + PIXEL_TOLERANCE) {
+    throw captureError("CAPTURE_SIZE_EXCEEDED",
+      `Revit exported ${dimensions.width}x${dimensions.height}, larger than the requested pixelSize ${pixelSize} on its longer side.`,
+      { stage: "validate", width: dimensions.width, height: dimensions.height, pixelSize });
+  }
+  return { bytes, dimensions };
+}
+
 /** The ids to mark, de-duplicated in order, or null when markElementIds was not supplied. */
 export function markElementIdsFrom(value) {
   if (value === undefined || value === null) return null;
@@ -578,30 +607,7 @@ export class ReferenceImages {
         throw captureError("INVALID_IMAGE", "Revit reported an export path other than the requested target.", { stage: "validate" });
       }
 
-      let stat;
-      try {
-        stat = await lstat(target);
-      } catch {
-        throw captureError("INVALID_IMAGE", "Revit reported success but the exported PNG is missing.", { stage: "validate" });
-      }
-      if (!stat.isFile() || stat.isSymbolicLink()) {
-        throw captureError("INVALID_IMAGE", "The exported image is not a plain file.", { stage: "validate" });
-      }
-      if (stat.size > MAX_IMAGE_BYTES) {
-        throw captureError("CAPTURE_TOO_LARGE",
-          `The ${marked ? "marked" : "exported"} PNG is ${stat.size} bytes, over the ${MAX_IMAGE_BYTES}-byte (8 MiB) limit. Retry with a smaller pixelSize.`,
-          { stage: "validate", byteSize: stat.size, pixelSize });
-      }
-      const bytes = await readFile(target);
-      const dimensions = pngDimensions(bytes);
-      if (!dimensions || bytes.length !== stat.size) {
-        throw captureError("INVALID_IMAGE", "The exported file is not a complete PNG image.", { stage: "validate" });
-      }
-      if (Math.max(dimensions.width, dimensions.height) > pixelSize + PIXEL_TOLERANCE) {
-        throw captureError("CAPTURE_SIZE_EXCEEDED",
-          `Revit exported ${dimensions.width}x${dimensions.height}, larger than the requested pixelSize ${pixelSize} on its longer side.`,
-          { stage: "validate", width: dimensions.width, height: dimensions.height, pixelSize });
-      }
+      const { bytes, dimensions } = await readExport(target, pixelSize, marked ? "marked" : "exported");
       let markResult = null;
       if (marked) {
         const scope = { categories: markNames ?? [], elementIds: markIds ?? [] };
@@ -679,6 +685,104 @@ export class ReferenceImages {
         if (error.code !== "ENOENT") this.log(`drive-it: could not remove capture staging ${staging}: ${error.message}`);
       }
     }
+  }
+
+  /**
+   * A dry run's staging (spec #13 "What Comes Back"): one empty directory per image the add-in may export,
+   * each with the target it exports to. The add-in exports with the run's groups open, before its rollback.
+   */
+  async stageExports(count) {
+    if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; no image was exported.");
+    let directory;
+    try {
+      directory = await this.ensureSession();
+    } catch (error) {
+      if (error.code === "REFERENCE_DIRECTORY_LINKED") throw error;
+      throw captureError("ARTIFACT_WRITE_FAILED", `Could not create the reference-image directory under ${this.launchRoot}: ${error.message}`, { stage: "store" });
+    }
+    const slots = [];
+    try {
+      while (slots.length < count) {
+        const captureId = newId();
+        const staging = path.join(directory, `.tmp-${captureId}`);
+        await mkdir(staging);
+        slots.push({ captureId, staging, target: path.join(staging, `${captureId}.png`) });
+      }
+    } catch (error) {
+      this.discardExports(slots);
+      throw captureError("ARTIFACT_WRITE_FAILED", `Could not create an image staging directory: ${error.message}`, { stage: "store" });
+    }
+    return slots;
+  }
+
+  /** Removes the staging directories stageExports made, whatever is left in them. */
+  discardExports(slots) {
+    for (const slot of slots) {
+      try {
+        clearStaging(slot.staging, this.readdir);
+      } catch (error) {
+        if (error.code !== "ENOENT") this.log(`drive-it: could not remove image staging ${slot.staging}: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Publishes one image a dry run exported to a staged target, as a capture is published. Its sidecar carries
+   * dryRun: true and the run id, so a kept image is never read as the model's actual state.
+   */
+  async publishExport(slot, { pixelSize, purpose, runId, revit, document, view, fitDirection }) {
+    if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; the image was discarded.", { stage: "store" });
+    const { bytes, dimensions } = await readExport(slot.target, pixelSize);
+    const directory = path.dirname(slot.staging);
+    const imageName = `${slot.captureId}.png`;
+    const image = path.join(directory, imageName);
+    const sidecar = path.join(directory, `${slot.captureId}.json`);
+    const metadata = {
+      schema: SIDECAR_SCHEMA,
+      captureId: slot.captureId,
+      sessionId: this.sessionId,
+      createdAt: new Date().toISOString(),
+      purpose,
+      relatedRunIds: [runId],
+      dryRun: true,
+      runId,
+      retention: this.retentionFor(false),
+      image: {
+        path: displayPath(REFERENCE_DIRECTORY, this.sessionId, imageName),
+        mimeType: "image/png",
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        byteSize: bytes.length,
+        width: dimensions.width,
+        height: dimensions.height,
+      },
+      revit,
+      document: {
+        uniqueId: document?.uniqueId ?? null,
+        title: document?.title ?? null,
+        path: document?.path ?? null,
+        kind: document?.kind ?? null,
+      },
+      view: { id: view.id ?? null, uniqueId: view.uniqueId ?? null, name: view.name ?? null, type: view.type ?? null },
+      export: {
+        mechanism: EXPORT_MECHANISM,
+        requestedPixelSize: pixelSize,
+        fitDirection: fitDirection ?? null,
+        temporaryViewCreated: false,
+        transactionStarted: false,
+        documentModifiedBefore: null,
+        documentModifiedAfter: null,
+      },
+    };
+    let published = false;
+    try {
+      await rename(slot.target, image);
+      published = true;
+      await this.writeAtomic(sidecar, metadata, `.${slot.captureId}.json.${randomBytes(4).toString("hex")}.tmp`);
+    } catch (error) {
+      if (published) await unlink(image).catch(() => {});
+      throw captureError("ARTIFACT_WRITE_FAILED", `The image was exported but could not be saved: ${error.message}`, { stage: "store" });
+    }
+    return { metadata, bytes, absolutePath: image, sidecarPath: sidecar };
   }
 
   /** Normal shutdown: removes this session's unretained pairs and, once empty, its directory. */

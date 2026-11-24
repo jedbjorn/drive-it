@@ -120,7 +120,7 @@ public sealed class RevitBroker
             return;
         }
 
-        var run = new HeldRun(request.Id, request.Hold.DisplayName, request.Hold.TimeLimitMs);
+        var run = new HeldRun(request.Id, request.Hold.DisplayName, request.Hold.TimeLimitMs, request.Hold.DryRun);
         Remember(run);
         holdHandler.Prepare(run);
         var raised = holdEvent.Raise();

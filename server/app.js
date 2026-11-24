@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { apiReference, apiVersion, BRIDGE_GUIDANCE, BUILT_IN_DOCUMENTS_GUIDANCE, GUARDRAIL_STATEMENT, SAFETY_AND_ABILITY } from "./reference.js";
-import { Runtime } from "./runtime.js";
+import { readFile } from "node:fs/promises";
+import { apiReference, apiVersion, BRIDGE_GUIDANCE, BUILT_IN_DOCUMENTS_GUIDANCE, DRY_RUN_GUIDANCE, GUARDRAIL_STATEMENT, SAFETY_AND_ABILITY } from "./reference.js";
+import { DRY_RUN_VIEW_LIMIT, Runtime } from "./runtime.js";
 import { revitContent } from "./content.js";
 import { executeBroker, readSession, resolveProcessId, REVIT_VERSION_NAMES, sessionError } from "./session.js";
 import { launchRootFrom, MAX_MARK_CATEGORIES, NOT_MARKED_REASONS, PIXEL_SIZE, ReferenceImages, retentionFrom } from "./capture.js";
@@ -63,6 +64,9 @@ function statusGuidance(receipt) {
   if (receipt.status === "denied") {
     return "DENIED BY THE USER: do not retry this request; ask the user how they want to proceed.\n";
   }
+  if (receipt.dryRun) {
+    return `DRY RUN, ${receipt.rolledBack ? "rolled back" : "NOT fully rolled back"}: compare actions, checks and images with the request. Nothing was kept; to apply it, run the same call again without dryRun.\n`;
+  }
   return "";
 }
 
@@ -88,7 +92,10 @@ export function serverInstructions(mode) {
   const devRule = mode === DEV ? `\n\n${DEV_MODE_RULE}` : "";
   return `Drive It drives a live Autodesk Revit ${REVIT_VERSION_NAMES} session. Call get_revit_session first (it reports the selected session's version), model with execute_script, and keep its receipts and checks as the authoritative record. When the user refers to the model or family they have open, start the script with revit.get_active_document(), and call get_api_reference for the built-in primitives before writing raw batches. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}${devRule}
 
-${bridgeInstructions(mode)}`;
+${bridgeInstructions(mode)}
+
+Dry run: a script can be rehearsed before it is kept.
+${DRY_RUN_GUIDANCE.map(line => `- ${line}`).join("\n")}`;
 }
 
 export const SERVER_INSTRUCTIONS = serverInstructions(STANDARD);
@@ -111,6 +118,8 @@ export function createDriveItServer(options = {}) {
     retention: options.referenceRetention ?? retentionFrom(process.env.DRIVE_IT_REFERENCE_RETENTION),
     brokerExecutor: options.brokerExecutor || executeBroker,
   });
+  // A dry run publishes its images where captures go (spec #13 "What Comes Back").
+  runtime.references ??= references;
 
   server.registerTool("get_revit_session", {
     description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user (null until the user picks one in the Drive-It window; ask them to), Revit's installed project templates, family template folders, and library folders, and the install mode (standard, or dev: an administrator installed Drive-It with no guardrails). Use these real paths instead of guessing file names.",
@@ -144,7 +153,7 @@ export function createDriveItServer(options = {}) {
   });
 
   server.registerTool("execute_script", {
-    description: "Run inline Python or an exact saved script revision in the Python worker. Its file and typed Revit effects are recorded in a durable receipt; the server instructions say which guardrails apply in this install.",
+    description: "Run inline Python or an exact saved script revision in the Python worker. Its file and typed Revit effects are recorded in a durable receipt; the server instructions say which guardrails apply in this install. With dryRun the run is a rehearsal: Revit applies the changes, the receipt reports them with the dry run actions, warnings and images of the views named, then every change is rolled back and file writes are skipped.",
     inputSchema: {
       processId: processId.optional().describe("Windows process ID of the selected Revit.exe; omit it to use the only running Revit"),
       displayName: z.string().trim().min(1).max(200).describe("Required. One plain-language line, written for the user, saying what this run does to their files or model, e.g. \"Add Level 3 at 24 ft to the tower model\". Shown in the Drive-It operator window's run history and approval requests"),
@@ -154,6 +163,14 @@ export function createDriveItServer(options = {}) {
       document: document.optional().describe("Optional model path and broker-issued document handle"),
       idempotencyKey: z.string().min(1).max(200).optional().describe("Replay key; completed runs return their original receipt. To resume a run that returned status pending, call again with the same idempotencyKey and the same request; a new key starts a new request that needs a new approval"),
       timeoutMs: z.number().int().positive().max(600000).optional().describe("This run's time limit in ms, default 30000 (or the user's script time limit when that is lower). It may not exceed the script time limit the user sets in the Drive-It window (120 s unless changed, 10 to 600 s); a larger value is rejected with the limit. Run a long task as a chain of scripts, each within the limit"),
+      dryRun: z.union([z.boolean(), z.object({
+        views: z.array(z.union([z.string().regex(/^[1-9][0-9]{0,18}$/), z.number().int().positive().max(Number.MAX_SAFE_INTEGER)]))
+          .max(DRY_RUN_VIEW_LIMIT).optional()
+          .describe(`Up to ${DRY_RUN_VIEW_LIMIT} view ids to export in the would-be state, as capture_revit_view takes them; the view ids of the run's documents, then the active document's`),
+        createdViews: z.boolean().optional().describe(`Also export views the script itself creates, in the same limit of ${DRY_RUN_VIEW_LIMIT}`),
+        pixelSize: z.number().int().min(PIXEL_SIZE.min).max(PIXEL_SIZE.max).optional()
+          .describe(`Longer image side in pixels for every image, ${PIXEL_SIZE.min}-${PIXEL_SIZE.max}, default ${PIXEL_SIZE.default}`),
+      }).strict()]).optional().describe("Rehearse this call: true, or {views, createdViews, pixelSize} for images. Revit applies the script's changes, then every change is rolled back; save, save-as, close, delete-file and bridge calls that write files (exports) are refused with not_allowed_in_dry_run, file writes are skipped and listed. The time limit covers the script and the images. Part of the idempotency key's request: a dry run's key never answers a real run. Run the same call again without dryRun to apply it"),
     },
     // Must list every receipt field: MCP clients reject structured content with undeclared properties.
     outputSchema: {
@@ -209,13 +226,44 @@ export function createDriveItServer(options = {}) {
       error: z.unknown().nullable(),
       startedAt: z.string(),
       completedAt: z.string().nullable(),
+      // Spec #13. Optional only so receipts stored before dry runs still replay; new receipts always carry dryRun.
+      dryRun: z.boolean().optional().describe("true on a dry run's receipt: everything it reports was rolled back"),
+      rehearsedBy: z.string().nullable().optional().describe("On a real run: the dry run that allowed it, or null"),
+      rolledBack: z.boolean().optional().describe("On a dry run: true when every document it touched was restored"),
+      images: z.array(z.object({
+        viewId: z.string().nullable(),
+        name: z.string().nullable(),
+        type: z.string().nullable(),
+        document: z.string().nullable(),
+        pixelSize: z.number().int().optional(),
+        width: z.number().int().optional(),
+        height: z.number().int().optional(),
+        path: z.string().optional(),
+        sidecarPath: z.string().optional(),
+        error: z.string().optional(),
+        message: z.string().optional(),
+      }).passthrough()).optional().describe("On a dry run: one entry per view exported in the would-be state, its PNG path, or the capture error code"),
+      skippedFileWrites: z.array(z.object({ operation: z.string(), path: z.string(), outsideRoot: z.boolean() })).optional()
+        .describe("On a dry run: each file write skipped, and whether the real run will need an outside-root decision for it"),
+      notes: z.array(z.string()).optional().describe("On a dry run: what the receipt's ids and status mean after the rollback"),
+      actions: z.array(z.record(z.string(), z.unknown())).optional()
+        .describe("On a dry run that succeeded: per document, the elements it would create, modify (values before and after, moved) and delete, and those Revit touched"),
+      worksharing: z.array(z.record(z.string(), z.unknown())).optional()
+        .describe("On a dry run that changed a workshared document: whether borrowed elements were released, the error when not, and the ids the dry run borrowed"),
     },
   }, async input => {
     try {
       const receipt = await runtime.execute({ ...input, processId: await processResolver(input.processId) });
+      // A dry run's images return inline, as captures do; one deleted since (a replay after the session) is left out.
+      const images = [];
+      for (const image of receipt.dryRun ? receipt.images ?? [] : []) {
+        if (!image.path) continue;
+        const bytes = await readFile(image.path).catch(() => null);
+        if (bytes) images.push({ type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
+      }
       return {
         isError: ["failed", "timed_out", "partially_applied"].includes(receipt.status) || undefined,
-        content: [{ type: "text", text: `${statusGuidance(receipt)}${JSON.stringify(receipt)}` }],
+        content: [...images, { type: "text", text: `${statusGuidance(receipt)}${JSON.stringify(receipt)}` }],
         structuredContent: receipt,
       };
     } catch (error) {
@@ -294,6 +342,7 @@ export function createDriveItServer(options = {}) {
         affectedFiles: z.array(z.unknown()),
         affectedElements: z.array(z.unknown()),
         createdViews: z.array(z.unknown()),
+        dryRun: z.boolean().describe("A dry run: listed, never checked, never promotion evidence"),
         error: z.unknown().nullable(),
         startedAt: z.string(),
         completedAt: z.string().nullable(),
@@ -303,7 +352,7 @@ export function createDriveItServer(options = {}) {
   }, input => attempt(async () => toolResult(await scripts.get(input))));
 
   server.registerTool("promote_script", {
-    description: "Promote an exact draft revision to active using a checked successful run of that exact revision in this workspace: status succeeded, at least one check, every check passed, matching code hash and document kind. No approval is required. Rejections leave the draft unchanged and list unmet conditions.",
+    description: "Promote an exact draft revision to active using a checked successful real run of that exact revision in this workspace: status succeeded, not a dry run, at least one check, every check passed, matching code hash and document kind. No approval is required. Rejections leave the draft unchanged and list unmet conditions.",
     inputSchema: {
       scriptId,
       revision: z.number().int().positive(),
@@ -470,7 +519,7 @@ export function createDriveItServer(options = {}) {
   });
 
   server.registerTool("get_api_reference", {
-    description: "Return local versioned Drive It Python operation references, including the Revit API bridge, with its safety and ability trade-offs and guidance; no external reference service is used. The version names the selected Revit session's version (processId, or the only running Revit); with no session selected it names every supported version, whose built-ins are the same.",
+    description: "Return local versioned Drive It Python operation references, including the Revit API bridge, with its safety and ability trade-offs and guidance, and the dry run guidance; no external reference service is used. The version names the selected Revit session's version (processId, or the only running Revit); with no session selected it names every supported version, whose built-ins are the same.",
     inputSchema: {
       name: z.string().optional().describe("Optional exact callable name, such as revit.create_level"),
       processId: processId.optional().describe("Windows process ID of the selected Revit.exe; omit it to use the only running Revit"),
@@ -479,6 +528,7 @@ export function createDriveItServer(options = {}) {
       version: z.string(),
       safety: z.array(z.string()).describe("Safety and ability: what the API bridge can do and what it costs"),
       guidance: z.array(z.string()).describe("How to work with the API bridge"),
+      dryRun: z.array(z.string()).describe("When and how to rehearse a script with execute_script's dryRun"),
       entries: z.array(z.object({
         name: z.string(),
         apiVersion: z.string(),
@@ -492,7 +542,7 @@ export function createDriveItServer(options = {}) {
   }, async ({ name, processId }) => {
     // The reference is local: without a session (none running, several and no processId, busy) it still answers.
     const session = await processResolver(processId).then(sessionReader).catch(() => null);
-    const result = { version: apiVersion(session?.version), safety: SAFETY_AND_ABILITY, guidance: BRIDGE_GUIDANCE, entries: apiReference(name, session?.version) };
+    const result = { version: apiVersion(session?.version), safety: SAFETY_AND_ABILITY, guidance: BRIDGE_GUIDANCE, dryRun: DRY_RUN_GUIDANCE, entries: apiReference(name, session?.version) };
     return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
   });
 

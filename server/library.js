@@ -61,9 +61,10 @@ export function summarize(revision) {
   };
 }
 
-// A run counts as promotion evidence only with at least one check and every check passed.
+// A run counts as promotion evidence only with at least one check and every check passed. A dry run never does
+// (spec #13 "Receipts and the Library"): its changes were rolled back.
 export function checkedSuccess(receipt) {
-  return receipt.status === "succeeded" && Array.isArray(receipt.checks)
+  return receipt.status === "succeeded" && receipt.dryRun !== true && Array.isArray(receipt.checks)
     && receipt.checks.length > 0 && receipt.checks.every(check => check.passed === true);
 }
 
@@ -326,6 +327,7 @@ export class ScriptCatalog {
         affectedFiles: receipt.affectedFiles,
         affectedElements: receipt.affectedElements,
         createdViews: receipt.createdViews ?? [],
+        dryRun: receipt.dryRun === true,
         error: receipt.error,
         startedAt: receipt.startedAt,
         completedAt: receipt.completedAt,
@@ -365,6 +367,7 @@ export class ScriptCatalog {
         require("same_script", receipt.savedScript?.scriptId === scriptId, scriptId, receipt.savedScript?.scriptId ?? null);
         require("same_revision", receipt.savedScript?.revision === row.revision, row.revision, receipt.savedScript?.revision ?? null);
         require("same_code_hash", receipt.codeHash === row.codeHash && receipt.savedScript?.codeHash === row.codeHash, row.codeHash, receipt.codeHash);
+        require("real_run", receipt.dryRun !== true, "a real run", "a dry run");
         require("succeeded", receipt.status === "succeeded", "succeeded", receipt.status);
         require("has_checks", Array.isArray(receipt.checks) && receipt.checks.length > 0, "at least one check", receipt.checks?.length ?? 0);
         const failed = (receipt.checks || []).filter(check => check.passed !== true).map(check => check.name);
