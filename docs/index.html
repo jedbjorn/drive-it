@@ -1,36 +1,39 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Drive It is an open-source MCP server and add-in for Autodesk Revit 2026. Connect Claude, Codex, or another Model Context Protocol client to Revit on your Windows workstation.">
-  <meta name="theme-color" content="#14232c">
+  <meta name="description" content="Drive-It connects Claude, ChatGPT or Codex to Autodesk Revit 2026 on your Windows PC. Ask for a model in plain words, watch each script run, and roll back what fails.">
+  <meta name="theme-color" content="#172033">
   <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Drive It">
-  <meta property="og:title" content="Drive It – MCP server and add-in for Autodesk Revit">
-  <meta property="og:description" content="An open-source MCP server and add-in for Revit 2026. Connect Claude, Codex, or another MCP client to Revit on the same Windows workstation.">
+  <meta property="og:site_name" content="Drive-It">
+  <meta property="og:title" content="Drive-It – Give your AI agent a Revit session">
+  <meta property="og:description" content="Drive-It connects Claude, ChatGPT or Codex to Autodesk Revit 2026 on your Windows PC. Watch each script run, and roll back what fails.">
+  <meta property="og:url" content="https://drive-it.designs-os.com/">
   <meta property="og:image" content="https://drive-it.designs-os.com/images/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Drive It: give your MCP client a Revit session">
+  <meta property="og:image:alt" content="Drive-It: give your AI agent a Revit session">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://drive-it.designs-os.com/images/og-image.png">
-  <meta name="twitter:title" content="Drive It – MCP server and add-in for Autodesk Revit">
-  <meta name="twitter:description" content="An open-source MCP server and add-in for Revit 2026. Connect Claude, Codex, or another MCP client to Revit on the same Windows workstation.">
-  <meta property="og:url" content="https://drive-it.designs-os.com/">
+  <meta name="twitter:image:alt" content="Drive-It: give your AI agent a Revit session">
+  <meta name="twitter:title" content="Drive-It – Give your AI agent a Revit session">
+  <meta name="twitter:description" content="Drive-It connects Claude, ChatGPT or Codex to Autodesk Revit 2026 on your Windows PC. Watch each script run, and roll back what fails.">
   <meta name="robots" content="index, follow, max-image-preview:large">
-  <title>Drive It – MCP server and add-in for Autodesk Revit</title>
+  <title>Drive-It – Give your AI agent a Revit session</title>
   <link rel="canonical" href="https://drive-it.designs-os.com/">
+  <link rel="icon" href="assets/drive-it-mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/site.js" defer></script>
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     "@id": "https://drive-it.designs-os.com/#app",
-    "name": "Drive It",
-    "alternateName": "Drive It MCP server for Revit",
+    "name": "Drive-It",
+    "alternateName": "Drive-It MCP server for Revit",
     "url": "https://drive-it.designs-os.com/",
-    "description": "Drive It is an open-source MCP server and add-in for Autodesk Revit 2026. Connect Claude, Codex, or another Model Context Protocol client to Revit on your Windows workstation.",
+    "description": "Drive-It is an open-source MCP server and add-in for Autodesk Revit 2026. It connects Claude, ChatGPT, Codex or another Model Context Protocol client to Revit on your Windows PC.",
     "applicationCategory": "DesignApplication",
     "operatingSystem": "Windows",
     "softwareRequirements": "Autodesk Revit 2026",
@@ -41,13 +44,14 @@
       "price": "0",
       "priceCurrency": "USD"
     },
-    "downloadUrl": "https://github.com/jedbjorn/drive-it/releases",
+    "downloadUrl": "https://github.com/jedbjorn/drive-it/releases/latest",
     "codeRepository": "https://github.com/jedbjorn/drive-it",
     "softwareHelp": {
       "@type": "CreativeWork",
-      "url": "https://github.com/jedbjorn/drive-it#build-and-install"
+      "url": "https://github.com/jedbjorn/drive-it#install"
     },
     "image": "https://drive-it.designs-os.com/images/og-image.png",
+    "screenshot": "https://drive-it.designs-os.com/images/drive-it-window.png",
     "publisher": {
       "@type": "Organization",
       "@id": "https://designs-os.com/#org",
@@ -62,110 +66,280 @@
 
   <header class="site-header">
     <div class="container header-inner">
-      <a class="brand" href="#top" aria-label="Drive It home">
-        <span class="brand-mark" aria-hidden="true">DI</span>
-        <span><strong>Drive It</strong><small>MCP for Autodesk Revit</small></span>
+      <a class="brand" href="#top" aria-label="Drive-It home">
+        <img src="assets/drive-it-mark.svg" alt="" width="42" height="42">
+        <span class="brand-type">
+          <strong>Drive-It</strong>
+          <span>AI agents for Autodesk Revit</span>
+        </span>
       </a>
-      <nav aria-label="Main navigation">
-        <a href="#overview">Overview</a>
-        <a href="#how-it-works">How it works</a>
-        <a href="#setup">Setup</a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <a href="#run">One real run</a>
+        <a href="#features">Features</a>
+        <a href="#install">Install</a>
+        <a href="#window">In charge</a>
+        <a href="#docs">Docs</a>
       </nav>
-      <a class="github-link" href="https://github.com/jedbjorn/drive-it">GitHub ↗</a>
+      <a class="github-link" href="https://github.com/jedbjorn/drive-it">
+        GitHub <span aria-hidden="true">↗</span>
+      </a>
     </div>
   </header>
 
   <main id="main">
     <section class="hero">
-      <div class="container hero-grid">
-        <div>
-          <p class="eyebrow">Open source · Revit 2026 · Windows</p>
-          <h1>Give your MCP client a <span>Revit session.</span></h1>
-          <p class="hero-lede">Drive It connects Model Context Protocol clients to Autodesk Revit through a local Node.js server and a native add-in. It works with Claude Desktop, Claude Code, and Codex.</p>
+      <div class="container">
+        <div class="hero-copy">
+          <p class="eyebrow hero-eyebrow"><span aria-hidden="true"></span> MCP server and add-in for Revit 2026</p>
+          <h1>Give your AI agent<br>a <span><em>Revit session.</em></span></h1>
+          <p class="hero-lede">Drive-It connects Claude, ChatGPT or Codex to the Revit running on your own PC. Ask for a model in plain words. The agent writes small scripts, Drive-It runs them in Revit, and you can see every one.</p>
           <div class="button-row">
-            <a class="button primary" href="https://github.com/jedbjorn/drive-it/releases">Get the Windows alpha →</a>
-            <a class="button secondary" href="https://github.com/jedbjorn/drive-it">Explore on GitHub ↗</a>
+            <a class="button button-primary" href="https://github.com/jedbjorn/drive-it/releases/latest" data-msi>Download for Windows <span aria-hidden="true">↓</span></a>
+            <a class="button button-secondary" href="https://github.com/jedbjorn/drive-it">Explore on GitHub <span aria-hidden="true">↗</span></a>
           </div>
-          <ul class="hero-notes" aria-label="Project highlights">
+          <ul class="hero-notes" aria-label="Installation highlights">
+            <li>Per-user install</li>
+            <li>No admin rights required</li>
             <li>MIT licensed</li>
-            <li>Local stdio transport</li>
-            <li>Current-user named pipe</li>
           </ul>
         </div>
-        <div class="session-card" role="group" aria-label="Example Revit session response">
-          <div class="session-title"><span></span> get_revit_session</div>
-          <pre>{
-  <b>"processId"</b>: 12345,
-  <b>"version"</b>: "2026",
-  <b>"build"</b>: "26.4.10.51"
-}</pre>
-          <p>One call identifies the selected Revit process and its version.</p>
-        </div>
+
+        <figure class="hero-shot" id="video">
+          <div class="window-bar" aria-hidden="true">
+            <span class="window-dots"><i></i><i></i><i></i></span>
+            <span>A real Drive-It run in Autodesk Revit 2026</span>
+            <span>DRIVE-IT</span>
+          </div>
+          <!--
+            The video. Put the YouTube id in data-youtube-id. site.js asks YouTube whether the video is
+            public: until it is, the poster shows with the "coming soon" label; once it is, the play
+            button appears, with no new deploy. data-live-at (an ISO date and time) is optional: it puts
+            the launch time on the label and is the fallback when the check itself is blocked.
+          -->
+          <div class="video" data-youtube-id="M_UawEojVx4" data-live-at="">
+            <img src="images/video-poster.jpg" alt="A colour street elevation of a small shotgun house in Revit, with a porch, doors, steps and rails" width="1600" height="900" fetchpriority="high">
+            <button class="video-play" type="button" aria-label="Play the Drive-It video" hidden><span aria-hidden="true">▶</span></button>
+            <span class="video-soon">Video coming soon</span>
+          </div>
+          <figcaption>One request, 23 minutes, a modeled house: the run in 96 seconds. <a class="video-link" href="https://www.youtube.com/@Designs-OS" hidden>Watch on YouTube</a></figcaption>
+        </figure>
       </div>
     </section>
 
-    <section class="facts" aria-label="Current status">
+    <section class="facts" aria-label="Product highlights">
       <div class="container fact-grid">
-        <div><strong>Early alpha</strong><span>Session, script, and reference tools</span></div>
-        <div><strong>Local by design</strong><span>MCP client and Revit share one PC</span></div>
-        <div><strong>Hosted CI</strong><span>No local runner required</span></div>
+        <div><strong>Works with the agent you have</strong><span>Claude, ChatGPT and Codex</span></div>
+        <div><strong>Runs on your PC</strong><span>Drive-It, your agent app and Revit share one workstation</span></div>
+        <div><strong>Every run leaves a receipt</strong><span>What ran, what changed, how it ended</span></div>
       </div>
     </section>
 
-    <section class="section" id="overview">
+    <section class="section run-section" id="run" aria-labelledby="run-title">
       <div class="container">
-        <p class="eyebrow">A small, inspectable bridge</p>
-        <h2>Start with the Revit you already have open.</h2>
-        <p class="section-lede">Drive It works with the Revit home screen or an open model. The alpha has three MCP tools: one reads the session, one runs a script through typed document and model operations, and one returns the API reference.</p>
-        <div class="card-grid">
-          <article><span>01</span><h3>Choose a process</h3><p>Pass the Windows process ID for the Revit instance your client should query.</p></article>
-          <article><span>02</span><h3>Read the session</h3><p>The add-in returns the process ID, Revit version, and build as structured MCP output.</p></article>
-          <article><span>03</span><h3>Run a script</h3><p>Scripts work inside the workspace folder you choose, ask before reaching outside it, and leave a receipt of each run.</p></article>
+        <div class="section-heading">
+          <p class="eyebrow">One real run</p>
+          <h2 id="run-title">One request. A modeled house.</h2>
+          <p>We asked Claude to draw a simple New Orleans shotgun house, and later to open the files when it was done. About 23 minutes after the request, Revit had walls, a roof, a porch, doors and windows, and sheets with a door schedule.</p>
+        </div>
+
+        <dl class="stat-grid">
+          <div class="stat">
+            <dt>messages from the user</dt>
+            <dd class="stat-value">2</dd>
+            <dd class="stat-note">The request, and one more while the agent was working</dd>
+          </div>
+          <div class="stat">
+            <dt>script runs</dt>
+            <dd class="stat-value">70</dd>
+            <dd class="stat-note">55 succeeded, 4 partly applied, 11 failed. After a failure the agent read the error and tried again.</dd>
+          </div>
+          <div class="stat">
+            <dt>Revit paused, in total</dt>
+            <dd class="stat-value">53<small>s</small></dd>
+            <dd class="stat-note">Out of a 23-minute run. Revit is free between scripts.</dd>
+          </div>
+          <div class="stat">
+            <dt>estimated API cost</dt>
+            <dd class="stat-value"><small>$</small>8</dd>
+            <dd class="stat-note">An estimate, likely $5–11. Claude Opus 5.5 with prompt caching.</dd>
+          </div>
+        </dl>
+        <p class="fine-print">The cost is an estimate, not a bill. The windows in the 3D view were fixed in a short follow-up after the run.</p>
+
+        <div class="result-grid">
+          <figure>
+            <img src="images/result-3d.jpg" alt="A 3D view of the house in Revit: a long clapboard side wall with three double-hung windows, on brick piers" width="1200" height="619" loading="lazy">
+            <figcaption>Walls, roof, porch, doors and windows</figcaption>
+          </figure>
+          <figure>
+            <img src="images/result-elevation.jpg" alt="The street elevation in colour: a porch with four posts, two doors, steps and rails" width="1200" height="705" loading="lazy">
+            <figcaption>The street elevation, in colour</figcaption>
+          </figure>
+          <figure>
+            <img src="images/result-cover-sheet.jpg" alt="Sheet G001 in Revit: a shaded 3D view of the house on a title block that reads Bywater Shotgun House" width="1200" height="619" loading="lazy">
+            <figcaption>A cover sheet on its own title block</figcaption>
+          </figure>
         </div>
       </div>
     </section>
 
-    <section class="section dark" id="how-it-works">
+    <section class="section features" id="features">
       <div class="container">
-        <p class="eyebrow">How it works</p>
-        <h2>Four local pieces. One clear path.</h2>
-        <ol class="flow">
-          <li><strong>MCP client</strong><span>Launches the server over stdio</span></li>
-          <li><strong>Node.js server</strong><span>Registers the MCP tools</span></li>
-          <li><strong>Named pipe</strong><span>Connects to the selected process</span></li>
-          <li><strong>Revit add-in</strong><span>Runs each request inside Revit</span></li>
+        <div class="section-heading">
+          <p class="eyebrow">See it. Stop it. Undo it.</p>
+          <h2>You can see what the agent is doing, and what it did.</h2>
+          <p>An agent that changes your model should not be a black box. Drive-It names every script, keeps a record of every run, and puts back what a failed run changed.</p>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-number">01</span>
+            <h3>Watch it work</h3>
+            <p>While a script changes the model, a small window over Revit names it in plain words, shows a timer, and offers <strong>Stop</strong>.</p>
+            <a href="https://github.com/jedbjorn/drive-it#revit-api-bridge">How scripts reach Revit <span aria-hidden="true">→</span></a>
+          </article>
+          <article class="feature-card">
+            <span class="feature-number">02</span>
+            <h3>Rollback</h3>
+            <p>A run that fails, is stopped or times out is rolled back, apart from anything it saved first. A run that succeeds is one undo entry in Revit.</p>
+            <a href="https://github.com/jedbjorn/drive-it#safety-and-ability">Safety and ability <span aria-hidden="true">→</span></a>
+          </article>
+          <article class="feature-card">
+            <span class="feature-number">03</span>
+            <h3>Receipts</h3>
+            <p>Every run is kept in a history on your PC: its name, what it changed, Revit's warnings, and whether it succeeded, failed or was only partly applied.</p>
+            <a href="https://github.com/jedbjorn/drive-it#workspace-and-outside-root-decisions">Run history <span aria-hidden="true">→</span></a>
+          </article>
+          <article class="feature-card">
+            <span class="feature-number">04</span>
+            <h3>Guardrails</h3>
+            <p>Scripts work inside the workspace folder you choose. A script that reaches outside it waits for your approval, and each script has a time limit you set.</p>
+            <a href="https://github.com/jedbjorn/drive-it#guardrails">The guardrails <span aria-hidden="true">→</span></a>
+          </article>
+          <article class="feature-card">
+            <span class="feature-number">05</span>
+            <h3>Script library</h3>
+            <p>The agent can save a script that worked. After a checked, successful run it can promote the script, then reuse it by name instead of writing it again.</p>
+            <a href="https://github.com/jedbjorn/drive-it#script-library">Script library <span aria-hidden="true">→</span></a>
+          </article>
+          <article class="feature-card">
+            <span class="feature-number">06</span>
+            <h3>It checks its own work</h3>
+            <p>The agent can export a Revit view as an image and look at what it drew before it tells you it is done.</p>
+            <a href="https://github.com/jedbjorn/drive-it#view-capture">View capture <span aria-hidden="true">→</span></a>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section workflow" id="install">
+      <div class="container">
+        <div class="section-heading section-heading-light">
+          <p class="eyebrow">Install</p>
+          <h2>One installer. No admin rights.</h2>
+          <p>The MSI installs for your Windows user and brings what Drive-It needs with it. It registers Drive-It with the Claude, ChatGPT and Codex apps it finds, and changes nothing else in their settings.</p>
+        </div>
+        <ol class="step-grid step-grid-4">
+          <li>
+            <span class="step-number">1</span>
+            <h3>Run the installer</h3>
+            <p>Download the MSI and run it. If Windows SmartScreen asks first, choose <strong>More info</strong>, then <strong>Run anyway</strong>.</p>
+          </li>
+          <li>
+            <span class="step-number">2</span>
+            <h3>Start Revit 2026</h3>
+            <p>Revit asks about the Drive-It add-in the first time. Choose <strong>Always Load</strong>.</p>
+          </li>
+          <li>
+            <span class="step-number">3</span>
+            <h3>Pick a workspace folder</h3>
+            <p>Open <strong>Drive-It</strong> from the Start Menu or Revit's Add-Ins tab, and choose the folder scripts may work in.</p>
+          </li>
+          <li>
+            <span class="step-number">4</span>
+            <h3>Restart your agent app</h3>
+            <p>Claude, ChatGPT or Codex picks up Drive-It when it restarts. Then ask it for something in Revit.</p>
+          </li>
         </ol>
       </div>
     </section>
 
-    <section class="section" id="setup">
-      <div class="container setup-grid">
-        <div>
-          <p class="eyebrow">Install</p>
-          <h2>One installer. No admin rights.</h2>
-          <p class="section-lede">Download the alpha MSI from the <a href="https://github.com/jedbjorn/drive-it/releases">releases page</a> and run it. It installs for your Windows user and registers Drive It with Claude Desktop, Claude Code, and Codex where it finds them. The alpha is not code-signed yet, so Windows SmartScreen will ask first. To build from source instead, install Node.js 22 or newer and the .NET 8 SDK, then run the commands shown here.</p>
-          <a class="text-link" href="https://github.com/jedbjorn/drive-it#build-and-install">Full setup and MCP configuration →</a>
+    <section class="section panel-section" id="window">
+      <div class="container panel-grid">
+        <figure class="panel-shot">
+          <img src="images/drive-it-window.png" alt="The Drive-It window: the workspace root, the script time limit, outside-root requests waiting for a decision, and the run history with one run's receipt" width="821" height="698" loading="lazy">
+          <figcaption>The Drive-It window, with the receipt of one run</figcaption>
+        </figure>
+        <div class="panel-copy">
+          <p class="eyebrow">The Drive-It window</p>
+          <h2>You stay in charge.</h2>
+          <p>One small window holds the settings and the record. Open it from the Start Menu, or from the Add-Ins tab in Revit.</p>
+          <ul class="check-list">
+            <li>Choose the folder scripts may read and change</li>
+            <li>Set how long one script may run, from 10 to 600 seconds</li>
+            <li>Approve or deny a script that asks to reach outside the folder</li>
+            <li>Read the receipt of any run, including the ones that failed</li>
+          </ul>
+          <a class="text-link" href="https://github.com/jedbjorn/drive-it#workspace-and-outside-root-decisions">Workspace and outside-root decisions <span aria-hidden="true">→</span></a>
         </div>
-        <pre class="code-block"><code>npm ci
-dotnet build src/DriveIt.Revit -c Release</code></pre>
       </div>
     </section>
 
-    <section class="section contribute">
+    <section class="section docs-section" id="docs">
+      <div class="container docs-grid">
+        <div class="docs-intro">
+          <p class="eyebrow">Early, and plain about it</p>
+          <h2>What to know before you start.</h2>
+          <p>Drive-It is in early development. It needs Windows and Autodesk Revit 2026, and it is tested with Claude Opus 5.5 on High thinking. Its rules limit what a script can reach, but they are a guardrail, not a sandbox: use it with an agent and prompts you trust.</p>
+          <a class="text-link" href="https://github.com/jedbjorn/drive-it#install">Read the installation guide <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="doc-links">
+          <a href="https://github.com/jedbjorn/drive-it#safety-and-ability"><span><strong>Safety and ability</strong><small>What a script can do, and what it costs</small></span><span aria-hidden="true">↗</span></a>
+          <a href="https://github.com/jedbjorn/drive-it#guardrails"><span><strong>Guardrails</strong><small>What stays out of a script's reach</small></span><span aria-hidden="true">↗</span></a>
+          <a href="https://github.com/jedbjorn/drive-it#script-library"><span><strong>Script library</strong><small>Save, promote and reuse scripts</small></span><span aria-hidden="true">↗</span></a>
+          <a href="https://github.com/jedbjorn/drive-it#view-capture"><span><strong>View capture</strong><small>How the agent looks at a Revit view</small></span><span aria-hidden="true">↗</span></a>
+          <a href="https://github.com/jedbjorn/drive-it#how-it-works"><span><strong>How it works</strong><small>The MCP server, the named pipe and the add-in</small></span><span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+    </section>
+
+    <section class="download-section">
       <div class="container">
-        <p class="eyebrow">Build it with us</p>
-        <h2>Issues and focused pull requests are welcome.</h2>
-        <p class="section-lede">Tests and builds run on GitHub-hosted Windows runners. Live Revit checks remain separate and explicit.</p>
-        <div class="button-row">
-          <a class="button primary" href="https://github.com/jedbjorn/drive-it/issues">Open an issue</a>
-          <a class="button secondary" href="https://github.com/jedbjorn/drive-it/blob/main/LICENSE">Read the MIT license</a>
+        <div class="download-card">
+          <div>
+            <p class="eyebrow">Ready when you are</p>
+            <h2>Give your agent a Revit session.</h2>
+            <p>Get Drive-It for Revit 2026 on Windows: one MSI, installed for your Windows user. If you use <a href="https://jedbjorn.github.io/rst-c/"><u>RST</u></a>, its tray can install Drive-It and keep it up to date.</p>
+          </div>
+          <div class="download-actions">
+            <div class="button-row">
+              <a class="button button-light" href="https://github.com/jedbjorn/drive-it/releases/latest" data-msi>Download MSI <span aria-hidden="true">↓</span></a>
+            </div>
+            <p class="release-note" data-release-note hidden></p>
+            <a href="https://github.com/jedbjorn/drive-it/releases/latest">See all release options <span aria-hidden="true">→</span></a>
+          </div>
         </div>
       </div>
     </section>
   </main>
 
-  <footer>
-    <div class="container"><span>Drive It · <a href="https://designs-os.com/">Designs/OS</a></span><span>MIT · Revit 2026 · Windows</span></div>
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <a class="brand brand-footer" href="#top" aria-label="Back to top">
+        <img src="assets/drive-it-mark.svg" alt="" width="34" height="34">
+        <span class="brand-type"><strong>Drive-It</strong><span>AI agents for Autodesk Revit</span></span>
+      </a>
+      <p>MCP server and Revit add-in · MIT licensed</p>
+      <div class="footer-links">
+        <a href="https://github.com/jedbjorn/drive-it">GitHub</a>
+        <a href="https://github.com/jedbjorn/drive-it/releases">Releases</a>
+        <a href="https://github.com/jedbjorn/drive-it/blob/main/LICENSE">License</a>
+      </div>
+    </div>
+    <div class="container footer-more">
+      <p>More from <a href="https://designs-os.com/">Designs/OS</a>: <a href="https://jedbjorn.github.io/rst-c/">RST</a> · <a href="https://jedbjorn.github.io/fai-browser/">FAI Browser</a> · <a href="https://subfloor.designs-os.com">Subfloor</a> · <a href="https://jedbjorn.github.io/gantt-it/">Gantt-It</a> · <a href="https://jedbjorn.github.io/splash-it/">Splash-It</a> · <a href="https://jedbjorn.github.io/pick-it/">Pick-It</a> · <a href="https://md-converter.designs-os.com">md-converter</a> · <a href="https://github.com/jedbjorn/storybench">Storybench</a> · <a href="https://jedbjorn.github.io/anj-cloud/">AnJ Cloud</a></p>
+      <p><a href="https://designs-os.com/revit-add-ins/">Compare free Revit add-ins from Designs/OS</a></p>
+    </div>
   </footer>
 </body>
 </html>
