@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { apiReference, API_VERSION, BRIDGE_GUIDANCE, SAFETY_AND_ABILITY } from "./reference.js";
+import { apiReference, API_VERSION, BRIDGE_GUIDANCE, BUILT_IN_DOCUMENTS_GUIDANCE, GUARDRAIL_STATEMENT, SAFETY_AND_ABILITY } from "./reference.js";
 import { Runtime } from "./runtime.js";
 import { revitContent } from "./content.js";
 import { executeBroker, readSession, resolveProcessId, sessionError } from "./session.js";
@@ -72,13 +72,26 @@ const VISUAL_QA_RULE = "After each modeling round and before reporting it comple
 // Element marks guidance, carried by the server instructions and the tool description.
 const MARKS_GUIDANCE = "Element marks are optional and need a scope: pass markCategories with the categories you are working on (up to five), or markElementIds with the ids a run affected, or both; leave both off for a clean visual check. Category names are API names as the legend returns them, such as OST_Walls or OST_Doors. Each numbered red circle maps through marks.legend to an elementId, API category, family, type, and the pixel bounds of the element's visible part. Marks are help, not a list of what exists: no mark, an empty legend, or not_visible does not mean the element is absent or hidden. In a plan, families drawn only as symbols, often doors and windows, usually get no mark; a section, elevation or 3D view may mark them. Marks cover part of the drawing, so judge the model from an unmarked capture and identify elements from a marked one. After a run, pass the affected element ids in markElementIds to see where they are; marks.notMarked gives a reason for each one without a mark. Mark numbers change between captures; carry the elementId forward. Perspective 3D views do not support marks; use an orthographic view. Receipts and structured checks remain the authority.";
 
+// Spec #10 "Visibility": what Dev Mode's instructions say in place of the guardrail guidance.
+const DEV_MODE_RULE = "Dev Mode: an administrator installed Drive-It on a disposable test machine with every guardrail off. There are no refusals and no approvals: nothing waits for a person in the Drive-It window. Scripts run with the signed-in Windows user's full rights; they may import any installed module, install packages, start processes and threads, and read and write any path, and the bridge calls any Revit API member it reaches, including saving, synchronizing with central, printing and script-made transactions. Recovery is the machine's snapshot, not Drive-It, so take care with central models and files other people use. What remains are technical limits: the run's time limit, the rollback of a failed run, the handle cap, and no event or callback implementations.";
+
 // Spec #15: the bridge's safety and ability trade-offs in one paragraph, then how to work with it.
-const BRIDGE_INSTRUCTIONS = `Revit API bridge: scripts also get DB, revit.document, revit.element and revit.transaction, which reach Revit's modeling API in general; get_api_reference describes them. Safety and ability: ${SAFETY_AND_ABILITY.join(" ")}
-${BRIDGE_GUIDANCE.map(line => `- ${line}`).join("\n")}`;
+// Dev Mode leaves out the lines that describe a guardrail.
+function bridgeInstructions(mode) {
+  const keep = line => mode !== DEV || ![GUARDRAIL_STATEMENT, BUILT_IN_DOCUMENTS_GUIDANCE].includes(line);
+  return `Revit API bridge: scripts also get DB, revit.document, revit.element and revit.transaction, which reach Revit's modeling API in general; get_api_reference describes them. Safety and ability: ${SAFETY_AND_ABILITY.filter(keep).join(" ")}
+${BRIDGE_GUIDANCE.filter(keep).map(line => `- ${line}`).join("\n")}`;
+}
 
-export const SERVER_INSTRUCTIONS = `Drive It drives a live Autodesk Revit 2026 session. Call get_revit_session first, model with execute_script, and keep its receipts and checks as the authoritative record. When the user refers to the model or family they have open, start the script with revit.get_active_document(), and call get_api_reference for the built-in primitives before writing raw batches. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}
+/** The server instructions for an install mode, standard or dev. */
+export function serverInstructions(mode) {
+  const devRule = mode === DEV ? `\n\n${DEV_MODE_RULE}` : "";
+  return `Drive It drives a live Autodesk Revit 2026 session. Call get_revit_session first, model with execute_script, and keep its receipts and checks as the authoritative record. When the user refers to the model or family they have open, start the script with revit.get_active_document(), and call get_api_reference for the built-in primitives before writing raw batches. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}${devRule}
 
-${BRIDGE_INSTRUCTIONS}`;
+${bridgeInstructions(mode)}`;
+}
+
+export const SERVER_INSTRUCTIONS = serverInstructions(STANDARD);
 
 const CAPTURE_DESCRIPTION = `Export an existing Revit view to a PNG with Revit's own renderer (Document.ExportImage, not a screenshot) and return the image for you to inspect. Supported: 3D, floor plan, ceiling plan, structural plan, elevation, section, and detail views in RVT and RFA documents; sheets, schedules, legends, drafting views, and view templates are rejected. It does not modify the Revit model; it writes a local reference image (PNG plus JSON metadata) under the server's launch root in _reference-images/<session>, deleted at session end unless retain is true or the operator keeps all captures. The view is exported as it is set up (orientation, crop, visibility); change a view through execute_script first if needed. Omit viewId to capture the document's active view; with a viewId, pass the document it belongs to whenever more than one document is open. Errors list capturable views with their ids. ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}`;
 
@@ -89,7 +102,8 @@ export function createDriveItServer(options = {}) {
   const processResolver = options.processResolver || resolveProcessId;
   const contentReader = options.contentReader || revitContent;
   const modeResolver = options.modeResolver || installMode;
-  const server = new McpServer({ name: "drive-it", version: "0.1.0" }, { instructions: SERVER_INSTRUCTIONS });
+  // options.mode is the resolved install mode (server/index.js); the instructions are fixed when the server starts.
+  const server = new McpServer({ name: "drive-it", version: "0.1.0" }, { instructions: serverInstructions(options.mode ?? STANDARD) });
   // Captured once at startup: later changes to the working directory or the modeling workspace
   // never move reference images.
   const references = options.references || new ReferenceImages({
@@ -130,7 +144,7 @@ export function createDriveItServer(options = {}) {
   });
 
   server.registerTool("execute_script", {
-    description: "Run inline Python or an exact saved script revision in the isolated fixed worker. File and typed Revit effects follow the persistent workspace policy and return a durable receipt.",
+    description: "Run inline Python or an exact saved script revision in the Python worker. Its file and typed Revit effects are recorded in a durable receipt; the server instructions say which guardrails apply in this install.",
     inputSchema: {
       processId: processId.optional().describe("Windows process ID of the selected Revit.exe; omit it to use the only running Revit"),
       displayName: z.string().trim().min(1).max(200).describe("Required. One plain-language line, written for the user, saying what this run does to their files or model, e.g. \"Add Level 3 at 24 ft to the tower model\". Shown in the Drive-It operator window's run history and approval requests"),
@@ -155,6 +169,8 @@ export function createDriveItServer(options = {}) {
         state: z.string(),
         requested: z.union([z.number().int(), z.literal("latest")]),
       }).nullable(),
+      // Optional only so receipts stored before Dev Mode still replay; new receipts always carry it.
+      mode: z.enum([STANDARD, DEV]).optional().describe("The install mode the run ran in: standard, or dev (no guardrails)"),
       status: receiptStatus,
       session: z.record(z.string(), z.unknown()).nullable(),
       document: z.record(z.string(), z.unknown()).nullable(),

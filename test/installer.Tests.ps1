@@ -139,6 +139,12 @@ function Invoke-ModeInstall {
 function Get-ResolvedMode {
     return (& $node (Join-Path $modeApp 'server\mode.js') | ConvertFrom-Json).mode
 }
+function Get-SshExample {
+    # The commented drive-it-ssh entry a dev install adds to mcp.json, or $null.
+    $property = (Get-Content -LiteralPath $modeMcp -Raw | ConvertFrom-Json).PSObject.Properties['//drive-it-ssh']
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
 
 $standard = Invoke-ModeInstall
 $env:DRIVE_IT_DATA_DIR = $modeRoot
@@ -149,6 +155,7 @@ Assert-InstallerTest ([IO.File]::Exists((Join-Path $modeApp 'drive-it-stdio.cmd'
 Assert-InstallerTest (-not (Test-OnUserPath $modeApp)) 'A standard install put drive-it-stdio.cmd on PATH.'
 Assert-InstallerTest ((Get-DriveItWorkspace).root -eq 'C:\DriveIt\default') "A fresh install did not start in C:\DriveIt\default: [$((Get-DriveItWorkspace).root)]."
 Assert-InstallerTest ((Get-ResolvedMode) -eq 'standard') 'The resolver did not say standard.'
+Assert-InstallerTest ($null -eq (Get-SshExample)) 'A standard install wrote the drive-it-ssh example to mcp.json.'
 
 $chosen = Join-Path $FixtureDirectory 'chosen'
 [IO.Directory]::CreateDirectory($chosen) | Out-Null
@@ -170,6 +177,9 @@ Assert-InstallerTest (@($rules | Where-Object { $_.IdentityReference.Value -eq '
 
 Assert-InstallerTest (Test-OnUserPath $modeApp) 'A dev install did not put drive-it-stdio.cmd on PATH.'
 Assert-InstallerTest ((Get-ResolvedMode) -eq 'dev') 'The resolver did not say dev after a dev install.'
+$sshExample = Get-SshExample
+Assert-InstallerTest ($null -ne $sshExample -and $sshExample.command -eq 'ssh' -and (@($sshExample.args) -join ' ') -eq '-T <user>@<host> drive-it-stdio') 'A dev install did not add the commented drive-it-ssh example to mcp.json.'
+Assert-InstallerTest ($null -eq (Get-Content -LiteralPath $modeMcp -Raw | ConvertFrom-Json).mcpServers.PSObject.Properties['drive-it-ssh']) 'The drive-it-ssh example is a live server entry.'
 
 $kept = Invoke-ModeInstall
 Assert-InstallerTest ($kept.mode -eq 'dev') 'A repair without a mode did not keep dev.'
@@ -188,6 +198,7 @@ Assert-InstallerTest ($back.mode -eq 'standard') 'A standard install did not lea
 Assert-InstallerTest (-not [IO.File]::Exists($marker)) 'An elevated standard install did not delete the admin marker.'
 Assert-InstallerTest (-not (Test-OnUserPath $modeApp)) 'Leaving Dev Mode left drive-it-stdio.cmd on PATH.'
 Assert-InstallerTest ((Get-ResolvedMode) -eq 'standard') 'The resolver did not say standard after leaving Dev Mode.'
+Assert-InstallerTest ($null -eq (Get-SshExample)) 'Leaving Dev Mode left the drive-it-ssh example in mcp.json.'
 
 Write-Output 'installer tests passed'
 

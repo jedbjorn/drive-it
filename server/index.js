@@ -1,7 +1,9 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createDriveItServer } from "./app.js";
+import { installMode } from "./mode.js";
 
-const { server, references } = createDriveItServer();
+// The mode is resolved before the server starts, because it chooses the server instructions.
+const { server, references } = createDriveItServer({ mode: await installMode() });
 
 // Normal shutdown removes this session's unretained reference images. The client may close stdin,
 // close the transport, or signal; "exit" covers a natural exit. A hard kill leaves them for the

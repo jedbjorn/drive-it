@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { SERVER_INSTRUCTIONS } from "../server/app.js";
-import { apiReference, BRIDGE_GUIDANCE, SAFETY_AND_ABILITY } from "../server/reference.js";
+import { SERVER_INSTRUCTIONS, serverInstructions } from "../server/app.js";
+import { apiReference, BRIDGE_GUIDANCE, BUILT_IN_DOCUMENTS_GUIDANCE, GUARDRAIL_STATEMENT, SAFETY_AND_ABILITY } from "../server/reference.js";
 import { Runtime } from "../server/runtime.js";
 
 // A stub of the add-in's side of a hold (spec #15): a handle table over a few fake Revit objects,
@@ -724,6 +724,19 @@ test("an absolute path outside the root ends the run pending before Revit is hel
   assert.deepEqual(call.args, [outside], "Revit gets the path the policy decided on");
 });
 
+test("in Dev Mode an absolute path outside the root reaches Revit with no decision", async (t) => {
+  const revit = new StubRevit();
+  const { root, runtime } = await fixture(t, revit, { modeResolver: async () => "dev" });
+  const outside = path.join(path.dirname(root), "outside", "model.rvt");
+  const receipt = await run(runtime, "result = str(DB.ModelPathUtils.ConvertUserVisiblePathToModelPath(args['outside']).file)", { arguments: { outside } });
+  assert.equal(receipt.status, "succeeded", receipt.error?.message);
+  assert.equal(receipt.mode, "dev");
+  assert.equal(receipt.result, outside);
+  assert.deepEqual(receipt.policyRequests, []);
+  assert.deepEqual(receipt.policyDecisionIds, []);
+  assert.deepEqual(await runtime.decisions.list(), []);
+});
+
 test("bridge paths inside the root pass; Revit content is read without a decision but not written", async (t) => {
   const revit = new StubRevit();
   const base = await realpath(await mkdtemp(path.join(tmpdir(), "drive-it-content-")));
@@ -842,6 +855,20 @@ result = {"loaded": loaded, "family": family.Name, "errors": errors, "repr": rep
   ]);
 });
 
+test("Dev Mode's server instructions say there are no refusals or approvals and leave out the guardrail lines", () => {
+  const dev = serverInstructions("dev");
+  assert.equal(serverInstructions("standard"), SERVER_INSTRUCTIONS);
+  assert.doesNotMatch(SERVER_INSTRUCTIONS, /Dev Mode/);
+  assert.match(dev, /no refusals and no approvals/);
+  assert.match(dev, /disposable test machine/);
+  for (const line of [GUARDRAIL_STATEMENT, BUILT_IN_DOCUMENTS_GUIDANCE]) {
+    assert.ok(SERVER_INSTRUCTIONS.includes(line), line);
+    assert.ok(!dev.includes(line), line);
+  }
+  for (const statement of SAFETY_AND_ABILITY.filter(line => line !== GUARDRAIL_STATEMENT)) assert.ok(dev.includes(statement), statement);
+  for (const line of BRIDGE_GUIDANCE.filter(line => line !== BUILT_IN_DOCUMENTS_GUIDANCE)) assert.ok(dev.includes(`- ${line}`), line);
+});
+
 test("the safety and ability statements and the bridge guidance are in the README, the server instructions and get_api_reference", async () => {
   const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
   const section = readme.slice(readme.indexOf("## Safety and ability"), readme.indexOf("\n## ", readme.indexOf("## Safety and ability") + 1));
@@ -937,6 +964,22 @@ except RevitError as error:
   );
   assert.match(receipt.result.error.message, /no handle to a System\.Type/);
   assert.ok(!revit.opened[0].sent.some(message => message.call?.op === "call" && message.call.target?.$path === "Autodesk.Revit.DB.XYZ"), "the answer never reached Revit");
+});
+
+test("in Dev Mode GetType() still answers with text, and passed to Revit it crosses as its DB path", async (t) => {
+  const revit = new StubRevit();
+  const { runtime } = await fixture(t, revit, { modeResolver: async () => "dev" });
+  const source = `
+answer = revit.element(30).GetType()
+point = DB.XYZ(answer, 0, 0)
+result = {"full": answer.FullName, "crossed": point is not None}
+`;
+  const receipt = await run(runtime, source);
+  assert.equal(receipt.status, "succeeded", receipt.error?.message);
+  assert.equal(receipt.mode, "dev");
+  assert.deepEqual(receipt.result, { full: "Autodesk.Revit.DB.Level", crossed: true });
+  const construct = revit.opened[0].sent.find(message => message.call?.op === "call" && message.call.target?.$path === "Autodesk.Revit.DB.XYZ");
+  assert.deepEqual(construct.call.args[0], { $path: "Autodesk.Revit.DB.Level" }, "the type reached Revit, not a refusal");
 });
 
 test("get_api_reference names the calls that leave the session, operators, GetType and errors that name the member", () => {

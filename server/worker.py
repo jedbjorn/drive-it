@@ -34,6 +34,9 @@ _original_scandir = os.scandir
 _original_unlink = os.unlink
 _request_id = 0
 _checks = []
+# Dev Mode (spec #10): set from Node's run message, which carries the mode Node's one resolver
+# (server/mode.js) decided. A script cannot set it. In dev every worker guardrail is off.
+_dev_mode = False
 
 # Modules generated scripts may import; everything else is denied. Pure-Python
 # modules are low risk to add. A native module must first be checked for file,
@@ -112,6 +115,9 @@ def _encode(value):
     if isinstance(value, _Option):
         return dict(value.settings)
     if isinstance(value, _TypeName):
+        if _dev_mode:
+            # Dev Mode: no refusal. The type crosses as its DB path, which Revit takes wherever a type is taken.
+            return {"$path": value.FullName}
         raise RevitError({"status": "failed", "error": {"code": "type_not_allowed", "message": (
             f"{value.FullName} from GetType() is text, not a handle: Drive-It gives a script no handle to a System.Type. "
             "Where Revit takes a type, pass the DB type, for example DB.Wall.")}})
@@ -391,7 +397,7 @@ def _request(method, params):
     return response["result"]
 
 
-def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied):
+def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied, enforce=True):
     original_open = builtins.open
     original_import = builtins.__import__
     original_os_open = os.open
@@ -592,13 +598,15 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
         if call_stack:
             call_stack[-1][1] = (operation, result["requests"][0]["paths"])
 
-    sys.addaudithook(audit)
-    sys.setprofile(profile)
-    sys.setprofile = protected_profile
-    sys.getprofile = protected_getprofile
-    sys.settrace(trace)
-    sys.settrace = protected_trace
-    sys.gettrace = protected_gettrace
+    # Dev Mode: no audit hook, so no file mediation, process refusal or import check; files.* are plain I/O.
+    if enforce:
+        sys.addaudithook(audit)
+        sys.setprofile(profile)
+        sys.setprofile = protected_profile
+        sys.getprofile = protected_getprofile
+        sys.settrace(trace)
+        sys.settrace = protected_trace
+        sys.gettrace = protected_gettrace
     return {
         "open": original_open,
         "os_open": original_os_open,
@@ -812,18 +820,24 @@ def _serializable(value):
         return repr(value)
 
 
-def main():
-    run = json.loads(_protocol_in.readline())
-    policy_pending = RuntimeError
-    policy_denied = PermissionError
-    # Load the allowlist (and its dependencies) before the hook freezes further loads.
-    for name in sorted(ALLOWED_MODULES):
-        try:
-            __import__(name)
-        except ImportError:
-            pass
-    sys.meta_path.insert(0, RuntimeRestriction())
-    policy = _create_file_policy(_protocol_in, _protocol_out, policy_pending, policy_denied)
+def _detach_protocol():
+    """Dev Mode: a process a script starts inherits the worker's standard handles. The protocol moves to
+    descriptors of its own that no child inherits; standard input becomes NUL and standard output goes to
+    stderr, so a child can neither read the protocol nor write into it.
+
+    The protocol input re-opens descriptor 0 directly, so it relies on sys.stdin having buffered nothing past
+    the run line. That holds because Node writes nothing more until the worker sends its first request."""
+    global _protocol_in, _protocol_out
+    _protocol_in = open(os.dup(0), "r", encoding="utf-8")
+    _protocol_out = open(os.dup(1), "w", encoding="utf-8", newline="\n")
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.close(null)
+    os.dup2(2, 1)
+
+
+def _restrict(policy):
+    """Standard mode's guardrails on the running interpreter: mediated files, the import check, no processes or threads."""
     builtins.open = policy["open"]
     builtins.__import__ = policy["import"]
     io.open = policy["open"]
@@ -850,6 +864,27 @@ def main():
     for name in dir(_thread):
         if name.startswith(("start", "_start")):
             setattr(_thread, name, _disabled_thread)
+
+
+def main():
+    global _dev_mode
+    run = json.loads(_protocol_in.readline())
+    _dev_mode = run.get("mode") == "dev"
+    policy_pending = RuntimeError
+    policy_denied = PermissionError
+    if _dev_mode:
+        _detach_protocol()
+    else:
+        # Load the allowlist (and its dependencies) before the hook freezes further loads.
+        for name in sorted(ALLOWED_MODULES):
+            try:
+                __import__(name)
+            except ImportError:
+                pass
+        sys.meta_path.insert(0, RuntimeRestriction())
+    policy = _create_file_policy(_protocol_in, _protocol_out, policy_pending, policy_denied, enforce=not _dev_mode)
+    if not _dev_mode:
+        _restrict(policy)
 
     receipt = {"status": "succeeded", "result": None, "error": None, "checks": _checks}
     stdout = io.StringIO()

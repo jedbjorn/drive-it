@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DecisionStore } from "./decisions.js";
 import { HistoryStore } from "./history.js";
+import { DEV, installMode } from "./mode.js";
 import { ScriptCatalog, validateArguments } from "./library.js";
 import { revitContentFolders } from "./content.js";
 import { executeBroker, openHold, readSession } from "./session.js";
@@ -58,12 +59,13 @@ function transactionLine(transaction) {
 }
 
 export class Runtime {
-  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, holdOpener = openHold, sessionReader = readSession, workerRunner = runWorker, scriptResolver, scripts, contentFolders = revitContentFolders } = {}) {
+  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, holdOpener = openHold, sessionReader = readSession, workerRunner = runWorker, scriptResolver, scripts, contentFolders = revitContentFolders, modeResolver = installMode } = {}) {
     this.workspace = new WorkspaceStore(dataDir);
     this.decisions = new DecisionStore(dataDir);
     this.history = new HistoryStore(dataDir);
     this.settings = new SettingsStore(dataDir);
-    this.policy = new WorkspacePolicy(this.decisions);
+    this.modeResolver = modeResolver;
+    this.policy = new WorkspacePolicy(this.decisions, modeResolver);
     this.pythonPath = pythonPath;
     this.brokerExecutor = brokerExecutor;
     this.holdOpener = holdOpener;
@@ -141,6 +143,8 @@ export class Runtime {
       fingerprint,
       codeHash,
       savedScript,
+      // From the install's resolver only; the request has no say (spec #10 "Mode Selection").
+      mode: await this.modeResolver(),
       status: "failed",
       session: null,
       document: documentWithKind(input.document),
@@ -194,6 +198,7 @@ export class Runtime {
         processId: input.processId,
         document: input.document || null,
         runId,
+        mode: receipt.mode,
         pythonPath: this.pythonPath,
         cwd: temporary,
         timeoutMs: input.timeoutMs || 30000,
@@ -217,7 +222,11 @@ export class Runtime {
       receipt.status = error.code === "RUN_TIMEOUT" ? "timed_out" : "failed";
       receipt.error = { code: error.code || "EXECUTION_FAILED", message: error.message };
     } finally {
-      if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      // In Dev Mode a process the script left running may still use the run's folder (on Windows its
+      // working directory cannot be removed); the folder stays rather than costing the run its receipt.
+      if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(error => {
+        if (receipt.mode !== DEV) throw error;
+      });
     }
     if (context.holdPromise) await this.endHold(receipt, context);
 

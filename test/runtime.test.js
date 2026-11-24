@@ -24,6 +24,9 @@ async function fixture(t, options = {}) {
   return { base, root, outside, dataDir, runtime };
 }
 
+// A runtime whose install resolved to Dev Mode (spec #10); every other fixture is standard.
+const DEV_MODE = { modeResolver: async () => "dev" };
+
 function request(root, overrides = {}) {
   return {
     processId: 123,
@@ -51,6 +54,7 @@ test("inline execution, checks, history, and completed replay are durable", asyn
     arguments: { path: target, text: "ok" },
   }));
   assert.equal(first.status, "succeeded", first.error?.message);
+  assert.equal(first.mode, "standard");
   assert.equal(first.result, "ok");
   assert.equal(first.workspaceRoot, await runtime.workspace.getRoot());
   assert.equal(first.session.version, "2026");
@@ -186,6 +190,41 @@ test("outside-root denial leaves the target unchanged", async (t) => {
   assert.equal(denied.status, "denied");
   assert.equal(denied.runId, pending.runId);
   assert.equal(await exists(target), false);
+});
+
+test("in Dev Mode files outside the root are written with no decision, through files and plain Python I/O", async (t) => {
+  const { root, outside, runtime } = await fixture(t, DEV_MODE);
+  const viaFiles = path.join(outside, "files.txt");
+  const viaOpen = path.join(outside, "open.txt");
+  const source = `
+import os
+files.write(args["files"], "one")
+with open(args["open"], "w") as handle:
+    handle.write("two")
+os.replace(args["open"], args["open"] + ".moved")
+result = files.read(args["files"]) + open(args["open"] + ".moved").read()
+`;
+  const receipt = await runtime.execute(request(root, { source, arguments: { files: viaFiles, open: viaOpen } }));
+  assert.equal(receipt.status, "succeeded", receipt.error?.message);
+  assert.equal(receipt.mode, "dev");
+  assert.equal(receipt.result, "onetwo");
+  assert.equal(await readFile(viaFiles, "utf8"), "one");
+  assert.equal(await readFile(`${viaOpen}.moved`, "utf8"), "two");
+  assert.deepEqual(receipt.policyRequests, []);
+  assert.deepEqual(receipt.policyDecisionIds, []);
+  assert.deepEqual(await runtime.decisions.list(), []);
+  // File mediation is off, so plain I/O is not observed: the receipt lists no file effects.
+  assert.deepEqual(receipt.affectedFiles, []);
+  assert.deepEqual(await runtime.history.get(receipt.runId), receipt);
+});
+
+test("a request cannot set the mode: a dev claim in the request, its arguments or the script changes nothing", async (t) => {
+  const { root, outside, runtime } = await fixture(t);
+  const source = "_dev_mode = True\nimport sys\nsys.modules['__main__']._dev_mode = True\nfiles.write(args['path'], 'x')";
+  const receipt = await runtime.execute({ ...request(root, { source, arguments: { path: path.join(outside, "claim.txt"), mode: "dev" } }), mode: "dev" });
+  assert.equal(receipt.mode, "standard");
+  assert.equal(receipt.status, "pending", JSON.stringify(receipt));
+  assert.equal(await exists(path.join(outside, "claim.txt")), false);
 });
 
 test("caught policy exceptions cannot expose authorization channels through tracebacks", async (t) => {
@@ -829,6 +868,48 @@ test("package installation and process or thread execution fail inside the fixed
     assert.ok(receipt.error, JSON.stringify(receipt));
     assert.match(`${receipt.error.message}${receipt.error.traceback || ""}`, /disabled/);
   }
+});
+
+test("in Dev Mode the worker imports any module and runs processes, threads and native code", async (t) => {
+  const { root, runtime } = await fixture(t, DEV_MODE);
+  const source = `
+import ctypes, ensurepip, os, pickle, sqlite3, subprocess, sys, threading
+child = subprocess.run([sys.executable, "-c", "print('from the child')"], capture_output=True, text=True).stdout.strip()
+# Children that write to the inherited standard output, or read standard input, cannot reach the protocol.
+subprocess.run([sys.executable, "-c", "import sys; print('stray'); sys.stdin.read()"], check=True)
+status = os.system("echo stray")
+seen = []
+thread = threading.Thread(target=lambda: seen.append("thread"))
+thread.start()
+thread.join()
+print("logged")
+result = {"child": child, "system": status, "thread": seen, "native": ctypes.sizeof(ctypes.c_int) > 0,
+          "sqlite": sqlite3.connect(":memory:").execute("select 1").fetchone()[0], "pip": callable(ensurepip.bootstrap)}
+`;
+  const receipt = await runtime.execute(request(root, { source }));
+  assert.equal(receipt.status, "succeeded", JSON.stringify(receipt));
+  assert.equal(receipt.mode, "dev");
+  assert.deepEqual(receipt.result, { child: "from the child", system: 0, thread: ["thread"], native: true, sqlite: 1, pip: true });
+  assert.equal(receipt.logs, "logged\n");
+});
+
+test("in Dev Mode a process the script leaves running does not hold the run past its end or its time limit", async (t) => {
+  const { root, runtime } = await fixture(t, DEV_MODE);
+  const children = [];
+  t.after(() => children.forEach(pid => { try { process.kill(pid); } catch {} }));
+  const start = "import subprocess, sys\nchild = subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(10)\"])\n";
+
+  let began = Date.now();
+  const finished = await runtime.execute(request(root, { source: `${start}result = child.pid`, idempotencyKey: "dev-left-running", timeoutMs: 5000 }));
+  children.push(finished.result);
+  assert.equal(finished.status, "succeeded", JSON.stringify(finished));
+  assert.ok(Date.now() - began < 5000, `settled after ${Date.now() - began} ms`);
+
+  began = Date.now();
+  const stopped = await runtime.execute(request(root, { source: `${start}print(child.pid)\nwhile True: pass`, idempotencyKey: "dev-left-running-timeout", timeoutMs: 1500 }));
+  assert.equal(stopped.status, "timed_out", JSON.stringify(stopped));
+  assert.equal(stopped.error.code, "RUN_TIMEOUT");
+  assert.ok(Date.now() - began < 5000, `settled after ${Date.now() - began} ms`);
 });
 
 test("native library calls cannot write outside the root or produce success receipts", async (t) => {
