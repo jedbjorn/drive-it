@@ -41,7 +41,7 @@ public sealed partial class DocumentDispatcher
             response.WorkspaceRoot = root;
             var prepared = PrepareOperations(application, request);
             var policyRequests = OutsideRootRequests(root, prepared);
-            if (policyRequests.Count > 0 && !AllCovered(request.OutsideRootApproval, policyRequests))
+            if (WorkspacePolicy.DecisionRequired && policyRequests.Count > 0 && !AllCovered(request.OutsideRootApproval, policyRequests))
             {
                 response.Status = "policy_required";
                 response.PolicyRequests = policyRequests;
@@ -766,7 +766,7 @@ public sealed partial class DocumentDispatcher
     private static void RequireAuthorized(BrokerRequest request, string root, string operation, DocumentState state)
     {
         var path = CanonicalDocumentPath(state.Document);
-        if (path is null || WorkspacePolicy.IsInside(root, path)
+        if (!WorkspacePolicy.DecisionRequired || path is null || WorkspacePolicy.IsInside(root, path)
             || WorkspacePolicy.IsCovered(request.OutsideRootApproval, operation, path))
             return;
         throw new RequestRejectedException("policy_required",

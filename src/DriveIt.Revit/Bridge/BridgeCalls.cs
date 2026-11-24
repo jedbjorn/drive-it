@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Autodesk.Revit.DB;
 using DriveIt.Core.Bridge;
+using DriveIt.Core.Mode;
 
 namespace DriveIt.Revit.Bridge;
 
@@ -27,7 +28,7 @@ internal sealed record OutValues(IReadOnlyList<object?> Values);
 /// Resolves a script's bridge calls by reflection, on Revit's thread, against the run's handle table.
 /// Numbers, strings, booleans and null cross by value; everything else is a handle that lasts for the run.
 /// </summary>
-internal sealed class BridgeCalls(Func<bool> transactionOpen)
+internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpen)
 {
     public const string RootNamespace = "Autodesk.Revit.DB";
     private const int DefaultChunk = 256;
@@ -46,14 +47,75 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
 
     private readonly Dictionary<long, object> objects = new();
     private readonly Dictionary<object, long> ids = new(ReferenceEqualityComparer.Instance);
+    /// <summary>The Transaction, SubTransaction and TransactionGroup objects a Dev Mode script made, and their documents, in the order it made them.</summary>
+    private readonly List<(object Owned, Document Document)> scriptTransactions = [];
     private long nextId;
 
     public int HandleCount => objects.Count;
 
+    /// <summary>True while a transaction or group a Dev Mode script made is still started.</summary>
+    public bool ScriptTransactionOpen => scriptTransactions.Any(script => Status(script.Owned) == TransactionStatus.Started);
+
+    /// <summary>The documents on which a transaction or group a Dev Mode script made is still started.</summary>
+    public IEnumerable<Document> ScriptTransactionDocuments =>
+        scriptTransactions.Where(script => Status(script.Owned) == TransactionStatus.Started).Select(script => script.Document);
+
     public void Clear()
     {
+        foreach (var (owned, _) in scriptTransactions)
+            (owned as IDisposable)?.Dispose();
+        scriptTransactions.Clear();
         objects.Clear();
         ids.Clear();
+    }
+
+    /// <summary>
+    /// Rolls back every transaction and group a Dev Mode script left started, the last one made first, so the hold can
+    /// close its own group (spec #10: a transaction the script leaves open is rolled back when the run ends).
+    /// </summary>
+    public void RollBackScriptTransactions()
+    {
+        for (var index = scriptTransactions.Count - 1; index >= 0; index--)
+        {
+            var owned = scriptTransactions[index].Owned;
+            try
+            {
+                if (Status(owned) != TransactionStatus.Started)
+                    continue;
+                _ = owned switch
+                {
+                    Transaction transaction => transaction.RollBack(),
+                    SubTransaction subTransaction => subTransaction.RollBack(),
+                    TransactionGroup group => group.RollBack(),
+                    _ => TransactionStatus.Uninitialized,
+                };
+            }
+            catch (Exception exception)
+            {
+                System.Diagnostics.Trace.WriteLine($"Drive-It: rolling back a script's {owned.GetType().Name} failed ({exception.GetType().Name}: {exception.Message}).");
+            }
+        }
+    }
+
+    private Document? ScriptTransactionDocument(object target) =>
+        scriptTransactions.FirstOrDefault(script => ReferenceEquals(script.Owned, target)).Document;
+
+    private static TransactionStatus Status(object owned)
+    {
+        try
+        {
+            return owned switch
+            {
+                Transaction { IsValidObject: true } transaction => transaction.GetStatus(),
+                SubTransaction { IsValidObject: true } subTransaction => subTransaction.GetStatus(),
+                TransactionGroup { IsValidObject: true } group => group.GetStatus(),
+                _ => TransactionStatus.Uninitialized,
+            };
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Autodesk.Revit.Exceptions.InvalidOperationException)
+        {
+            return TransactionStatus.Uninitialized;
+        }
     }
 
     public JsonNode? Get(JsonObject call)
@@ -348,8 +410,9 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
                 };
             case OutValues tuple:
                 return new JsonObject { ["$tuple"] = new JsonArray(tuple.Values.Select(Encode).ToArray()) };
-            case Type type:
+            case Type type when !InstallMode.IsDev:
                 // el.GetType(), or any member that returns a type: its names as text, never a handle to a System.Type.
+                // In Dev Mode a type gets a handle like any other object (spec #10).
                 return new JsonObject
                 {
                     ["$type"] = new JsonObject { ["Name"] = type.Name, ["FullName"] = TypeName(type), ["Namespace"] = type.Namespace },
@@ -463,14 +526,18 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
 
     private object Construct(Type type, JsonArray arguments)
     {
-        if (OwnedByDriveIt.Contains(type))
+        var owned = OwnedByDriveIt.Contains(type);
+        if (owned && !InstallMode.IsDev)
             throw new BridgeException("member_not_allowed",
                 $"Drive-It owns every transaction; a script cannot create a {type.Name}. Put Revit changes inside `with revit.transaction(\"name\"):`.");
         if (type.IsAbstract)
             throw new BridgeException("not_constructible", $"{TypeName(type)} is abstract and cannot be constructed.");
         var constructor = SelectOverload(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments, out var converted)
             ?? throw NoMatch(type, ".ctor", type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments);
-        return Invoke(type, "constructor", () => ((ConstructorInfo)constructor).Invoke(converted), null, converted)!;
+        var made = Invoke(type, "constructor", () => ((ConstructorInfo)constructor).Invoke(converted), null, converted)!;
+        if (owned)
+            scriptTransactions.Add((made, converted.OfType<Document>().First()));
+        return made;
     }
 
     private object? InvokeMethod(Type type, object? target, string name, JsonArray arguments, BindingFlags flags)
@@ -483,6 +550,13 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
             throw MemberNotFound(type, name, flags);
         var method = SelectOverload(candidates, arguments, out var converted)
             ?? throw NoMatch(type, name, candidates, arguments);
+        // Reached only in Dev Mode (standard refuses these calls): keep the run's changes before a direct save or close, as the built-in does.
+        if (target is Document document && Guardrails.IsCommitPoint(type, name))
+            held.CommitPoint(document);
+        // A Dev Mode script's transaction or group starts inside the run's group on its document, every time it starts
+        // (Revit lets one start again after a commit point closed that group), so a failed run still rolls it back.
+        if (name == "Start" && target is not null && ScriptTransactionDocument(target) is { } owner)
+            held.BeforeTransaction(owner);
         Overloads.SupplyOutputs(method, converted, Output);
         var result = Invoke(type, name, () => method.Invoke(target, converted), target, converted);
         // Out parameters come back after the return value, as a Python tuple; a single value comes back as itself.

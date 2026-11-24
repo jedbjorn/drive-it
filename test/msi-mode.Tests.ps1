@@ -16,7 +16,9 @@ param(
 #   - this MSI over it with an invalid DRIVEIT_MODE fails in CheckDriveItMode, never reaches
 #     RemoveExistingProducts, and the lower version, its app files, add-in, mcp.json, user mode
 #     file and admin marker are exactly as before;
-#   - this MSI over it with no mode upgrades and keeps Dev Mode; /x removes it.
+#   - this MSI over it with no mode upgrades and keeps Dev Mode, and the Drive-It window shows the
+#     Dev Mode banner with no outside-root requests pane (msi.Tests.ps1 holds the standard case);
+#     /x removes it.
 # The unelevated refusals (recorded dev, DRIVEIT_MODE=dev) need a limited token, which the
 # runner cannot give msiexec; the same action refuses them, proven live on W10C.
 $ErrorActionPreference = 'Stop'
@@ -30,6 +32,7 @@ $install = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Dri
 $app = Join-Path $install 'app'
 $addinPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026\DriveIt.addin'
 $userModeFile = Join-Path $install 'install-mode.json'
+$operatorExe = Join-Path $app 'operator\DriveIt.Operator.exe'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $marker = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) "DriveIt\dev-mode\$sid.json"
 
@@ -55,6 +58,8 @@ function Invoke-Msiexec {
     Write-Host "  exit $($process.ExitCode)"
     return $process.ExitCode
 }
+
+. (Join-Path $PSScriptRoot 'operator-self-test.ps1')
 
 function Get-RelatedProduct {
     # "<ProductCode> <version>" for each installed product with Drive-It's UpgradeCode.
@@ -128,6 +133,12 @@ try {
     $upgraded = Get-RelatedProduct
     Assert-ModeTest ($upgraded.Count -eq 1 -and $upgraded[0] -ne $lower[0]) "The upgrade did not replace the lower version: $($upgraded -join '; ')."
     Assert-ModeTest ((Get-ResolvedMode) -eq 'dev' -and [IO.File]::Exists($marker)) 'The elevated upgrade did not keep Dev Mode.'
+
+    # Spec #10 "Visibility": the window resolves Dev Mode itself, shows the banner and hides the requests pane.
+    $selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test-dev.json')
+    foreach ($window in @($selfTest.windows)) {
+        Assert-ModeTest ($window.mode -eq 'dev' -and $window.devModeBanner -and -not $window.requestsShown) "The Dev Mode window does not show Dev Mode: $($window | ConvertTo-Json -Compress)"
+    }
 
     Assert-ModeTest ((Invoke-Msiexec -Operation '/x' -Package $msi -Log 'mode-uninstall.log') -eq 0) 'The uninstall failed.'
     Assert-ModeTest ((Get-RelatedProduct).Count -eq 0) 'The product is still installed after uninstall.'
