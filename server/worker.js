@@ -9,7 +9,7 @@ export function defaultPythonPath() {
   return process.platform === "win32" ? "python" : "python3";
 }
 
-export function runWorker({ source, args, processId, document, runId, pythonPath, cwd, timeoutMs, onRequest }) {
+export function runWorker({ source, args, processId, document, runId, pythonPath, cwd, timeoutMs, onRequest, signal }) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonPath || defaultPythonPath(), ["-I", "-S", "-B", "-u", workerFile], {
       cwd,
@@ -26,6 +26,13 @@ export function runWorker({ source, args, processId, document, runId, pythonPath
     let settled = false;
     let final = null;
     let timeoutError = null;
+    // A run ended from outside (Stop, or the add-in ending its hold): the worker is stopped with that reason.
+    const onAbort = () => {
+      timeoutError = signal.reason;
+      child.kill();
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
     let stderr = "";
     const lines = createInterface({ input: child.stdout });
     const timeout = setTimeout(() => {
@@ -38,6 +45,7 @@ export function runWorker({ source, args, processId, document, runId, pythonPath
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
       lines.close();
       if (error) reject(error);
       else resolve(final);

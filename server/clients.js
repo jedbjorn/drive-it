@@ -11,8 +11,9 @@ import { parse as parseToml } from "smol-toml";
 export const SERVER_NAME = "drive-it";
 const BEGIN = "# BEGIN drive-it (managed by the Drive It installer)";
 const END = "# END drive-it";
-// execute_script accepts runs of up to 120 s; Codex otherwise stops waiting at 60 s.
-const CODEX_TOOL_TIMEOUT_SEC = 150;
+// Codex otherwise stops waiting at 60 s. execute_script runs for up to the script time limit (at
+// most 600 s), and capture_revit_view waits for a hold to end before it exports.
+export const CODEX_TOOL_TIMEOUT_SEC = 630;
 // Codex allows 10 s by default; a first cold node.exe start under Defender scanning can take longer.
 const CODEX_STARTUP_TIMEOUT_SEC = 30;
 

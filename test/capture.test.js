@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
+import { duplexPair } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
@@ -19,6 +20,7 @@ import {
   REFERENCE_DIRECTORY, ReferenceImages, retentionFrom, SESSION_MARKER, sweepSession,
 } from "../server/capture.js";
 import { Runtime } from "../server/runtime.js";
+import { executeBroker } from "../server/session.js";
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n;
@@ -282,9 +284,176 @@ test("a capture returns the saved PNG bytes, metadata and a complete sidecar und
   // fall back to the estimate. The real lookup is proven in the reused-pid test below.
   assert.ok(["os", "estimate"].includes(marker.processStartSource), marker.processStartSource);
   assert.ok(Math.abs(Date.parse(marker.processStartedAt) - (Date.now() - process.uptime() * 1000)) < 10_000);
-  // The pipe budget fits the 150 s tool timeout of Codex and ChatGPT.
-  assert.deepEqual(envelopes[0].options.connectWaitMs, BROKER_BUDGET.connectWaitMs);
-  assert.ok(BROKER_BUDGET.connectWaitMs + BROKER_BUDGET.timeoutMs <= 135_000);
+  // The capture waits on a busy pipe until it frees, with a signal that ends the wait if the request
+  // is cancelled or the session closes; the hold tests below prove both on a busy pipe.
+  const { signal, onSession } = envelopes[0].options;
+  assert.deepEqual(envelopes[0].options, { ...BROKER_BUDGET, signal, onSession });
+  assert.ok(signal instanceof AbortSignal && !signal.aborted);
+  assert.equal(BROKER_BUDGET.connectWaitMs, Infinity);
+});
+
+/**
+ * Revit's pipe while a script run holds it: busy (EBUSY) for holdMs from the capture's first
+ * attempt, then one connection that greets and serves the capture like the add-in. Time is
+ * node:test's mocked clock.
+ */
+function heldPipe(holdMs, { answer = true } = {}) {
+  const served = [];
+  const revit = fakeBroker();
+  const pipe = { served, answer, firstAttemptAt: null, connected: false };
+  pipe.connector = () => {
+    pipe.firstAttemptAt ??= Date.now();
+    if (Date.now() < pipe.firstAttemptAt + holdMs) {
+      const busy = new EventEmitter();
+      busy.destroy = () => {};
+      setImmediate(() => busy.emit("error", Object.assign(new Error("connect EBUSY"), { code: "EBUSY" })));
+      return busy;
+    }
+    pipe.connected = true;
+    const [client, addIn] = duplexPair();
+    setImmediate(() => client.emit("connect"));
+    addIn.setEncoding("utf8");
+    addIn.write(`${JSON.stringify({ processId: 4242, version: "2026", build: "26.0.4.409" })}\n`);
+    let buffered = "";
+    addIn.on("data", async chunk => {
+      buffered += chunk;
+      if (!buffered.includes("\n")) return;
+      const envelope = JSON.parse(buffered);
+      served.push({ envelope, at: Date.now() });
+      if (answer) addIn.write(`${JSON.stringify(await revit(4242, envelope))}\n`);
+    });
+    return client;
+  };
+  return pipe;
+}
+
+// Runs a capture through executeBroker on the mocked clock, 250 ms per turn, until it settles.
+// `at` runs once the clock has advanced that far from the first pipe attempt.
+async function heldCapture(t, launchRoot, pipe, { signal, at } = {}) {
+  const references = new ReferenceImages({
+    launchRoot,
+    startTime: async () => null,
+    brokerExecutor: (processId, envelope, options) => executeBroker(processId, envelope, { ...options, connector: pipe.connector }),
+  });
+  t.after(() => references.closeSync());
+  const started = Date.now();
+  let outcome;
+  references.capture({ processId: 4242, purpose: "Check the plan after the run", signal })
+    .then(value => { outcome = { value }; }, error => { outcome = { error }; });
+  while (!outcome) {
+    await new Promise(resolve => setImmediate(resolve));
+    if (at && pipe.firstAttemptAt !== null && Date.now() - pipe.firstAttemptAt >= at.ms) {
+      at.run(references);
+      at = null;
+    }
+    // Once Revit answers, the export's real file I/O must not race the mocked clock.
+    if (!pipe.connected || !pipe.answer) t.mock.timers.tick(250);
+  }
+  return { ...outcome, pipeMs: Date.now() - (pipe.firstAttemptAt ?? started) };
+}
+
+test("a capture waits for a run's hold to end and then captures", async (t) => {
+  const launchRoot = await base(t, "held");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  // Longer than the old 20 s pipe budget and the default 120 s script time limit; the whole 600 s
+  // top of the setting's range; and a hold past that deadline, which the add-in checks only between
+  // calls: a Revit call started at 590 s that takes 90 s, then a 60 s rollback. The 610 s wait of
+  // the previous head failed that capture with EXPORT_FAILED while the hold was still active.
+  for (const holdMs of [30_000, 120_000, 600_000, 590_000 + 90_000 + 60_000]) {
+    const pipe = heldPipe(holdMs);
+    const { value, error } = await heldCapture(t, launchRoot, pipe);
+    assert.equal(error, undefined, `hold ${holdMs} ms: ${error?.message}`);
+    assert.equal(pipe.served.length, 1);
+    const waitedMs = pipe.served[0].at - pipe.firstAttemptAt;
+    assert.ok(waitedMs >= holdMs && waitedMs < holdMs + 1_000, `hold ${holdMs} ms: served after ${waitedMs} ms`);
+    assert.equal(value.metadata.captureId, pipe.served[0].envelope.id);
+    assert.deepEqual(await readFile(value.absolutePath), png(64, 48));
+  }
+});
+
+test("a capture behind a hold stops waiting only when cancelled or the session closes", async (t) => {
+  const launchRoot = await base(t, "held-end");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+
+  // A request the client cancels stops waiting then, with no export.
+  const cancelled = heldPipe(Infinity);
+  const controller = new AbortController();
+  const stopped = await heldCapture(t, launchRoot, cancelled, {
+    signal: controller.signal,
+    at: { ms: 900_000, run: () => controller.abort() },
+  });
+  assert.equal(stopped.error?.code, "EXPORT_FAILED");
+  assert.match(stopped.error.message, /cancelled while Revit was busy; no capture was taken/);
+  assert.equal(cancelled.served.length, 0);
+  assert.ok(stopped.pipeMs >= 900_000 && stopped.pipeMs < 901_000, `${stopped.pipeMs} ms`);
+
+  // Shutdown ends the wait too, so a closing server does not stay alive behind a hold.
+  const closing = heldPipe(Infinity);
+  const shut = await heldCapture(t, launchRoot, closing, { at: { ms: 30_000, run: references => references.closeSync() } });
+  assert.equal(shut.error?.code, "SESSION_CLOSING");
+  assert.equal(closing.served.length, 0);
+
+  // Once the hold ends, Revit has its own 110 s for the export, whatever the wait was.
+  const silent = heldPipe(700_000, { answer: false });
+  const timedOut = await heldCapture(t, launchRoot, silent);
+  assert.equal(timedOut.error?.code, "EXPORT_FAILED");
+  assert.match(timedOut.error.message, /timed out/);
+  assert.equal(silent.served.length, 1);
+  const exportMs = timedOut.pipeMs - 700_000;
+  assert.ok(exportMs >= BROKER_BUDGET.timeoutMs - 500 && exportMs <= BROKER_BUDGET.timeoutMs + 500, `${exportMs} ms`);
+});
+
+test("a capture cancelled while its pipe connection is in flight sends Revit nothing", async (t) => {
+  const launchRoot = await base(t, "connect-cancel");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  // One attempt whose connect stays pending until the request is cancelled; the add-in side
+  // greets and records anything written to it.
+  const [client, addIn] = duplexPair();
+  addIn.setEncoding("utf8");
+  addIn.write(`${JSON.stringify({ processId: 4242, version: "2026", build: "26.0.4.409" })}\n`);
+  const written = [];
+  addIn.on("data", chunk => written.push(chunk));
+  const pipe = { answer: true, firstAttemptAt: null, connected: false, attempts: 0 };
+  pipe.connector = () => {
+    pipe.attempts += 1;
+    pipe.firstAttemptAt ??= Date.now();
+    return client;
+  };
+  const controller = new AbortController();
+  const { error } = await heldCapture(t, launchRoot, pipe, {
+    signal: controller.signal,
+    // The connection completes the moment after the cancellation, as in a race with the add-in.
+    at: { ms: 1_000, run: () => { controller.abort(); client.emit("connect"); } },
+  });
+  assert.equal(error?.code, "EXPORT_FAILED");
+  assert.match(error.message, /cancelled while Revit was busy; no capture was taken/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(written, []);
+  assert.equal(client.destroyed, true);
+  assert.equal(pipe.attempts, 1);
+});
+
+test("a client that cancels capture_revit_view ends the wait for Revit", { timeout: 10_000 }, async (t) => {
+  const launchRoot = await base(t, "held-cancel");
+  let waiting;
+  const { client, references } = await connected(t, {
+    launchRoot,
+    // Stands in for a pipe that stays busy: it settles only when the signal aborts.
+    brokerExecutor: (processId, envelope, { signal }) => new Promise((resolve, reject) => {
+      waiting = signal;
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+  });
+  const controller = new AbortController();
+  const call = client.callTool({ name: "capture_revit_view", arguments: { purpose: "Check the floor plan" } }, undefined, { signal: controller.signal });
+  while (!waiting) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(waiting.aborted, false);
+  controller.abort();
+  await assert.rejects(call);
+  // The cancellation reaches the server as notifications/cancelled and aborts the request's signal.
+  while (!waiting.aborted) await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual((await listTree(references.sessionDirectory)).filter(name => !name.startsWith(".")), []);
 });
 
 test("pixelSize is bounded to 256 through 2048", async (t) => {
