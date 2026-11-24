@@ -1,4 +1,4 @@
-// Built-in Revit primitives (spec #9 Phase A): the worker's call shape, the units helper, and the
+// Built-in Revit primitives (spec #9 Phases A and B): the worker's call shape, the units helper, and the
 // published reference, against a stub broker. Live Revit behaviour is proven on the Windows seat.
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
@@ -10,7 +10,7 @@ import { API_VERSION, apiReference } from "../server/reference.js";
 import { Runtime } from "../server/runtime.js";
 
 const READ_PRIMITIVES = ["find_elements", "get_parameters", "list_types", "list_views", "get_selection"];
-const RESPONSE_PRIMITIVES = ["get_active_document", "set_selection"];
+const RESPONSE_PRIMITIVES = ["get_active_document", "set_selection", "set_parameters"];
 
 async function fixture(t, brokerExecutor) {
   const base = await realpath(await mkdtemp(path.join(tmpdir(), "drive-it-primitives-")));
@@ -98,6 +98,48 @@ test("get_active_document and set_selection return the full response, and later 
     ["find_elements", "doc-active"],
   ]);
   assert.deepEqual(envelopes[2].operations[0].arguments, { category: "Walls", kind: "instance", levelId: 31, limit: 5, offset: 10 });
+});
+
+test("set_parameters sends its changes as one operation and returns the full response", async (t) => {
+  const envelopes = [];
+  const run = await fixture(t, stubBroker(envelopes));
+  const changes = [
+    { elementId: 7, parameter: "Comments", value: "Checked" },
+    { elementId: 7, builtIn: "WALL_USER_HEIGHT_PARAM", value: 12.5 },
+    { elementId: 8, guid: "0b1fbd65-2c43-4a35-8e8c-4c0b5b6c1d2e", valueString: "1200 mm" },
+  ];
+  const receipt = await run([
+    "revit.get_active_document()",
+    `changed = revit.set_parameters(${JSON.stringify(changes)})`,
+    "batch = revit.execute([{'type': 'set_parameters', 'arguments': {'changes': [{'elementId': 9, 'parameter': 'Mark', 'value': 'A'}]}}, {'type': 'get_parameters', 'arguments': {'elementIds': [9]}}])",
+    "result = {'changed': changed, 'batch': batch}",
+  ].join("\n"));
+  assert.equal(receipt.status, "succeeded", JSON.stringify(receipt.error));
+  assert.equal(receipt.result.changed.status, "succeeded");
+  assert.equal(receipt.result.changed.document.uniqueId, "doc-active");
+  assert.deepEqual(receipt.result.changed.results, [null]);
+  assert.deepEqual(envelopes[1].operations, [{ type: "set_parameters", arguments: { changes } }]);
+  assert.equal(envelopes[1].document.uniqueId, "doc-active");
+  assert.deepEqual(envelopes[2].operations.map(operation => operation.type), ["set_parameters", "get_parameters"]);
+  assert.deepEqual(receipt.result.batch.results, [null, null]);
+});
+
+test("a rejected set_parameters raises RevitError with the broker's code", async (t) => {
+  const run = await fixture(t, async (processId, envelope) => ({
+    id: envelope.id,
+    status: "failed",
+    changes: [], affectedFiles: [], affectedElements: [], checks: [],
+    results: [null],
+    error: { code: "parameter_read_only", message: "'Length' on element 7 is read-only." },
+  }));
+  const receipt = await run([
+    "try:",
+    "    revit.set_parameters([{'elementId': 7, 'parameter': 'Length', 'value': 3.0}], document={'uniqueId': 'doc-active'})",
+    "except Exception as error:",
+    "    result = error.response['error']['code']",
+  ].join("\n"));
+  assert.equal(receipt.status, "succeeded", JSON.stringify(receipt.error));
+  assert.equal(receipt.result, "parameter_read_only");
 });
 
 test("existing operations and revit.execute still return the full broker response", async (t) => {
@@ -190,6 +232,12 @@ test("get_api_reference lists every primitive and units with an example that run
     if (!name.startsWith("units.")) assert.equal(envelopes.at(-1).operations[0].type, name, name);
   }
   assert.match(apiReference("revit.get_active_document")[0].effects, /Later calls in the same script target the returned document/);
+  const setParameters = apiReference("revit.set_parameters")[0];
+  for (const code of ["element_not_found", "parameter_not_found", "ambiguous_parameter", "parameter_read_only", "value_type_mismatch"]) {
+    assert.match(setParameters.effects, new RegExp(code), code);
+  }
+  assert.match(setParameters.effects, /Drive It model batch/);
+  assert.match(setParameters.results, /parameter_readback/);
 });
 
 test("the server instructions start work on an open model with get_active_document", () => {
