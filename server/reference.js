@@ -1,4 +1,12 @@
-export const API_VERSION = "revit-2026-alpha.4";
+import { REVIT_VERSIONS } from "./session.js";
+
+// The reference names the Revit version of the session it describes (spec #22), revit-<version>-alpha.4;
+// with no session selected it names every supported version. The built-ins are the same in each.
+export const API_REVISION = "alpha.4";
+
+export function apiVersion(revitVersion) {
+  return `revit-${revitVersion || REVIT_VERSIONS.join("-")}-${API_REVISION}`;
+}
 
 // Spec #15 "Documentation": the same eight statements are in the README's "Safety and ability" section,
 // in get_api_reference, and in the server instructions.
@@ -202,12 +210,13 @@ const fileOperations = {
   delete: [{ path: "Required: File or empty directory to remove" }, "Deleted path", "Deletes a file or empty directory"],
 };
 
-export function apiReference(name) {
+export function apiReference(name, revitVersion) {
+  const version = apiVersion(revitVersion);
   const entries = [];
   for (const [operation, [args, results, effects]] of Object.entries(revitOperations)) {
     entries.push({
       name: `revit.${operation}`,
-      apiVersion: API_VERSION,
+      apiVersion: version,
       arguments: args,
       results,
       effects,
@@ -215,15 +224,15 @@ export function apiReference(name) {
     });
   }
   for (const [operation, [args, results, effects, example]] of Object.entries(revitPrimitives)) {
-    entries.push({ name: `revit.${operation}`, apiVersion: API_VERSION, arguments: args, results, effects, example });
+    entries.push({ name: `revit.${operation}`, apiVersion: version, arguments: args, results, effects, example });
   }
   for (const [name, [args, results, effects, example]] of Object.entries(bridgeEntries)) {
-    entries.push({ name, apiVersion: API_VERSION, arguments: args, results, effects, example });
+    entries.push({ name, apiVersion: version, arguments: args, results, effects, example });
   }
   for (const [operation, effects] of Object.entries(unitsOperations)) {
     entries.push({
       name: `units.${operation}`,
-      apiVersion: API_VERSION,
+      apiVersion: version,
       arguments: {
         value: "Required: Number",
         unit: "Required: mm, cm, m, in or ft (length); mm2, m2, in2 or ft2 (area); deg or rad (angle)",
@@ -236,7 +245,7 @@ export function apiReference(name) {
   for (const [operation, [args, results, effects]] of Object.entries(fileOperations)) {
     entries.push({
       name: `files.${operation}`,
-      apiVersion: API_VERSION,
+      apiVersion: version,
       arguments: args,
       results,
       effects,
@@ -245,7 +254,7 @@ export function apiReference(name) {
   }
   entries.push({
     name: "revit.execute",
-    apiVersion: API_VERSION,
+    apiVersion: version,
     arguments: { operations: "Required: Ordered [{type, arguments}] batch", document: "Optional: {path, uniqueId} target; defaults to the selected document" },
     results: "Broker response with observed changes, files, elements, and checks",
     effects: "Applies a typed model batch; model-only batches share one transaction",
@@ -253,7 +262,7 @@ export function apiReference(name) {
   });
   entries.push({
     name: "checks.record",
-    apiVersion: API_VERSION,
+    apiVersion: version,
     arguments: { name: "Required: Check name", passed: "Required: Boolean observed result", observed: "Optional: Observed value" },
     results: "The passed boolean",
     effects: "Adds an explicit observed check to the run receipt",

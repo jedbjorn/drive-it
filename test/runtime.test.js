@@ -725,6 +725,22 @@ test("Revit's installed content is readable without a decision but not writable"
   assert.equal((await runtime.decisions.list()).length, 1);
 });
 
+test("the readable Revit content folders are the session's version's", async (t) => {
+  const versions = [];
+  const { root, runtime } = await fixture(t, {
+    sessionReader: async processId => ({ processId, version: "2027", build: "test", connectionIdentity: "test-session" }),
+    contentFolders: version => {
+      versions.push(version);
+      return [];
+    },
+  });
+  const outsideRead = path.join(root, "..", "outside", "default.rte");
+  await writeFile(outsideRead, "template");
+  const read = await runtime.execute(request(root, { idempotencyKey: "content-version", source: "result = files.read(args['path'])", arguments: { path: outsideRead } }));
+  assert.equal(read.status, "pending");
+  assert.ok(versions.length > 0 && versions.every(version => version === "2027"), JSON.stringify(versions));
+});
+
 test("a stock template rides along as a grant and only the outside write needs a decision", async (t) => {
   const calls = [];
   let template;

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SERVER_INSTRUCTIONS } from "../server/app.js";
-import { API_VERSION, apiReference } from "../server/reference.js";
+import { apiReference, apiVersion } from "../server/reference.js";
 import { Runtime } from "../server/runtime.js";
 
 const READ_PRIMITIVES = ["find_elements", "get_parameters", "list_types", "list_views", "get_selection", "get_family_parameters"];
@@ -260,7 +260,10 @@ test("units converts to and from Revit internal units without a broker call", as
 });
 
 test("get_api_reference lists every primitive and units with an example that runs", async (t) => {
-  assert.equal(API_VERSION, "revit-2026-alpha.4");
+  assert.equal(apiVersion("2026"), "revit-2026-alpha.4");
+  assert.equal(apiVersion("2027"), "revit-2027-alpha.4");
+  assert.equal(apiVersion(), "revit-2026-2027-alpha.4");
+  assert.ok(apiReference(undefined, "2027").every(entry => entry.apiVersion === "revit-2027-alpha.4"));
   const names = apiReference().map(entry => entry.name);
   for (const name of [...READ_PRIMITIVES, ...RESPONSE_PRIMITIVES]) assert.ok(names.includes(`revit.${name}`), name);
   assert.ok(names.includes("units.to_internal") && names.includes("units.from_internal"));
@@ -269,7 +272,7 @@ test("get_api_reference lists every primitive and units with an example that run
   const run = await fixture(t, stubBroker(envelopes));
   for (const name of [...READ_PRIMITIVES, ...RESPONSE_PRIMITIVES, "units.to_internal", "units.from_internal"]) {
     const entry = apiReference(name.includes(".") ? name : `revit.${name}`)[0];
-    assert.equal(entry.apiVersion, API_VERSION, name);
+    assert.equal(entry.apiVersion, apiVersion(), name);
     assert.match(entry.example, new RegExp(`^(\\w+ = )?${name.includes(".") ? name.replace(".", "\\.") : `revit\\.${name}`}\\(`), name);
     for (const [key, description] of Object.entries(entry.arguments)) assert.match(description, /^(Required|Optional): /, `${name}.${key}`);
     if (!name.startsWith("units.")) {

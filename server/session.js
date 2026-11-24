@@ -1,6 +1,11 @@
 import { createConnection } from "node:net";
 import { z } from "zod";
 
+// The Revit versions Drive-It supports, one add-in build each (spec #22; installer/Build-DriveItPackage.ps1).
+// Text that cannot know the session's version names them all.
+export const REVIT_VERSIONS = ["2026", "2027"];
+export const REVIT_VERSION_NAMES = `${REVIT_VERSIONS.slice(0, -1).join(", ")} or ${REVIT_VERSIONS.at(-1)}`;
+
 const sessionSchema = z.object({
   processId: z.number().int().positive(),
   version: z.string(),
@@ -172,7 +177,7 @@ export async function resolveProcessId(processId, { lister = listSessions } = {}
   const sessions = await lister();
   if (sessions.length === 1) return sessions[0].processId;
   if (sessions.length === 0) {
-    throw sessionLookupError("REVIT_NOT_RUNNING", "No running Revit 2026 has the Drive It add-in loaded. Ask the user to start Revit 2026 and, if Revit asks about Drive It, to choose Always Load; then try again.");
+    throw sessionLookupError("REVIT_NOT_RUNNING", `No running Revit ${REVIT_VERSION_NAMES} has the Drive It add-in loaded. Ask the user to start Revit ${REVIT_VERSION_NAMES} and, if Revit asks about Drive It, to choose Always Load; then try again.`);
   }
   const list = sessions.map(session => `processId ${session.processId} (${session.version ? `Revit ${session.version}` : "busy"})`).join(", ");
   throw sessionLookupError("MULTIPLE_REVIT_SESSIONS", `Several Revit sessions are running: ${list}. Ask the user which Revit window to use and pass its processId.`);

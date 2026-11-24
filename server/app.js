@@ -1,9 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { apiReference, API_VERSION, BRIDGE_GUIDANCE, BUILT_IN_DOCUMENTS_GUIDANCE, GUARDRAIL_STATEMENT, SAFETY_AND_ABILITY } from "./reference.js";
+import { apiReference, apiVersion, BRIDGE_GUIDANCE, BUILT_IN_DOCUMENTS_GUIDANCE, GUARDRAIL_STATEMENT, SAFETY_AND_ABILITY } from "./reference.js";
 import { Runtime } from "./runtime.js";
 import { revitContent } from "./content.js";
-import { executeBroker, readSession, resolveProcessId, sessionError } from "./session.js";
+import { executeBroker, readSession, resolveProcessId, REVIT_VERSION_NAMES, sessionError } from "./session.js";
 import { launchRootFrom, MAX_MARK_CATEGORIES, NOT_MARKED_REASONS, PIXEL_SIZE, ReferenceImages, retentionFrom } from "./capture.js";
 import { defaultDataDir } from "./store.js";
 import { DEV, installMode, STANDARD } from "./mode.js";
@@ -86,7 +86,7 @@ ${BRIDGE_GUIDANCE.filter(keep).map(line => `- ${line}`).join("\n")}`;
 /** The server instructions for an install mode, standard or dev. */
 export function serverInstructions(mode) {
   const devRule = mode === DEV ? `\n\n${DEV_MODE_RULE}` : "";
-  return `Drive It drives a live Autodesk Revit 2026 session. Call get_revit_session first, model with execute_script, and keep its receipts and checks as the authoritative record. When the user refers to the model or family they have open, start the script with revit.get_active_document(), and call get_api_reference for the built-in primitives before writing raw batches. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}${devRule}
+  return `Drive It drives a live Autodesk Revit ${REVIT_VERSION_NAMES} session. Call get_revit_session first (it reports the selected session's version), model with execute_script, and keep its receipts and checks as the authoritative record. When the user refers to the model or family they have open, start the script with revit.get_active_document(), and call get_api_reference for the built-in primitives before writing raw batches. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}${devRule}
 
 ${bridgeInstructions(mode)}`;
 }
@@ -470,8 +470,11 @@ export function createDriveItServer(options = {}) {
   });
 
   server.registerTool("get_api_reference", {
-    description: "Return local versioned Drive It Python operation references, including the Revit API bridge, with its safety and ability trade-offs and guidance; no external reference service is used.",
-    inputSchema: { name: z.string().optional().describe("Optional exact callable name, such as revit.create_level") },
+    description: "Return local versioned Drive It Python operation references, including the Revit API bridge, with its safety and ability trade-offs and guidance; no external reference service is used. The version names the selected Revit session's version (processId, or the only running Revit); with no session selected it names every supported version, whose built-ins are the same.",
+    inputSchema: {
+      name: z.string().optional().describe("Optional exact callable name, such as revit.create_level"),
+      processId: processId.optional().describe("Windows process ID of the selected Revit.exe; omit it to use the only running Revit"),
+    },
     outputSchema: {
       version: z.string(),
       safety: z.array(z.string()).describe("Safety and ability: what the API bridge can do and what it costs"),
@@ -486,8 +489,10 @@ export function createDriveItServer(options = {}) {
       })),
     },
     annotations: { readOnlyHint: true },
-  }, async ({ name }) => {
-    const result = { version: API_VERSION, safety: SAFETY_AND_ABILITY, guidance: BRIDGE_GUIDANCE, entries: apiReference(name) };
+  }, async ({ name, processId }) => {
+    // The reference is local: without a session (none running, several and no processId, busy) it still answers.
+    const session = await processResolver(processId).then(sessionReader).catch(() => null);
+    const result = { version: apiVersion(session?.version), safety: SAFETY_AND_ABILITY, guidance: BRIDGE_GUIDANCE, entries: apiReference(name, session?.version) };
     return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
   });
 

@@ -238,7 +238,7 @@ export class Runtime {
   }
 
   readableRoots(context) {
-    return this.contentFolders(context.receipt.session?.version || "2026");
+    return this.contentFolders(context.receipt.session?.version);
   }
 
   recordPolicy(receipt, context, detail) {
