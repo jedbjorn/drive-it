@@ -424,6 +424,18 @@ export class Runtime {
     const paths = [...bridgePaths(call.args), ...bridgePaths(call.value)];
     if (paths.length) {
       const operation = BRIDGE_READS.has(call.member) ? "read_file" : "write_file";
+      // Spec #13 D4: a dry run never lets a bridge call write a file (an export, say). The paths are listed as
+      // skipped writes, no decision is asked, and the call is refused before it reaches Revit.
+      if (context.dryRun && operation === "write_file") {
+        await this.skipFileWrite({ operation, paths }, context);
+        return {
+          status: "failed",
+          error: {
+            code: "not_allowed_in_dry_run",
+            message: `${call.member} would write ${paths.join(", ")}, and a dry run writes no files, so it is not allowed in a dry run. The paths are listed in skippedFileWrites; the real run writes them.`,
+          },
+        };
+      }
       const decision = await this.policy.authorize(context.runId, [{ operation, paths }], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
       this.recordPolicy(context.receipt, context, decision);
       if (decision.status === "pending" || decision.status === "denied") return decision;
@@ -636,7 +648,7 @@ export class Runtime {
       const reason = context.imageError ?? (this.references
         ? { code: "EXPORT_FAILED", message: "Revit did not export this view." }
         : { code: "IMAGES_UNAVAILABLE", message: "This server has no reference-image folder, so no view was exported." });
-      images.push({ viewId, name: null, type: null, document: null, ...reason });
+      images.push({ viewId, name: null, type: null, document: null, error: reason.code, message: reason.message });
     }
     return images;
   }

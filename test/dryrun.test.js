@@ -113,6 +113,8 @@ class StubHold {
     const { call } = message;
     if (call.op === "document") return { status: "succeeded", value: { $h: 1, type: "Autodesk.Revit.DB.Document" } };
     if (call.op === "tx.start") return { status: "succeeded", value: 1 };
+    if (call.op === "get" && call.member === "Export") return { status: "succeeded", value: { $method: "Export" } };
+    if (["call", "set"].includes(call.op)) return { status: "succeeded", value: null };
     if (call.op === "tx.commit") {
       return { status: "succeeded", value: { name: call.transaction, document: "Tower", documentKey: "d1", added: [101], changed: [], deleted: [], totals: { added: 1, changed: 0, deleted: 0 }, truncated: false } };
     }
@@ -338,6 +340,37 @@ test("a write a dry run cannot skip is refused with not_allowed_in_dry_run", asy
   }
 });
 
+test("a bridge call that writes a file is refused in a dry run, its paths listed, with no decision and nothing sent to Revit", async (t) => {
+  for (const mode of [undefined, "dev"]) {
+    const { root, outside, runtime, revit } = await fixture(t, new StubRevit(), mode ? { modeResolver: async () => mode } : {});
+    for (const [where, folder] of [["inside", root], ["outside", outside]]) {
+      for (const [form, statement] of [["call", "doc.Export(TARGET, 'plan')"], ["set", "doc.FilePath = TARGET"]]) {
+        const target = path.join(folder, `plans-${form}.dwg`);
+        const receipt = await run(runtime, `doc = revit.document()\n${statement.replace("TARGET", JSON.stringify(target))}`, { dryRun: true });
+        const label = `${mode ?? "standard"} ${where} ${form}`;
+        assert.equal(receipt.status, "failed", label);
+        assert.equal(receipt.error.code, "not_allowed_in_dry_run", label);
+        assert.match(receipt.error.message, form === "call" ? /^Export would write/ : /^FilePath would write/, label);
+        assert.deepEqual(receipt.skippedFileWrites, [{ operation: "write_file", path: target, outsideRoot: where === "outside" }], label);
+        assert.deepEqual(receipt.policyRequests, [], label);
+        assert.equal(receipt.rolledBack, true, label);
+      }
+    }
+    const sent = revit.opened.flatMap(hold => hold.sent.map(message => message.call?.op));
+    assert.ok(!sent.includes("call") && !sent.includes("set"), `no write reaches Revit: ${sent}`);
+    assert.deepEqual(await runtime.decisions.list(), [], "a refused write asks nothing");
+  }
+});
+
+test("a real run's bridge export still goes through the workspace policy to Revit", async (t) => {
+  const { root, runtime, revit } = await fixture(t);
+  const target = path.join(root, "plans.dwg");
+  const receipt = await run(runtime, `doc = revit.document()\ndoc.Export(${JSON.stringify(target)}, 'plan')`);
+  assert.equal(receipt.status, "succeeded", receipt.error?.message);
+  const call = revit.opened[0].sent.map(message => message.call).find(sent => sent.op === "call");
+  assert.deepEqual(call.args, [target, "plan"]);
+});
+
 test("in Dev Mode a dry run skips files.* writes but not plain Python I/O, and says so", async (t) => {
   const { root, runtime } = await fixture(t, new StubRevit(), { modeResolver: async () => "dev" });
   const source = `
@@ -375,6 +408,13 @@ test("named views are exported before the rollback and published with dryRun met
   assert.equal(sidecar.view.id, "30");
   assert.equal(sidecar.retention.retained, false);
   for (const target of request.targets) assert.equal(await exists(path.dirname(target)), false, "staging is removed");
+});
+
+test("a named view the add-in did not report gets a failed entry in the same error/message shape", async (t) => {
+  const { runtime } = await fixture(t, new StubRevit(), { references: null });
+  const receipt = await run(runtime, "revit.create_level(name='Inside', elevation=15)", { dryRun: { views: ["30"] } });
+  assert.equal(receipt.status, "succeeded", receipt.error?.message);
+  assert.deepEqual(receipt.images, [{ viewId: "30", name: null, type: null, document: null, error: "IMAGES_UNAVAILABLE", message: "This server has no reference-image folder, so no view was exported." }]);
 });
 
 test("with createdViews the add-in may fill the limit of four", async (t) => {

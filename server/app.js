@@ -170,7 +170,7 @@ export function createDriveItServer(options = {}) {
         createdViews: z.boolean().optional().describe(`Also export views the script itself creates, in the same limit of ${DRY_RUN_VIEW_LIMIT}`),
         pixelSize: z.number().int().min(PIXEL_SIZE.min).max(PIXEL_SIZE.max).optional()
           .describe(`Longer image side in pixels for every image, ${PIXEL_SIZE.min}-${PIXEL_SIZE.max}, default ${PIXEL_SIZE.default}`),
-      }).strict()]).optional().describe("Rehearse this call: true, or {views, createdViews, pixelSize} for images. Revit applies the script's changes, then every change is rolled back; save, save-as, close and delete-file are refused with not_allowed_in_dry_run, file writes are skipped and listed. The time limit covers the script and the images. Part of the idempotency key's request: a dry run's key never answers a real run. Run the same call again without dryRun to apply it"),
+      }).strict()]).optional().describe("Rehearse this call: true, or {views, createdViews, pixelSize} for images. Revit applies the script's changes, then every change is rolled back; save, save-as, close, delete-file and bridge calls that write files (exports) are refused with not_allowed_in_dry_run, file writes are skipped and listed. The time limit covers the script and the images. Part of the idempotency key's request: a dry run's key never answers a real run. Run the same call again without dryRun to apply it"),
     },
     // Must list every receipt field: MCP clients reject structured content with undeclared properties.
     outputSchema: {

@@ -43,7 +43,7 @@ export const DRY_RUN_GUIDANCE = [
   "Name the views that show the affected area. Put the user's stated intent into checks so the result answers it directly.",
   "Read actions: per document, what would be created, modified (each changed value before and after, and moved) and deleted. Compare them, the checks and the images with the request before running for real. If they do not match, revise and dry-run again.",
   "Run for real with the same source and arguments, without dryRun. Ids from the dry run do not exist afterwards; read them again.",
-  "In a dry run, save, save-as, close and delete-file fail with not_allowed_in_dry_run, and so does any direct save, close, synchronize, reload latest or print call through the bridge. Opening and creating documents and edit_family work. File writes are skipped and listed in skippedFileWrites.",
+  "In a dry run, save, save-as, close and delete-file fail with not_allowed_in_dry_run, and so does any direct save, close, synchronize, reload latest or print call through the bridge. Opening and creating documents and edit_family work. File writes are skipped and listed in skippedFileWrites; a bridge call that would write a file (Document.Export, ViewSchedule.Export, setting ImageExportOptions.FilePath) fails with not_allowed_in_dry_run and its paths are listed there too, so leave exports out of a dry run.",
   "Report a dry run to the person in a sentence or two, not the full list.",
   "On a workshared model, tell the person that Drive-It released their borrowed elements after the dry run, including unmodified ones they had borrowed before, or, if the release failed, that they should Relinquish All Mine in Revit.",
   "A dry run does not replace end-of-round QA after the real run.",
