@@ -85,7 +85,8 @@ export class Runtime {
       throw error;
     }
     if (previous && previous.status !== "pending") return previous;
-    const timeoutMs = await this.settings.runTimeoutMs(input.timeoutMs);
+    // The Script time limit bounds the run: every use of input.timeoutMs below sees the resolved value.
+    input = { ...input, timeoutMs: await this.settings.runTimeoutMs(input.timeoutMs) };
 
     let source = input.source;
     let savedScript = null;
