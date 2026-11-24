@@ -660,7 +660,7 @@ test("an absolute path outside the root ends the run pending before Revit is hel
   const request = { arguments: { outside }, idempotencyKey: "bridge-outside-path" };
   const pending = await run(runtime, source, request);
   assert.equal(pending.status, "pending", pending.error?.message);
-  assert.deepEqual(pending.policyRequests[0], { operation: "write_file", paths: [outside] });
+  assert.deepEqual(pending.policyRequests, [{ operation: "write_file", paths: [outside] }], "the request is listed once");
   assert.equal(revit.opened.length, 0, "no decision is awaited while Revit is held");
 
   await runtime.decisions.decide(pending.policyDecisionIds[0], true);

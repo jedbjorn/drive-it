@@ -229,8 +229,10 @@ export class Runtime {
   }
 
   recordPolicy(receipt, context, detail) {
+    // A pending decision is reported twice, when it is made and again in the worker's receipt; record it once.
+    const known = detail.decisionId && context.decisionIds.has(detail.decisionId);
     if (detail.decisionId) context.decisionIds.add(detail.decisionId);
-    if (detail.policyRequests) {
+    if (detail.policyRequests && !known) {
       context.policyRequests.push(...detail.policyRequests);
       receipt.policyRequests = context.policyRequests;
     }
