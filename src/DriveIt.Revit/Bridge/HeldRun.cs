@@ -76,7 +76,7 @@ internal sealed class HeldRun : IHeldDocuments
     private readonly TaskCompletionSource<string> begun = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object gate = new();
-    private readonly BridgeCalls calls = new();
+    private readonly BridgeCalls calls;
     private readonly List<GroupEntry> groups = [];
     private readonly Dictionary<long, (Transaction Transaction, Document Document)> transactions = new();
     private readonly List<HoldWarning> warnings = [];
@@ -95,6 +95,7 @@ internal sealed class HeldRun : IHeldDocuments
     public HeldRun(string runId, string? displayName, int? timeLimitMs)
     {
         RunId = runId;
+        calls = new BridgeCalls(() => transactions.Count > 0);
         DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName.Trim();
         requestedLimit = timeLimitMs is > 0 ? TimeSpan.FromMilliseconds(timeLimitMs.Value) : TimeSpan.MaxValue;
     }
@@ -291,6 +292,7 @@ internal sealed class HeldRun : IHeldDocuments
                 "len" => calls.Length(call),
                 "eq" => calls.Equal(call),
                 "str" => calls.Text(call),
+                "operator" => calls.Operator(call),
                 "document" => calls.Handle(ResolveDocument(application, dispatcher, call["document"])),
                 "element" => Element(application, dispatcher, call),
                 "tx.start" => StartTransaction(application, dispatcher, call),

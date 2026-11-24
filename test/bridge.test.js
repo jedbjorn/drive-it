@@ -223,7 +223,7 @@ class StubHold {
         if (target.kind === "Type") return this.handle(target.construct(...args));
         if (target.kind === "StaticMethod") return this.handle(target.type[target.member](...args));
         const value = target[call.member](...args);
-        return value && typeof value === "object" && "$tuple" in value ? value : this.handle(value);
+        return value && typeof value === "object" && ("$tuple" in value || "$type" in value) ? value : this.handle(value);
       }
       case "index":
         return this.handle(this.resolve(call.target).items[call.key]);
@@ -249,6 +249,17 @@ class StubHold {
         const left = this.resolve(call.target);
         const right = this.resolve(call.other);
         return left === right || (left?.kind === "Enum" && right?.kind === "Enum" && left.value === right.value);
+      }
+      case "operator": {
+        // Like the add-in: Revit's own operator for the operands' types (XYZ defines these), or operator_not_supported.
+        const [left, right] = call.args.map(item => this.resolve(item));
+        const result = xyzOperator(call.operator, left, right);
+        if (!result) {
+          const describe = operand => typeof operand === "number" ? "a number" : `Autodesk.Revit.DB.${operand.kind}`;
+          const symbols = { op_Addition: "+", op_Subtraction: "-", op_Multiply: "*", op_Division: "/", op_UnaryNegation: "-" };
+          throw coded("operator_not_supported", `Revit defines no ${symbols[call.operator]} for ${call.args.length === 1 ? describe(left) : `${describe(left)} and ${describe(right)}`}.`);
+        }
+        return this.handle(result);
       }
       case "str": {
         const target = this.resolve(call.target);
@@ -278,9 +289,24 @@ function xyz(x, y, z) {
   return { kind: "XYZ", X: x, Y: y, Z: z, Add(other) { return xyz(this.X + other.X, this.Y + other.Y, this.Z + other.Z); } };
 }
 
+// XYZ's operators as Revit defines them: XYZ + XYZ, XYZ - XYZ, XYZ * double, double * XYZ, XYZ / double, -XYZ.
+function xyzOperator(name, left, right) {
+  const isXyz = value => value?.kind === "XYZ";
+  const scale = (point, factor) => xyz(point.X * factor, point.Y * factor, point.Z * factor);
+  if (name === "op_Addition" && isXyz(left) && isXyz(right)) return xyz(left.X + right.X, left.Y + right.Y, left.Z + right.Z);
+  if (name === "op_Subtraction" && isXyz(left) && isXyz(right)) return xyz(left.X - right.X, left.Y - right.Y, left.Z - right.Z);
+  if (name === "op_Multiply" && isXyz(left) && typeof right === "number") return scale(left, right);
+  if (name === "op_Multiply" && typeof left === "number" && isXyz(right)) return scale(right, left);
+  if (name === "op_Division" && isXyz(left) && typeof right === "number") return scale(left, 1 / right);
+  if (name === "op_UnaryNegation" && isXyz(left) && right === undefined) return scale(left, -1);
+  return null;
+}
+
 function levelObject(level) {
   return {
     kind: "Level",
+    // Like the add-in: GetType() crosses as the type's names, never a handle.
+    GetType() { return { $type: { Name: "Level", FullName: "Autodesk.Revit.DB.Level", Namespace: "Autodesk.Revit.DB" } }; },
     Id: { kind: "ElementId", Value: level.id },
     get Name() { return level.name; },
     set Name(value) { level.name = value; },
@@ -863,4 +889,63 @@ raise RuntimeError("fails after saving Tower")`);
   assert.equal(kept.status, "partially_applied");
   assert.deepEqual(kept.transactions.map(entry => Object.keys(entry).includes("documentKey")), [false]);
   assert.deepEqual(kept.changes, ["Kept in Tower in Tower: 1 added, 0 changed, 0 deleted.", "Saved C:\\model.rvt."]);
+});
+
+test("arithmetic on Revit values runs Revit's operator in the add-in; a pair it does not define names both types", async (t) => {
+  const revit = new StubRevit();
+  const { runtime } = await fixture(t, revit);
+  const source = `
+p1 = DB.XYZ(1, 2, 3)
+p2 = DB.XYZ(4, 6, 8)
+values = [p2 - p1, p1 + p2, p1 * 2, 2 * p1, p2 / 2, -p1]
+result = {"values": [[value.X, value.Y, value.Z] for value in values]}
+try:
+    p1 - revit.element(30)
+except RevitError as error:
+    result["error"] = error.response["error"]
+`;
+  const receipt = await run(runtime, source);
+  assert.equal(receipt.status, "succeeded", receipt.error?.message);
+  assert.deepEqual(receipt.result.values, [[3, 4, 5], [5, 8, 11], [2, 4, 6], [2, 4, 6], [2, 3, 4], [-1, -2, -3]]);
+  assert.equal(receipt.result.error.code, "operator_not_supported");
+  assert.match(receipt.result.error.message, /Autodesk\.Revit\.DB\.XYZ and Autodesk\.Revit\.DB\.Level/);
+  // The worker does no arithmetic of its own: each operator is one call to the add-in, operands in Python's order.
+  const operators = revit.opened[0].sent.filter(message => message.call?.op === "operator").map(message => message.call);
+  assert.deepEqual(operators.map(call => call.operator), ["op_Subtraction", "op_Addition", "op_Multiply", "op_Multiply", "op_Division", "op_UnaryNegation", "op_Subtraction"]);
+  assert.equal(operators[3].args[0], 2, "2 * p1 sends the number first");
+  assert.equal(operators[5].args.length, 1);
+});
+
+test("GetType() answers with text; passed to Revit it fails with type_not_allowed", async (t) => {
+  const revit = new StubRevit();
+  const { runtime } = await fixture(t, revit);
+  const source = `
+level = revit.element(30)
+answer = level.GetType()
+result = {"name": answer.Name, "full": answer.FullName, "namespace": answer.Namespace, "text": str(answer),
+          "same": answer == revit.element(30).GetType(), "handle": level == answer}
+try:
+    DB.XYZ(answer, 0, 0)
+except RevitError as error:
+    result["error"] = error.response["error"]
+`;
+  const receipt = await run(runtime, source);
+  assert.equal(receipt.status, "succeeded", receipt.error?.message);
+  assert.deepEqual(
+    { ...receipt.result, error: receipt.result.error.code },
+    { name: "Level", full: "Autodesk.Revit.DB.Level", namespace: "Autodesk.Revit.DB", text: "Autodesk.Revit.DB.Level", same: true, handle: false, error: "type_not_allowed" },
+  );
+  assert.match(receipt.result.error.message, /no handle to a System\.Type/);
+  assert.ok(!revit.opened[0].sent.some(message => message.call?.op === "call" && message.call.target?.$path === "Autodesk.Revit.DB.XYZ"), "the answer never reached Revit");
+});
+
+test("get_api_reference names the calls that leave the session, operators, GetType and errors that name the member", () => {
+  const effects = apiReference("DB")[0].effects;
+  for (const member of ["Document.SynchronizeWithCentral", "Document.ReloadLatest", "Document.Print", "View.Print", "PrintManager.SubmitPrint"]) {
+    assert.ok(effects.includes(member), member);
+  }
+  assert.match(effects, /ask the user to do them in Revit/);
+  for (const text of ["operator_not_supported", "GetType()", "names the type and member called", "member_write_only", "modification_outside_transaction"]) {
+    assert.ok(effects.includes(text), text);
+  }
 });

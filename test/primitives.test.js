@@ -260,7 +260,7 @@ test("units converts to and from Revit internal units without a broker call", as
 });
 
 test("get_api_reference lists every primitive and units with an example that runs", async (t) => {
-  assert.equal(API_VERSION, "revit-2026-alpha.3");
+  assert.equal(API_VERSION, "revit-2026-alpha.4");
   const names = apiReference().map(entry => entry.name);
   for (const name of [...READ_PRIMITIVES, ...RESPONSE_PRIMITIVES]) assert.ok(names.includes(`revit.${name}`), name);
   assert.ok(names.includes("units.to_internal") && names.includes("units.from_internal"));
