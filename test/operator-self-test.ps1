@@ -67,13 +67,21 @@ function Assert-OperatorDrawer {
     if (($routes -join ',') -ne 'closeButton,escape,outsideClick') {
         throw "The settings drawer ($($Window.theme)) was not closed each way: $Text"
     }
+    $limit = [string]$Window.scriptTimeLimitSeconds
     foreach ($cycle in $cycles) {
-        $ok = $cycle.settingsButtonEnabled -and $cycle.opened -and $cycle.focusInDrawer -and
-            (@($cycle.rows) -contains 'Script time limit') -and
-            $cycle.shownLimit -eq [string]$Window.scriptTimeLimitSeconds -and $null -eq $cycle.error -and
-            $cycle.closed -and $cycle.focusOnSettingsButton
-        if (-not $ok) {
-            throw "The settings drawer ($($Window.theme), closed by $($cycle.closedBy)) failed: $($cycle | ConvertTo-Json -Compress -Depth 5)"
+        $checks = [ordered]@{
+            settingsButtonEnabled = [bool]$cycle.settingsButtonEnabled
+            opened                = [bool]$cycle.opened
+            focusInDrawer         = [bool]$cycle.focusInDrawer
+            timeLimitRow          = @($cycle.rows) -contains 'Script time limit'
+            storedLimitShown      = [string]$cycle.shownLimit -eq $limit
+            noError               = $null -eq $cycle.error
+            closed                = [bool]$cycle.closed
+            focusOnSettingsButton = [bool]$cycle.focusOnSettingsButton
+        }
+        $failed = @($checks.Keys | Where-Object { -not $checks[$_] })
+        if ($failed.Count -gt 0) {
+            throw "The settings drawer ($($Window.theme), closed by $($cycle.closedBy)) failed $($failed -join ', ') (window limit [$limit]): $($cycle | ConvertTo-Json -Compress -Depth 5)"
         }
     }
 }
