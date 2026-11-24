@@ -148,6 +148,7 @@ test("edit_family returns the full response and later calls target the opened fa
     { parameter: "Manufacturer", type: "A", value: "Acme" },
     { parameter: "Width", allTypes: true, valueString: "600 mm" },
     { parameter: "Depth", allTypes: true, formula: "Width / 2" },
+    { parameter: "Height", type: "B", formula: "Width * 2" },
   ];
   const receipt = await run([
     "revit.get_active_document()",

@@ -267,7 +267,8 @@ if ($Phase -eq "Families") {
     Pass "all_types_values_read_back_and_current_type_restored"
 
     # A formula: the first parameter among these that Revit accepts one for. Then a value on it is
-    # refused with parameter_has_formula, a bad formula with invalid_formula, and "" clears it.
+    # refused with parameter_has_formula, a bad formula with invalid_formula, the per-type shape sets
+    # one, and "" clears it.
     $formulaTarget = $null
     $attempts = @()
     foreach ($candidate in @(@{ name = "Cost"; formula = "2 * 60" }, @{ name = "Manufacturer"; formula = "`"F8 formula`"" }, @{ name = "Model"; formula = "`"F8 formula`"" })) {
@@ -289,11 +290,23 @@ if ($Phase -eq "Families") {
     Assert-Failure $invalid "invalid_formula" "malformed formula"
     Assert-True (@($invalid.changes).Count -eq 0) "invalid_formula reported changes."
     Assert-True ((Family-Parameter (Family-Read) $formulaTarget.name).formula -eq $formulaTarget.formula) "invalid_formula changed the formula."
-    $cleared = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = $formulaTarget.name; allTypes = $true; formula = "" }) }) (Target $familyId)
-    Assert-Status $cleared "succeeded" "clear the formula"
-    Assert-True ($null -eq (Family-Parameter (Family-Read) $formulaTarget.name).formula) "The formula did not clear."
-    $observed.formula = [ordered]@{ parameter = $formulaTarget.name; formula = $formulaTarget.formula; hasFormulaError = $hasFormula.error; invalidFormula = [ordered]@{ error = $invalid.error; checks = @($invalid.checks) }; cleared = @($cleared.changes) }
-    Pass "formula_set_has_formula_and_invalid_formula_refused_then_cleared"
+    # The spec's per-type shape: a formula with type A (not the current type) sets the parameter's
+    # formula, reads it back, names the type in the receipt, and restores the current type.
+    $perTypeFormula = if ($withFormula.storageType -eq "String") { "`"F8 per type`"" } else { "3 * 40" }
+    $typed = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = $formulaTarget.name; type = $typeA; formula = $perTypeFormula }) }) (Target $familyId)
+    Assert-Status $typed "succeeded" "set_family_parameters formula for one type"
+    Assert-True (@($typed.checks | Where-Object { $_.name -eq "family_parameter_readback" -and $_.passed }).Count -eq 1) "per-type formula readback: $($typed.checks | ConvertTo-Json -Compress)"
+    Assert-True ((@($typed.changes) -join "`n") -match [regex]::Escape("from type '$typeA'")) "per-type formula receipt: $(@($typed.changes) -join ' | ')"
+    $read = Family-Read
+    Assert-True ((Family-Parameter $read $formulaTarget.name).formula -eq $perTypeFormula) "$($formulaTarget.name) per-type formula re-read as '$((Family-Parameter $read $formulaTarget.name).formula)'."
+    Assert-True ($read.currentType -eq $original) "currentType after the per-type formula is '$($read.currentType)'."
+    $cleared = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = $formulaTarget.name; type = $typeB; formula = "" }) }) (Target $familyId)
+    Assert-Status $cleared "succeeded" "clear the formula for one type"
+    $read = Family-Read
+    Assert-True ($null -eq (Family-Parameter $read $formulaTarget.name).formula) "The formula did not clear."
+    Assert-True ($read.currentType -eq $original) "currentType after clearing the formula is '$($read.currentType)'."
+    $observed.formula = [ordered]@{ parameter = $formulaTarget.name; formula = $formulaTarget.formula; hasFormulaError = $hasFormula.error; invalidFormula = [ordered]@{ error = $invalid.error; checks = @($invalid.checks) }; perType = [ordered]@{ formula = $perTypeFormula; changes = @($typed.changes); checks = @($typed.checks) }; cleared = @($cleared.changes) }
+    Pass "formula_set_per_type_and_all_types_has_formula_and_invalid_formula_refused_then_cleared"
 
     $before = Family-Read
     $notFound = Assert-FamilyRejected @(
@@ -303,7 +316,6 @@ if ($Phase -eq "Families") {
     Assert-FamilyRejected @(@{ parameter = "No Such Parameter F8"; allTypes = $true; value = "x" }) "parameter_not_found" "missing family parameter" | Out-Null
     Assert-FamilyRejected @(@{ parameter = "Manufacturer"; allTypes = $true; value = 5 }) "value_type_mismatch" "number for a String" | Out-Null
     Assert-FamilyRejected @(@{ parameter = "Manufacturer"; type = $typeA; allTypes = $true; value = "x" }) "invalid_arguments" "type and allTypes" | Out-Null
-    Assert-FamilyRejected @(@{ parameter = "Manufacturer"; type = $typeA; formula = "`"x`"" }) "invalid_arguments" "formula for one type" | Out-Null
     $after = Family-Read
     foreach ($type in $typeA, $typeB) {
         Assert-True ((Family-Value $after "Manufacturer" $type) -eq (Family-Value $before "Manufacturer" $type)) "A rejected call changed Manufacturer for '$type'."

@@ -101,6 +101,9 @@ public sealed partial class DocumentDispatcher
             var name = parameter.Definition.Name;
             if (entry.Formula is { } formula)
             {
+                // A Revit formula belongs to the parameter, so it drives every type whichever is current.
+                if (entry.Type is { } typeName)
+                    manager.CurrentType = FamilyTypes(manager).Single(type => type.Name == typeName);
                 SetFormula(manager, parameter, formula);
                 var formulaCheck = new CheckReceipt
                 {
@@ -111,9 +114,12 @@ public sealed partial class DocumentDispatcher
                 response.Checks.Add(formulaCheck);
                 if (!formulaCheck.Passed)
                     throw new InvalidOperationException($"The formula of '{name}' read back differently than requested: {formulaCheck.Observed}");
+                var scope = entry.Type is { } named
+                    ? $"from type '{named}'; a formula applies to every type"
+                    : "for all types";
                 response.Changes.Add(formula.Length == 0
-                    ? $"Cleared the formula of '{name}' for all types."
-                    : $"Set the formula of '{name}' to '{formula}' for all types.");
+                    ? $"Cleared the formula of '{name}' {scope}."
+                    : $"Set the formula of '{name}' to '{formula}' {scope}.");
                 continue;
             }
 
@@ -203,9 +209,6 @@ public sealed partial class DocumentDispatcher
         if (values != 1)
             throw new RequestRejectedException("invalid_arguments",
                 $"set_family_parameters change for '{entry.Parameter}' needs exactly one of value, valueString, or formula; it has {values}.");
-        if (entry.Formula is not null && entry.Type is not null)
-            throw new RequestRejectedException("invalid_arguments",
-                $"set_family_parameters change for '{entry.Parameter}' sets a formula for type '{entry.Type}', but a formula applies to every type; pass allTypes true.");
     }
 
     private static void SetFormula(FamilyManager manager, FamilyParameter parameter, string formula)
