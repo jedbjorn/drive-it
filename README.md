@@ -35,7 +35,7 @@ Drive-It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 t
 - `capture_revit_view` exports an existing Revit view to a PNG and returns the image so the agent can check its own work (see [View capture](#view-capture)).
 - `get_api_reference` returns local, versioned references for the callable Drive-It file, check, and Revit operations. `get_guidance` is not registered.
 
-Generated Python receives `args`, `files`, `revit`, `checks`, and `units`. It does not receive raw Revit objects. Typed model operations use the Drive-It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt. Scripts can import only the modules in `ALLOWED_MODULES` in `server/worker.py` (in-memory data, text, math, and date utilities plus `os`/`pathlib` for mediated file access); every other import or module load is denied. This is a guardrail for generated code, not an operating-system sandbox.
+Generated Python receives `args`, `files`, `revit`, `checks`, and `units`, and through the [Revit API bridge](#revit-api-bridge) `DB` and handles to Revit objects; read [Safety and ability](#safety-and-ability) before using it. Typed model operations use the Drive-It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt. Scripts can import only the modules in `ALLOWED_MODULES` in `server/worker.py` (in-memory data, text, math, and date utilities plus `os`/`pathlib` for mediated file access); every other import or module load is denied. This is a guardrail for generated code, not an operating-system sandbox.
 
 Drive-It is in early development. The Windows alpha MSI is the recommended way to install it; the script installer, source build, and release bundle below remain available.
 
@@ -116,10 +116,63 @@ revit.save_as_document(destinationPath=args["familyPath"])  # an .rfa path in th
 - `set_parameters(changes)` changes instance and type parameters. Each change is `{elementId, parameter | builtIn | guid, value | valueString}`: the parameter by name, `BuiltInParameter` name, or shared-parameter GUID, and either a raw `value` matching the storage type (a number in internal units for Double, an integer or boolean for Integer, a string for String, an integer element id for ElementId) or a `valueString` in the document's display units, such as `"1200 mm"`. A type parameter is set on the type's id (`type.id` from `get_parameters`); an instance id is never redirected to its type. The whole call is validated before anything changes and is rejected with nothing applied on `element_not_found`, `parameter_not_found`, `ambiguous_parameter` (several parameters share the name; the message lists their `builtIn` and `guid`), `parameter_read_only`, or `value_type_mismatch`. It is a model change: it shares the batch's one transaction, rolls back completely on failure, and appears in Revit's undo list as `Drive It model batch`. The receipt names each change and carries a `parameter_readback` check per entry (doubles within 1e-9 internal units, `valueString` by display string).
 - `get_family_parameters()` reads an RFA's family parameters (`name`, `builtIn`, `guid`, `isInstance`, `isShared`, `isReporting`, `storageType`, `formula`) with each type's `value` and `display` under `values`, plus `types` and `currentType`. It does not change the current type. An RVT fails with `wrong_document_kind`.
 - `set_family_parameters(changes)` changes family parameters per type. Each change is `{parameter, type | allTypes, value | valueString | formula}`: the parameter by name, one type by name or `allTypes: True`, and a `value` or `valueString` as in `set_parameters`, or a `formula` (`""` clears it). A Revit formula belongs to the parameter, so with `type` or `allTypes` it applies to every type, and the receipt says so. The whole call is validated first and rejected with nothing applied on `wrong_document_kind`, `family_type_not_found`, `parameter_not_found`, `parameter_has_formula` (a value for a formula-driven parameter), `parameter_read_only`, or `value_type_mismatch`; a formula Revit rejects fails with `invalid_formula`. It is a model change in the shared transaction: each type is made current to set it, and the original current type is restored before commit. The receipt names each type and parameter and carries a `family_parameter_readback` check per change.
-- `edit_family(familyId)` opens a loadable family of the RVT (the `familyId` from `find_elements` or `list_types`) as an unsaved, in-memory family document and returns the full response with it as `document`, so later calls target the family. The project is not modified (`project_unmodified` check). Save the family into the workspace with `save_as_document`. In-place and non-editable families, and ids that are not families (system families such as walls have none), fail with `family_not_editable`. Loading the edited family back into the project is not available yet.
+- `edit_family(familyId)` opens a loadable family of the RVT (the `familyId` from `find_elements` or `list_types`) as an unsaved, in-memory family document and returns the full response with it as `document`, so later calls target the family. The project is not modified (`project_unmodified` check). Save the family into the workspace with `save_as_document`. In-place and non-editable families, and ids that are not families (system families such as walls have none), fail with `family_not_editable`. Load the edited family back into the project through the bridge: `revit.document().LoadFamily(project, revit.options.family_load(overwrite=True))`, where `project` is `revit.document(document=...)` with the project's document from an earlier receipt.
 - `units.to_internal(value, unit)` and `units.from_internal(value, unit)` convert lengths (`mm`, `cm`, `m`, `in`, `ft`), areas (`mm2`, `m2`, `in2`, `ft2`), and angles (`deg`, `rad`) to and from Revit's internal feet, square feet, and radians.
 
 Every primitive takes an optional `document`. Without one, it uses the script's current document, which `get_active_document` and `edit_family` set. A script with no current document fails with `document_not_open`, and the message says to call `revit.get_active_document()` first or pass `document=`. Read primitives (`find_elements`, `get_parameters`, `list_types`, `list_views`, `get_selection`, `get_family_parameters`) return their output directly. All other operations return the full broker response. Reads start no transaction and never change the model. `limit` is at most 2000, and so is the number of element ids per call. A larger request fails with `limit_exceeded` and is never silently cut. Element ids are integers. Linked models are not queried.
+
+## Revit API bridge
+
+A script can also call Revit's modeling API itself, for what no built-in primitive covers: placing families, authoring family geometry, sheets, schedules, project parameters, copying standards between models. The script still runs in Drive-It's worker, not in Revit. It holds **handles** to Revit objects, and the add-in resolves each call inside Revit.
+
+```python
+doc = revit.document()                      # the script's current document
+symbol = revit.element(args["deskTypeId"])  # one element by its integer id
+level = revit.element(args["levelId"])
+with revit.transaction("Place desks"):      # every change goes inside one
+    if not symbol.IsActive:
+        symbol.Activate()
+    for x in range(0, 30, 6):
+        desk = doc.Create.NewFamilyInstance(
+            DB.XYZ(x, 0, 0), symbol, level, DB.Structure.StructuralType.NonStructural)
+        checks.record("desk_placed", desk.IsValidObject)
+```
+
+- **Names.** `DB` is the `Autodesk.Revit.DB` namespace: calling a type constructs it, and static methods and enum values resolve where they are used. `revit.document(document=None)` and `revit.element(id, document=None)` return handles. `with revit.transaction(name, document=None):` commits on leaving the block and rolls back if it raises.
+- **Values.** Numbers, strings, booleans and `None` cross by value, and a `Guid` crosses as its string. Everything else is a handle, with attribute access, method calls, indexing, iteration, `len`, `==` and `str`. Python lists become the collection the method takes. Arguments are positional. A method whose matching overload has `out` parameters returns its result and then the out values as a tuple: `loaded, family = doc.LoadFamily(path, revit.options.family_load())`. A handle lasts for one run; carry an element to the next run by its integer id (`element.Id.Value`).
+- **The hold.** The first use of `DB`, `revit.document`, `revit.element` or `revit.transaction` holds Revit for the rest of the run, so thousands of calls are fast and a transaction can span many of them. Revit is paused for the person at the workstation until the run ends, bounded by the run's time limit; a small window over Revit says so and offers **Stop**. Runs that use only built-in operations are never held.
+- **Transactions.** Drive-It owns every transaction. A change outside `revit.transaction` fails with `modification_outside_transaction`. A held run's transactions on each document become one undo entry, `Drive-It: <displayName>`. A run that fails, is stopped (`stopped_by_user`) or times out is rolled back whole, except what came before a `save_document` or `save_as_document` in it. Warnings go into the receipt instead of dialogs; an error rolls that transaction back and raises `RevitError` (`transaction_failed`) with Revit's message.
+- **Questions back.** `revit.options.family_load(overwrite=False, overwriteParameterValues=False)` answers `LoadFamily`'s "already loaded; replace it?", and `revit.options.copy_paste(duplicateTypes="abort")` (or `"use_destination"`) answers `CopyElements`'s "a type with this name exists". Both default to what changes least. Any other callback, and Revit events, fail with `callback_not_supported` naming the interface.
+- **Errors that teach.** A failed call raises `RevitError`; `error.response["error"]` has its `code` and `message`. A missing member (`member_not_found`) lists the members that exist, and a call no overload takes (`no_matching_overload`) lists the signatures. Revit's own exceptions come back with Revit's message (`revit_api_error`). `revit.describe("FamilyItemFactory")` returns a Revit API type's constructors, properties, methods and fields from the running Revit, without holding it.
+- **Receipt.** `held` is `null` for a run that never used the bridge, otherwise `{ms, calls}`. A held run's receipt adds `transactions`, one entry per committed `revit.transaction` with its `name`, `document`, the element ids Revit reported as `added`, `changed` and `deleted`, their `totals`, and `truncated` when a list was cut at 1000 ids; and `warnings` with each warning's `description`, `severity` and `elementIds`. Each transaction also adds a `changes` line, such as `Place desks in Tower.rvt: 5 added, 0 changed, 0 deleted.`, and its added and changed ids to `affectedElements`. A bridge script proves its result with its own `checks`, and `promote_script` still needs a checked success.
+
+### Guardrails
+
+The bridge is the whole modeling API, so these rules are about what stays out of reach. They are a guardrail, not a sandbox.
+
+| Rule | What it does | Error |
+|---|---|---|
+| Only Revit API objects | A handle is given only for an object whose type is defined in Revit's model API assembly, or a standard collection of them. The .NET runtime, files, processes, reflection and Revit's UI API are refused | `type_not_allowed` |
+| Calls that stay with built-in operations | Saving, saving as, closing, opening and creating documents (and `EditFamily`), and creating `Transaction`, `TransactionGroup` or `SubTransaction`, are refused; the message names the built-in operation to use | `member_not_allowed` |
+| File paths | A string argument that is an absolute file path goes through the outside-root policy. Inside the workspace root it passes, and so does reading Revit's installed content with `LoadFamily` or `LoadFamilySymbol`. Otherwise the run ends `pending` with an outside-root request, rolled back and with Revit released, as a built-in operation does; approve it and retry with the same `idempotencyKey` | the policy's `pending` and `denied` |
+| Run limits | The run's time limit, and at most 100,000 live handles per run. Over the cap fails; nothing is silently dropped | `limit_exceeded` |
+
+Use the built-in primitives where they cover the task: they check before they change anything. Open, create, save and close documents with the built-in operations. Run a long job, such as a full sheet set, as a chain of short scripts, one coherent step each, carrying element ids from each receipt into the next.
+
+## Safety and ability
+
+What the bridge lets a script do, and what it costs:
+
+1. Scripts run in Drive-It's own process. A script that crashes or hangs does not crash Revit.
+2. Through the bridge a script can call Revit's modeling API in general. Drive-It does not check a bridge call before it runs; built-in primitives do check first, and are preferred where they fit.
+3. Revit is paused while a bridge run is in progress, up to the run's time limit. A window says so and offers Stop.
+4. If a bridge run fails, is stopped or times out, its changes are rolled back. Changes before a save in the same run are kept.
+5. A successful run is one undo entry in Revit.
+6. File and system access is limited by rules that are a guardrail, not a guarantee. Run scripts from sources you trust.
+7. Bridge scripts are written against one Revit version's API and may need changes for another.
+8. A long task runs as many scripts. The time limit applies to each one, Revit is free between them, and each is its own undo entry. The limit is set in the Drive-It window.
+
+`get_api_reference` returns the same statements as `safety`, and the server's instructions carry them for the agent.
 
 ## View capture
 
@@ -291,6 +344,8 @@ Responses have `succeeded`, `failed`, `partially_applied`, or `policy_required` 
 ```
 
 Only the Node broker client may attach this payload; generated Python cannot approve its own request. Grants cover only the matching operation and canonical paths in that execution and are not persisted.
+
+A bridge run keeps one connection for its hold: `"type": "hold.begin"` with `"hold": { "displayName", "timeLimitMs" }`, then `bridge.call` and `model.execute` requests one at a time, then `hold.end` with `"end": { "outcome": "commit" | "rollback" }`, whose reply carries the hold's summary. If the add-in ends a hold on its own (deadline, Stop, or a dropped connection), it rolls back, closes the connection, and keeps the summary for a `hold.result` request with the run id. The server checks absolute paths in bridge arguments against the outside-root policy before sending them. `"type": "api.describe"` with `"describe": { "type": "<name>" }` returns `revit.describe`'s answer without Revit's thread.
 
 A capture uses `"type": "view.capture"` with no `operations` and a `capture` object `{ "viewId": "<decimal id or null>", "pixelSize": 256-2048, "targetPath": "<server-created path>" }`. The target lies in an empty staging folder the server created under `_reference-images\<session-id>`; the add-in exports there and returns the view's id, name, and type, the document's modified state before and after, and, when the selection fails, `availableViews` and `otherViews`. The server then validates and publishes the PNG. A marks request adds `"markCategories": ["OST_..."]`, `"markElementIds": ["<decimal id>", ...]`, or both to the `capture` object; the add-in then draws the marks on the staged PNG and returns `capture.marks` (`legend`, `notMarked`, `omitted`). A capture without marks sends neither field.
 
