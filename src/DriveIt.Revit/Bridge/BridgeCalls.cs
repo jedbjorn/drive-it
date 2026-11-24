@@ -32,6 +32,8 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
     public const string RootNamespace = "Autodesk.Revit.DB";
     private const int DefaultChunk = 256;
     private const int MaximumChunk = 4096;
+    /// <summary>A System.DateTime on the wire, as Python's datetime.isoformat(timespec="microseconds") writes it without an offset.</summary>
+    private const string DateTimeWire = "yyyy-MM-dd'T'HH:mm:ss.ffffff";
     private static readonly Assembly RevitApi = typeof(Document).Assembly;
     private static readonly HashSet<Type> OwnedByDriveIt = [typeof(Transaction), typeof(TransactionGroup), typeof(SubTransaction)];
     private static readonly Dictionary<string, Type?> TypeCache = new(StringComparer.Ordinal);
@@ -338,6 +340,12 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
                 return double.IsFinite(number) ? JsonValue.Create(number) : number.ToString(CultureInfo.InvariantCulture);
             case Guid guid:
                 return guid.ToString();
+            case DateTime moment:
+                return new JsonObject
+                {
+                    ["$datetime"] = moment.ToString(DateTimeWire, CultureInfo.InvariantCulture),
+                    ["utc"] = moment.Kind == DateTimeKind.Utc,
+                };
             case OutValues tuple:
                 return new JsonObject { ["$tuple"] = new JsonArray(tuple.Values.Select(Encode).ToArray()) };
             case Type type:
@@ -539,6 +547,8 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
             case JsonObject option when option["$option"] is not null:
                 score = 100;
                 return Guardrails.TryOption(option, target, out value);
+            case JsonObject moment when moment["$datetime"] is { } text:
+                return TryDateTime(text.GetValue<string>(), moment["utc"]?.GetValue<bool>() == true, target, out value, out score);
             case JsonObject:
                 return false;
             case JsonArray array:
@@ -579,6 +589,24 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
                 return TryNumber(element, target, out value, out score);
         }
         return false;
+    }
+
+    /// <summary>
+    /// A Python datetime as a System.DateTime: an aware one arrives in UTC and is marked Utc, a naive one Local
+    /// (Python's own reading of a naive datetime; Revit refuses Unspecified, W10C 2026-11-24),
+    /// so whether a value Revit returned was UTC survives the trip. Microseconds, Python's precision.
+    /// </summary>
+    private static bool TryDateTime(string text, bool utc, Type target, out object? value, out int score)
+    {
+        value = null;
+        score = 0;
+        if (target != typeof(DateTime) && target != typeof(object))
+            return false;
+        if (!DateTime.TryParseExact(text, DateTimeWire, CultureInfo.InvariantCulture, DateTimeStyles.None, out var moment))
+            return false;
+        value = DateTime.SpecifyKind(moment, utc ? DateTimeKind.Utc : DateTimeKind.Local);
+        score = target == typeof(DateTime) ? 100 : 10;
+        return true;
     }
 
     private static bool TryNumber(JsonElement element, Type target, out object? value, out int score)
