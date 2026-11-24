@@ -7,10 +7,13 @@ using System.Text.Json;
 using System.Windows.Media.Imaging;
 using Autodesk.Revit.UI;
 using Autodesk.Revit.UI.Events;
+using DriveIt.Core.Operator;
 using DriveIt.Core.Theming;
+using DriveIt.Revit.Bridge;
 using DriveIt.Revit.Broker;
 using DriveIt.Revit.Commands;
 using DriveIt.Revit.Theming;
+using DriveIt.UI;
 using DriveIt.UI.Theming;
 
 namespace DriveIt.Revit;
@@ -49,8 +52,23 @@ public sealed class App : IExternalApplication
         stopping = new CancellationTokenSource();
         listener = ServeAsync($"drive-it-{session.processId}", message, broker, stopping.Token);
 
+        ConnectHoldStatus();
         AddRibbon(application);
         return Result.Succeeded;
+    }
+
+    /// <summary>
+    /// Spec #15 "Status Window" and "Time Limit and Long Jobs": every hold is bounded by the Script time
+    /// limit the person set in the Drive-It window (read at each hold's start, so a change applies to the
+    /// next run), and shows the status window with Stop on its own thread while it lasts.
+    /// </summary>
+    private static void ConnectHoldStatus()
+    {
+        var host = OperatorHost.ForAssemblyDirectory(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
+        HoldSignal.TimeLimit = () => TimeSpan.FromSeconds(ScriptTimeLimit.Read(host));
+        HoldSignal.Started += hold => HoldStatus.Begin(hold.RunId, hold.DisplayName, hold.StartedAt,
+            hold.Deadline - hold.StartedAt, () => HoldSignal.RequestStop(hold.RunId));
+        HoldSignal.Ended += hold => HoldStatus.End(hold.RunId);
     }
 
     private void AddRibbon(UIControlledApplication application)
