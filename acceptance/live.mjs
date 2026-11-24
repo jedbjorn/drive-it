@@ -1,4 +1,5 @@
-// Live installed-alpha acceptance for the Unguided runtime (spec #3) and script library (spec #4).
+// Live installed-alpha acceptance for the Unguided runtime (spec #3), script library (spec #4), and
+// the promotion of a checked set_parameters script (spec #9 criterion 5).
 // Kept outside test/ so node --test does not collect it. Run on the Windows seat with the installed
 // Node, from a copy placed in <install>\app\server so the bundled MCP SDK resolves:
 //   node live.mjs <mcp.json> <revit-pid> <rootA> <rootB> <project.rte> <family.rft> <outside-file>
@@ -173,6 +174,36 @@ result = {"familyTypes": types}`;
   check("replay returns the original receipt", replay.value?.runId === latestRun.value?.runId, replay.value?.runId);
   const afterReplay = await run({ source: READ_MODEL, arguments: { path: rvt } });
   check("replay did not duplicate the write", afterReplay.value?.result?.levels.filter(name => name === level3).length === 1, afterReplay.value?.result);
+
+  // --- A checked set_parameters script promotes (spec #9 criterion 5) ---
+  const parameterSource = `
+revit.open_document(path=args["model"])
+info = revit.find_elements(category="OST_ProjectInformation")["elements"][0]
+changed = revit.set_parameters([{"elementId": info["id"], "builtIn": "PROJECT_NAME", "value": args["projectName"]}])
+stored = revit.get_parameters([info["id"]], names=["Project Name"], includeType=False)[0]["parameters"][0]["value"]
+checks.record("project name reads back", stored == args["projectName"], stored)
+revit.save_document()
+revit.close_document()
+result = {"projectName": stored, "changes": changed["changes"]}`;
+  const savedParameters = await call("save_script", { name: `Set project name ${stamp}`, purpose: "Set the project name and save", domain: "parameters", documentKind: "rvt", inputSchema: { type: "object", properties: { model: { type: "string" }, projectName: { type: "string" } }, required: ["model", "projectName"] }, source: parameterSource, capabilities: ["revit.set_parameters", "revit.save_document"], expectedEffects: ["project name changed", "model saved"] });
+  const parametersId = savedParameters.value?.script.scriptId;
+  check("set_parameters draft saved", savedParameters.value?.created, savedParameters.value || savedParameters.error);
+  const projectName = `DI-${stamp}-P`;
+  const parametersRun = await run({ script: { scriptId: parametersId, revision: 1 }, arguments: { model: rvt, projectName }, document: { path: rvt } });
+  const parameterChecks = parametersRun.value?.checks || [];
+  check("set_parameters script executes", parametersRun.value?.status === "succeeded", parametersRun.value?.error || parametersRun.error);
+  check("set_parameters run carries a passing parameter_readback and the script check",
+    parameterChecks.some(row => row.name === "parameter_readback" && row.passed) && parameterChecks.some(row => row.name === "project name reads back" && row.passed), parameterChecks);
+  check("set_parameters receipt names the change", (parametersRun.value?.result?.changes || []).some(line => line.includes("Project Name") && line.includes(projectName)), parametersRun.value?.result?.changes);
+  const promotedParameters = await call("promote_script", { scriptId: parametersId, revision: 1, runId: parametersRun.value?.runId });
+  check("checked set_parameters run promotes", promotedParameters.value?.status === "promoted" && promotedParameters.value.script.state === "active", promotedParameters.value || promotedParameters.error);
+  const reread = await run({ source: `
+revit.open_document(path=args["path"])
+info = revit.find_elements(category="OST_ProjectInformation")["elements"][0]
+result = revit.get_parameters([info["id"]], names=["Project Name"], includeType=False)[0]["parameters"][0]["value"]
+revit.close_document()
+checks.record("reopened", True, result)`, arguments: { path: rvt } });
+  check("reopened RVT keeps the project name", reread.value?.result === projectName, reread.value?.result ?? reread.value?.error);
 
   // --- Retirement ---
   const retired = await call("retire_script", { scriptId: levelId, revision: 1, reason: "live acceptance" });
