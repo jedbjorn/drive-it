@@ -146,7 +146,7 @@ test("a script writes and reads back a UTF-16 file inside the workspace root, an
   const file = path.join(root, "shared_params.txt");
   const source = `
 text = "# This is a Revit shared parameter file.\\r\\n*META\\tVERSION\\tMINVERSION\\r\\nMETA\\t2\\t1\\r\\n"
-with open(args["path"], "w", encoding="utf-16") as handle:
+with open(args["path"], "w", encoding="utf-16", newline="") as handle:
     handle.write(text)
 with open(args["path"], encoding="utf-16", newline="") as handle:
     back = handle.read()
