@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -525,6 +525,32 @@ test("a hold the add-in ends on its deadline reports timed_out", async (t) => {
   const receipt = await pending;
   assert.equal(receipt.status, "timed_out");
   assert.equal(receipt.error.code, "RUN_TIMEOUT");
+});
+
+// Spec #15 "Time Limit and Long Jobs": the setting applies to future runs. Here the person lowers it
+// after the run started and before its first bridge call, when the add-in reads it for the hold.
+test("lowering the limit before a run's first bridge call keeps that run's bound", async (t) => {
+  const revit = new StubRevit();
+  const open = revit.opener();
+  let addInLimitMs = null;
+  const { runtime } = await fixture(t, revit, {
+    holdOpener: async (processId, options) => {
+      await runtime.settings.setScriptTimeLimitSeconds(10);
+      // What ScriptTimeLimit.HoldLimit gives the add-in from this file at the hold's start.
+      const stored = JSON.parse(await readFile(runtime.settings.file, "utf8"));
+      addInLimitMs = Math.max(stored.scriptTimeLimitSeconds * 1000, Date.parse(stored.earlierLimitUntil) - Date.now());
+      return open(processId, options);
+    },
+  });
+  const pending = run(runtime, "doc = revit.document()\nwhile True:\n    pass", { timeoutMs: 60000 });
+  while (!revit.opened[0]?.sent.length) await new Promise(resolve => setTimeout(resolve, 20));
+  const requested = revit.opened[0].options.timeLimitMs;
+  assert.ok(requested > 50000, `the server asks for the run's remaining time (${requested} ms)`);
+  assert.ok(addInLimitMs >= requested, `the add-in's bound (${addInLimitMs} ms) does not shorten it to the new 10 s`);
+  revit.opened[0].lose("timed_out");
+  const receipt = await pending;
+  assert.equal(receipt.status, "timed_out");
+  assert.equal(receipt.error.message, "Script exceeded 60000 ms and was stopped.", "the timeout names the run's own bound");
 });
 
 test("a hold that cannot be opened fails the bridge call as RevitError", async (t) => {

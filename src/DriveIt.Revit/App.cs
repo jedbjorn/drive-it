@@ -59,13 +59,14 @@ public sealed class App : IExternalApplication
 
     /// <summary>
     /// Spec #15 "Status Window" and "Time Limit and Long Jobs": every hold is bounded by the Script time
-    /// limit the person set in the Drive-It window (read at each hold's start, so a change applies to the
-    /// next run), and shows the status window with Stop on its own thread while it lasts.
+    /// limit the person set in the Drive-It window, read at each hold's start. A run started before the
+    /// limit was lowered keeps the earlier limit (ScriptTimeLimit.HoldLimit),
+    /// so a change applies to future runs. The hold shows the status window with Stop on its own thread.
     /// </summary>
     private static void ConnectHoldStatus()
     {
         var host = OperatorHost.ForAssemblyDirectory(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
-        HoldSignal.TimeLimit = () => TimeSpan.FromSeconds(ScriptTimeLimit.Read(host));
+        HoldSignal.TimeLimit = () => ScriptTimeLimit.HoldLimit(host, DateTimeOffset.Now);
         HoldSignal.Started += hold => HoldStatus.Begin(hold.RunId, hold.DisplayName, hold.StartedAt,
             hold.Deadline - hold.StartedAt, () => HoldSignal.RequestStop(hold.RunId));
         HoldSignal.Ended += hold => HoldStatus.End(hold.RunId);

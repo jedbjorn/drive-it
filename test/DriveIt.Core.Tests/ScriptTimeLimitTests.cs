@@ -71,6 +71,39 @@ public class ScriptTimeLimitTests
         Assert.Equal(Path.Combine(local, "DriveIt"), OperatorLocator.DataDirectory(Host(" ", withConfig: false)));
     }
 
+    private static readonly DateTimeOffset Now = new(2026, 11, 24, 6, 30, 0, TimeSpan.Zero);
+
+    private static TimeSpan HoldLimit(string json) =>
+        ScriptTimeLimit.HoldLimit(Data, Now, Files(new() { [Settings] = json }));
+
+    // server/settings.js writes earlierLimitUntil with Date.toISOString() when the limit is lowered.
+    [Theory]
+    [InlineData("""{ "scriptTimeLimitSeconds": 20 }""", 20)]
+    [InlineData("""{ "scriptTimeLimitSeconds": 10, "earlierLimitUntil": "2026-11-24T06:31:55.000Z" }""", 115)]
+    [InlineData("""{ "scriptTimeLimitSeconds": 10, "earlierLimitUntil": "2026-11-24T06:30:05.000Z" }""", 10)]
+    [InlineData("""{ "scriptTimeLimitSeconds": 10, "earlierLimitUntil": "2026-11-24T06:29:00.000Z" }""", 10)]
+    [InlineData("""{ "scriptTimeLimitSeconds": 10, "earlierLimitUntil": "2026-11-25T06:30:00.000Z" }""", 600)]
+    [InlineData("""{ "scriptTimeLimitSeconds": 10, "earlierLimitUntil": "tomorrow" }""", 10)]
+    [InlineData("""{ "scriptTimeLimitSeconds": 10, "earlierLimitUntil": 1764000000000 }""", 10)]
+    [InlineData("""{ "scriptTimeLimitSeconds": 9, "earlierLimitUntil": "2026-11-24T06:31:00.000Z" }""", 120)]
+    [InlineData("""not json""", 120)]
+    public void HoldLimit_IsTheSetting_OrLonger_WhileARunStartedUnderAnEarlierLimitMayStillRun(string json, int expectedSeconds)
+    {
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), HoldLimit(json));
+    }
+
+    [Fact]
+    public void HoldLimit_IsTheDefault_WhenTheFileIsMissing()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(ScriptTimeLimit.DefaultSeconds), ScriptTimeLimit.HoldLimit(Data, Now, Files([])));
+    }
+
+    [Fact]
+    public void Read_IgnoresTheEarlierLimitRecord()
+    {
+        Assert.Equal(10, ScriptTimeLimit.Read(Data, Files(new() { [Settings] = """{ "scriptTimeLimitSeconds": 10, "earlierLimitUntil": "2026-11-24T06:31:55.000Z" }""" })));
+    }
+
     [Theory]
     [InlineData("20", 20)]
     [InlineData(" 600 ", 600)]
