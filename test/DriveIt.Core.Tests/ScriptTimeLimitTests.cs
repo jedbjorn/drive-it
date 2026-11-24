@@ -108,13 +108,17 @@ public class HoldTextTests
     [InlineData(0, 120, "0:00 of 2:00")]
     [InlineData(12.9, 120, "0:12 of 2:00")]
     [InlineData(75, 600, "1:15 of 10:00")]
+    [InlineData(6.2, 19.86, "0:06 of 0:20")] // a 20 s limit, as the hold sees it on W10C-Testing
+    [InlineData(5, 59.8, "0:05 of 1:00")]
     public void Progress_IsElapsedOfLimit(double elapsed, double limit, string expected)
     {
         Assert.Equal(expected, HoldText.Progress(TimeSpan.FromSeconds(elapsed), TimeSpan.FromSeconds(limit)));
     }
 
     [Theory]
-    [InlineData(400, "0.4 s")]
+    [InlineData(29, "29 ms")]
+    [InlineData(400, "400 ms")]
+    [InlineData(1000, "1.0 s")]
     [InlineData(9949, "9.9 s")]
     [InlineData(12300, "12 s")]
     [InlineData(125000, "2 min 5 s")]
