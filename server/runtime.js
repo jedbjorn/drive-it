@@ -157,7 +157,8 @@ export class Runtime {
 
     try {
       receipt.workspaceRoot = workspaceRoot || await this.workspace.getRoot();
-      receipt.session = await this.sessionReader(input.processId);
+      // While another run holds Revit the pipe is busy; this run waits for it, within its own time.
+      receipt.session = await this.sessionReader(input.processId, { connectWaitMs: Math.max(0, context.deadline - Date.now()) });
       temporary = await mkdtemp(path.join(tmpdir(), "drive-it-"));
       const workerReceipt = await this.workerRunner({
         source,
@@ -250,7 +251,10 @@ export class Runtime {
     // Once a run holds Revit, its built-in operations go through the hold and join its transaction groups.
     const execute = message => context.hold
       ? context.hold.send(message)
-      : this.brokerExecutor(context.processId, message, { timeoutMs: context.timeoutMs });
+      : this.brokerExecutor(context.processId, message, {
+        timeoutMs: context.timeoutMs,
+        connectWaitMs: Math.max(0, context.deadline - Date.now()),
+      });
     let response = await execute(envelope);
     if (response.status === "policy_required") {
       this.observeBroker(response, context);
@@ -364,9 +368,9 @@ export class Runtime {
               : "Revit's hold ended before the run did; what Revit kept is unknown.",
         };
       }
-      if (["failed", "denied", "partially_applied"].includes(receipt.status)) {
-        const base = context.workerStatus === "denied" ? "denied" : "failed";
-        receipt.status = receipt.changes.length > 0 ? "partially_applied" : base;
+      // Effects the rollback removed no longer make the run partial; nothing else changes the status rule.
+      if (receipt.status === "partially_applied" && receipt.changes.length === 0) {
+        receipt.status = context.workerStatus === "denied" ? "denied" : "failed";
       }
     }
     if (failedDocuments.length) {

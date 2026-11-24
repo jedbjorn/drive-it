@@ -536,3 +536,55 @@ test("a rollback Revit could not complete is reported with the document", async 
   assert.match(receipt.error.message, /Tower/);
   assert.equal(receipt.error.cause.code, "SCRIPT_FAILED");
 });
+
+test("a held run whose worker dies is failed and restored, keeping only its file effects", async (t) => {
+  const revit = new StubRevit();
+  const { root, runtime } = await fixture(t, revit);
+  const flag = path.join(root, "flag.txt");
+  const receipt = await run(runtime, `
+import os
+doc = revit.document()
+with revit.transaction("Killed"):
+    DB.Level.Create(doc, 10)
+    files.write(args["flag"], "in transaction")
+    os._exit(9)`, { arguments: { flag } });
+  assert.equal(receipt.status, "failed");
+  assert.equal(revit.opened[0].endedWith, "rollback");
+  assert.deepEqual(revit.levels.map(level => level.elevation), [0]);
+  assert.deepEqual(receipt.changes, [{ operation: "write_file", paths: [flag] }]);
+});
+
+test("a run waits for a busy Revit within its own time, before and outside a hold", async (t) => {
+  const revit = new StubRevit();
+  const waits = [];
+  const executor = revit.brokerExecutor();
+  const { runtime } = await fixture(t, revit, {
+    sessionReader: async (processId, options) => {
+      waits.push(["session", options?.connectWaitMs]);
+      return { processId, version: "2026", build: "test", connectionIdentity: "test-session" };
+    },
+    brokerExecutor: async (processId, envelope, options) => {
+      waits.push(["broker", options?.connectWaitMs]);
+      return executor(processId, envelope, options);
+    },
+  });
+  const receipt = await run(runtime, "revit.create_level(name='L2', elevation=10)", { timeoutMs: 20000 });
+  assert.equal(receipt.status, "succeeded", receipt.error?.message);
+  assert.deepEqual(waits.map(([kind]) => kind), ["session", "broker"]);
+  for (const [, waitMs] of waits) assert.ok(waitMs > 15000 && waitMs <= 20000, String(waitMs));
+});
+
+test("a held run that needs an outside-root decision ends pending, rolled back and released", async (t) => {
+  const revit = new StubRevit();
+  const { root, runtime } = await fixture(t, revit);
+  const outside = path.join(path.dirname(root), "outside.txt");
+  const receipt = await run(runtime, `
+doc = revit.document()
+with revit.transaction("Before the decision"):
+    DB.Level.Create(doc, 10)
+files.write(args["outside"], "needs a decision")`, { arguments: { outside } });
+  assert.equal(receipt.status, "pending");
+  assert.ok(receipt.policyRequests.length > 0);
+  assert.equal(revit.opened[0].endedWith, "rollback");
+  assert.deepEqual(revit.levels.map(level => level.elevation), [0]);
+});

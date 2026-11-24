@@ -86,8 +86,8 @@ function validateSession(info, processId) {
   return { ...session, connectionIdentity: `current-user:named-pipe:drive-it-${processId}` };
 }
 
-export async function readSession(processId, { timeoutMs = 4000 } = {}) {
-  const connection = await connect(processId, timeoutMs);
+export async function readSession(processId, { timeoutMs = 4000, connectWaitMs = 0 } = {}) {
+  const connection = await connect(processId, timeoutMs, connectWaitMs);
   try {
     return validateSession(await connection.readJson(4096), processId);
   } finally {
