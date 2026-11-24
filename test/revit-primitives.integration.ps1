@@ -3,8 +3,10 @@
 #   Prepare   - Revit open with no document: get_active_document fails with no_active_document; then
 #               build the fixture (5 walls on two levels, a named 3D view), save it, and close it.
 #   Active    - Revit restarted with the fixture as its active document: active-document targeting,
-#               queries, paging, limits, model unchanged, the set/get selection round trip, and
-#               document_not_active for a background document.
+#               queries, paging, limits, model unchanged, the set/get selection round trip,
+#               document_not_active for a background document, and outside-root policy for save,
+#               delete, and save-as before get_active_document (ends with the fixture saved back
+#               to its own path).
 #   Selection - after a person (or windows-mcp) selects a wall in Revit's window: report what
 #               get_selection returns, with each element's Length, so it can be matched to the click.
 # Each phase prints one JSON summary and throws on the first failed assertion.
@@ -385,13 +387,55 @@ try {
         Assert-Status $inside "succeeded" "inside-root save after get_active_document"
         Assert-True (@($inside.affectedFiles).Count -eq 1 -and (Same-Path $inside.affectedFiles[0] $document.path)) "Inside-root save affectedFiles: $($inside.affectedFiles -join ', ')"
         Pass "approved_and_inside_root_save_after_get_active_document"
+
+        # save_as_document moves the document a later get_active_document selects, so preflight
+        # authorizes that later save at the destination: approving exactly the emitted requests runs
+        # the whole batch, and an inside-root destination requests nothing for the old path.
+        $outsideCopy = Join-Path $WorkspaceRoot "f8-policy-save-as-$([guid]::NewGuid().ToString('N')).rvt"
+        $insideCopy = Join-Path $narrowRoot "f8-policy-save-as.rvt"
+        function SaveAs-Then-Save([string]$Destination) {
+            return @((Op "save_as_document" @{ destinationPath = $Destination; overwrite = $true }), (Op "get_active_document"), (Op "save_document"))
+        }
+        $fixtureWritten = (Get-Item -LiteralPath $document.path).LastWriteTimeUtc
+        $restored = $null
+        try {
+            $refused = Invoke-Broker (SaveAs-Then-Save $outsideCopy) (Target $documentId) $narrowRoot
+            Assert-Status $refused "policy_required" "save-as, get_active_document, save"
+            Assert-True (@($refused.policyRequests).Count -eq 2) "save-as batch policyRequests: $($refused.policyRequests | ConvertTo-Json -Compress -Depth 4)"
+            foreach ($operation in "save_as_document", "save_document") {
+                $requests = @($refused.policyRequests | Where-Object { $_.operation -eq $operation })
+                Assert-True ($requests.Count -eq 1 -and @($requests[0].paths).Count -eq 1 -and (Same-Path $requests[0].paths[0] $outsideCopy)) "save-as batch $operation request: $($refused.policyRequests | ConvertTo-Json -Compress -Depth 4)"
+            }
+            Assert-True (@($refused.changes).Count -eq 0 -and @($refused.affectedFiles).Count -eq 0 -and -not (Test-Path -LiteralPath $outsideCopy)) "The refused save-as batch had effects."
+
+            $grants = @($refused.policyRequests | ForEach-Object { @{ operation = $_.operation; paths = @($_.paths) } })
+            $approval = @{ decisionId = "primitives-$([guid]::NewGuid().ToString('N'))"; grants = $grants }
+            $approved = Invoke-Broker (SaveAs-Then-Save $outsideCopy) (Target $documentId) $narrowRoot $approval
+            Assert-Status $approved "succeeded" "save-as, get_active_document, save with the emitted grants"
+            Assert-True (@($approved.affectedFiles).Count -eq 2 -and @($approved.affectedFiles | Where-Object { Same-Path $_ $outsideCopy }).Count -eq 2) "Approved save-as batch affectedFiles: $($approved.affectedFiles -join ', ')"
+            Assert-True ((Get-Item -LiteralPath $document.path).LastWriteTimeUtc -eq $fixtureWritten) "The save-as batch wrote the original fixture."
+            Pass "save_as_then_get_active_document_save_succeeds_with_emitted_grants"
+
+            $insideSaved = Invoke-Broker (SaveAs-Then-Save $insideCopy) (Target $documentId) $narrowRoot
+            Assert-Status $insideSaved "succeeded" "inside-root save-as, get_active_document, save"
+            Assert-True (@($insideSaved.affectedFiles).Count -eq 2 -and @($insideSaved.affectedFiles | Where-Object { Same-Path $_ $insideCopy }).Count -eq 2) "Inside-root save-as batch affectedFiles: $($insideSaved.affectedFiles -join ', ')"
+            Pass "inside_root_save_as_then_get_active_document_save_requests_nothing"
+        }
+        finally {
+            # Move the active document back to the fixture's path for the Selection phase and later runs.
+            $restored = Invoke-Broker @(Op "save_as_document" @{ destinationPath = $document.path; overwrite = $true }) (Target $documentId)
+            Get-ChildItem -LiteralPath $WorkspaceRoot -Filter "$([System.IO.Path]::GetFileNameWithoutExtension($outsideCopy))*.rvt" |
+                Remove-Item -Force
+        }
+        Assert-Status $restored "succeeded" "save the active document back to the fixture path"
+        Assert-True (Same-Path (Get-Active).document.path $document.path) "The active document did not return to the fixture path."
     }
     finally {
         Invoke-Broker @(Op "close_document") (Target $backgroundId) | Out-Null
     }
 }
 finally {
-    Remove-Item -LiteralPath $narrowRoot -Force
+    Remove-Item -LiteralPath $narrowRoot -Recurse -Force
 }
 
 [ordered]@{
