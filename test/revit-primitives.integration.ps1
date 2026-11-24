@@ -273,7 +273,7 @@ if ($Phase -eq "Families") {
     foreach ($candidate in @(@{ name = "Cost"; formula = "2 * 60" }, @{ name = "Manufacturer"; formula = "`"F8 formula`"" }, @{ name = "Model"; formula = "`"F8 formula`"" })) {
         if ($null -eq (Family-Parameter (Family-Read) $candidate.name)) { continue }
         $response = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = $candidate.name; allTypes = $true; formula = $candidate.formula }) }) (Target $familyId)
-        $attempts += [ordered]@{ parameter = $candidate.name; formula = $candidate.formula; status = $response.status; error = $response.error; checks = @($response.checks) }
+        $attempts += [ordered]@{ parameter = $candidate.name; formula = $candidate.formula; status = $response.status; error = (Get-Field $response "error"); checks = @($response.checks) }
         if ($response.status -eq "succeeded") { $formulaTarget = $candidate; break }
         Assert-True ($response.status -eq "failed") "A refused formula on $($candidate.name) left status $($response.status)."
     }
@@ -334,7 +334,7 @@ if ($Phase -eq "Families") {
         $page = Read-Primitive $projectId "find_elements" @{ category = $category; kind = "type"; limit = 2000 }
         foreach ($element in @($page.elements | Where-Object { $null -ne $_.familyId })) {
             $batch = Invoke-Broker @((Op "edit_family" @{ familyId = [long]$element.familyId }), (Op "get_family_parameters")) (Target $projectId)
-            $tried += [ordered]@{ category = $category; familyId = $element.familyId; familyName = $element.familyName; status = $batch.status; error = $batch.error }
+            $tried += [ordered]@{ category = $category; familyId = $element.familyId; familyName = $element.familyName; status = $batch.status; error = (Get-Field $batch "error") }
             if ($batch.status -eq "succeeded") { $edited = [ordered]@{ element = $element; response = $batch }; break }
             Assert-Failure $batch "family_not_editable" "edit_family on $($element.familyName)"
         }
@@ -371,7 +371,7 @@ if ($Phase -eq "Families") {
 
     # A second edit_family of the same, still-open family: recorded as Revit answers it.
     $again = Invoke-Broker @(Op "edit_family" @{ familyId = [long]$edited.element.familyId }) (Target $projectId)
-    $observed.secondEdit = [ordered]@{ status = $again.status; error = $again.error; document = $again.document }
+    $observed.secondEdit = [ordered]@{ status = $again.status; error = (Get-Field $again "error"); document = (Get-Field $again "document") }
 
     $wallTypes = Read-Primitive $projectId "list_types" @{ category = "Walls" }
     $systemType = @($wallTypes)[0]
