@@ -13,6 +13,16 @@ public sealed class BrokerRequest
     public List<TypedOperation> Operations { get; set; } = [];
     public OutsideRootApproval? OutsideRootApproval { get; set; }
     public CaptureRequest? Capture { get; set; }
+    /// <summary>hold.begin only: the run's display name and the time it has left.</summary>
+    public HoldRequest? Hold { get; set; }
+}
+
+/// <summary>A hold.begin request's hold object. The add-in bounds the hold by the smaller of TimeLimitMs and its own limit.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class HoldRequest
+{
+    public string? DisplayName { get; set; }
+    public int? TimeLimitMs { get; set; }
 }
 
 /// <summary>
@@ -201,6 +211,8 @@ public sealed class BrokerResponse
     /// every other operation and for every operation after a failure.
     /// </summary>
     public List<JsonNode?>? Results { get; set; }
+    /// <summary>Held runs only: a save or close in this batch kept the run's changes to that document up to it.</summary>
+    public bool? CommitPoint { get; set; }
     public ErrorReceipt? Error { get; set; }
 }
 

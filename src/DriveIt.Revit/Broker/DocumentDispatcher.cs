@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+using DriveIt.Revit.Bridge;
 
 namespace DriveIt.Revit.Broker;
 
@@ -14,6 +15,13 @@ public sealed partial class DocumentDispatcher
     };
 
     private readonly Dictionary<string, DocumentState> documents = new(StringComparer.Ordinal);
+
+    /// <summary>The hold serving this dispatch, or null: model changes then join the run's group, and saves close it.</summary>
+    internal IHeldDocuments? Held { get; set; }
+
+    /// <summary>The document a bridge call names: a receipt's uniqueId or the path of an open document.</summary>
+    internal Document ResolveForBridge(UIApplication application, DocumentTarget? target) =>
+        RequireDocument(TryResolveInitial(application, target)).Document;
 
     public BrokerResponse Dispatch(UIApplication application, BrokerRequest request)
     {
@@ -202,25 +210,36 @@ public sealed partial class DocumentDispatcher
                 case "save_document":
                     current = RequireDocument(current);
                     RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
+                    MarkCommitPoint(current, response);
                     Save(current, response);
                     break;
                 case "save_as_document":
                     current = RequireDocument(current);
+                    MarkCommitPoint(current, response);
                     SaveAs(current, arguments, response);
                     break;
                 case "close_document":
                     current = RequireDocument(current);
+                    Held?.CommitPoint(current.Document);
                     Close(current, response);
                     current = null;
                     break;
                 case "delete_document":
                     current = RequireDocument(current);
                     RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
+                    Held?.CommitPoint(current.Document);
                     Delete(current, response);
                     current = null;
                     break;
             }
         }
+    }
+
+    /// <summary>In a hold, a save keeps what the run did to the document before it (spec #15, a save is a commit point).</summary>
+    private void MarkCommitPoint(DocumentState state, BrokerResponse response)
+    {
+        if (Held?.CommitPoint(state.Document) == true)
+            response.CommitPoint = true;
     }
 
     private DocumentState Open(UIApplication application, DocumentOperationArguments arguments, BrokerResponse response)
@@ -335,7 +354,7 @@ public sealed partial class DocumentDispatcher
         response.AffectedFiles.Add(path);
     }
 
-    private static bool ApplyModelBatch(DocumentState state, List<ModelChangeRequest> changes, BrokerResponse response)
+    private bool ApplyModelBatch(DocumentState state, List<ModelChangeRequest> changes, BrokerResponse response)
     {
         ValidateChanges(state.Document, changes);
         response.Document = Snapshot(state);
@@ -343,6 +362,7 @@ public sealed partial class DocumentDispatcher
         var initialElementCount = response.AffectedElements.Count;
         var initialViewCount = response.CreatedViews?.Count ?? 0;
 
+        Held?.BeforeTransaction(state.Document);
         using var transaction = new Transaction(state.Document, "Drive It model batch");
         transaction.Start();
         try
@@ -396,7 +416,9 @@ public sealed partial class DocumentDispatcher
 
             var status = transaction.Commit();
             if (status != TransactionStatus.Committed)
-                throw new InvalidOperationException($"Revit returned transaction status {status}.");
+                throw new InvalidOperationException(Held?.TakeErrors() is { } errors
+                    ? $"Revit rolled back the model batch: {errors}"
+                    : $"Revit returned transaction status {status}.");
             response.Checks.Add(new CheckReceipt
             {
                 Name = "transaction_commit",

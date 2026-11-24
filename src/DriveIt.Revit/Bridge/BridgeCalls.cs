@@ -1,0 +1,652 @@
+using System.Collections;
+using System.Globalization;
+using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Autodesk.Revit.DB;
+
+namespace DriveIt.Revit.Bridge;
+
+/// <summary>A bridge call the script made wrongly or Revit refused; the script receives RevitError with it.</summary>
+public sealed class BridgeException(string code, string message) : Exception(message)
+{
+    public string Code { get; } = code;
+}
+
+/// <summary>A Revit API type named by a DB path, e.g. DB.XYZ or DB.Wall. Never handed to a script as a System.Type.</summary>
+internal sealed record TypeReference(Type Type)
+{
+    public override string ToString() => Type.FullName ?? Type.Name;
+}
+
+/// <summary>
+/// Resolves a script's bridge calls by reflection, on Revit's thread, against the run's handle table.
+/// Numbers, strings, booleans and null cross by value; everything else is a handle that lasts for the run.
+/// </summary>
+internal sealed class BridgeCalls
+{
+    public const string RootNamespace = "Autodesk.Revit.DB";
+    private const int DefaultChunk = 256;
+    private const int MaximumChunk = 4096;
+    private static readonly Assembly RevitApi = typeof(Document).Assembly;
+    private static readonly HashSet<Type> OwnedByDriveIt = [typeof(Transaction), typeof(TransactionGroup), typeof(SubTransaction)];
+    private static readonly Dictionary<string, Type?> TypeCache = new(StringComparer.Ordinal);
+
+    private readonly Dictionary<long, object> objects = new();
+    private readonly Dictionary<object, long> ids = new(ReferenceEqualityComparer.Instance);
+    private long nextId;
+
+    public int HandleCount => objects.Count;
+
+    public void Clear()
+    {
+        objects.Clear();
+        ids.Clear();
+    }
+
+    public JsonNode? Get(JsonObject call)
+    {
+        var member = RequireMember(call);
+        var target = Target(call);
+        if (target is TypeReference type)
+            return Encode(StaticMember(type.Type, member));
+        if (HasMethod(target.GetType(), member, BindingFlags.Instance))
+            return new JsonObject { ["$method"] = member };
+        return Encode(InstanceMember(target, member));
+    }
+
+    public JsonNode? Set(JsonObject call)
+    {
+        var member = RequireMember(call);
+        var target = Target(call);
+        var (type, flags, instance) = target is TypeReference reference
+            ? (reference.Type, BindingFlags.Static, (object?)null)
+            : (target.GetType(), BindingFlags.Instance, target);
+        var property = FindProperty(type, member, flags);
+        if (property is not null)
+        {
+            if (property.SetMethod is not { IsPublic: true })
+                throw new BridgeException("member_read_only", $"{TypeName(type)}.{member} cannot be set.");
+            if (!TryConvert(call["value"], property.PropertyType, out var value, out _))
+                throw new BridgeException("invalid_argument",
+                    $"{TypeName(type)}.{member} takes {TypeName(property.PropertyType)}; the value given does not convert to it.");
+            Invoke(() => property.SetValue(instance, value));
+            return null;
+        }
+        var field = type.GetField(member, BindingFlags.Public | flags);
+        if (field is null || field.IsInitOnly || field.IsLiteral)
+            throw MemberNotFound(type, member, flags);
+        if (!TryConvert(call["value"], field.FieldType, out var fieldValue, out _))
+            throw new BridgeException("invalid_argument",
+                $"{TypeName(type)}.{member} takes {TypeName(field.FieldType)}; the value given does not convert to it.");
+        Invoke(() => field.SetValue(instance, fieldValue));
+        return null;
+    }
+
+    /// <summary>
+    /// A method call on a handle, a static method on a DB type (target path with member), or a constructor
+    /// (target path naming a type, no member).
+    /// </summary>
+    public JsonNode? Call(JsonObject call)
+    {
+        var arguments = call["args"] as JsonArray ?? [];
+        var member = call["member"]?.GetValue<string>();
+        var target = Target(call);
+        if (target is TypeReference type)
+        {
+            if (string.IsNullOrEmpty(member))
+                return Encode(Construct(type.Type, arguments));
+            return Encode(InvokeMethod(type.Type, null, member, arguments, BindingFlags.Static));
+        }
+        if (string.IsNullOrEmpty(member))
+            throw new BridgeException("not_callable", $"A {TypeName(target.GetType())} handle cannot be called; call one of its methods.");
+        return Encode(InvokeMethod(target.GetType(), target, member, arguments, BindingFlags.Instance));
+    }
+
+    public JsonNode? Index(JsonObject call)
+    {
+        var target = Instance(call);
+        var key = call["key"];
+        if (target is Array array)
+        {
+            if (!TryConvert(key, typeof(int), out var position, out _))
+                throw new BridgeException("invalid_argument", "An array index must be an integer.");
+            return Encode(Invoke(() => array.GetValue((int)position!)));
+        }
+        if (!HasMethod(target.GetType(), "get_Item", BindingFlags.Instance))
+            throw new BridgeException("not_indexable", $"A {TypeName(target.GetType())} cannot be indexed.");
+        return Encode(InvokeMethod(target.GetType(), target, "get_Item", [key?.DeepClone()], BindingFlags.Instance));
+    }
+
+    /// <summary>Starts walking a collection: the first chunk of items, and an iterator handle while more remain.</summary>
+    public JsonNode Iterate(JsonObject call)
+    {
+        var target = Instance(call);
+        if (target is string || target is not IEnumerable enumerable)
+            throw new BridgeException("not_iterable", $"A {TypeName(target.GetType())} is not a collection.");
+        var enumerator = Invoke(() => enumerable.GetEnumerator())!;
+        return Chunk((IEnumerator)enumerator, Count(call));
+    }
+
+    public JsonNode Next(JsonObject call)
+    {
+        var id = call["iterator"]?.GetValue<long>() ?? throw new BridgeException("invalid_call", "next requires an iterator.");
+        if (Lookup(id) is not IEnumerator enumerator)
+            throw new BridgeException("invalid_handle", "The iterator is not valid in this run.");
+        return Chunk(enumerator, Count(call));
+    }
+
+    public JsonNode? Length(JsonObject call)
+    {
+        var target = Instance(call);
+        return target switch
+        {
+            Array array => array.Length,
+            ICollection collection => collection.Count,
+            _ => Invoke(() => (FindProperty(target.GetType(), "Count", BindingFlags.Instance)
+                    ?? FindProperty(target.GetType(), "Size", BindingFlags.Instance)
+                    ?? throw new BridgeException("no_length", $"A {TypeName(target.GetType())} has no length."))
+                .GetValue(target)) is { } count
+                ? JsonValue.Create(Convert.ToInt64(count, CultureInfo.InvariantCulture))
+                : null,
+        };
+    }
+
+    public JsonNode Equal(JsonObject call)
+    {
+        var target = Target(call);
+        if (!TryConvert(call["other"], typeof(object), out var other, out _))
+            return false;
+        if (target is TypeReference reference)
+            return other is TypeReference otherReference && reference.Type == otherReference.Type;
+        return Invoke(() => target.Equals(other)) is true;
+    }
+
+    public JsonNode? Text(JsonObject call) => Target(call) switch
+    {
+        TypeReference reference => reference.ToString(),
+        var target => (string?)Invoke(() => target.ToString()),
+    };
+
+    /// <summary>Hands the script a handle to an object the add-in resolved (a document or an element).</summary>
+    public JsonNode? Handle(object value) => Encode(value);
+
+    public object Lookup(long id) => objects.TryGetValue(id, out var value)
+        ? value
+        : throw new BridgeException("invalid_handle",
+            "This handle is not valid in this run. Handles last for one run; carry an element to the next run by its integer id.");
+
+    private JsonObject Chunk(IEnumerator enumerator, int count)
+    {
+        var items = new JsonArray();
+        var done = false;
+        Invoke(() =>
+        {
+            while (items.Count < count)
+            {
+                if (!enumerator.MoveNext())
+                {
+                    done = true;
+                    break;
+                }
+                items.Add(Encode(enumerator.Current));
+            }
+            return null;
+        });
+        var chunk = new JsonObject { ["items"] = items, ["done"] = done };
+        if (!done)
+            chunk["$iter"] = Add(enumerator);
+        else
+            Forget(enumerator);
+        return chunk;
+    }
+
+    private static int Count(JsonObject call)
+    {
+        var count = call["count"]?.GetValue<int>() ?? DefaultChunk;
+        return Math.Clamp(count, 1, MaximumChunk);
+    }
+
+    private object Target(JsonObject call)
+    {
+        var node = call["target"] ?? throw new BridgeException("invalid_call", "The call names no target.");
+        if (node is JsonObject reference && reference["$path"] is { } path)
+            return ResolvePath(path.GetValue<string>());
+        if (node is JsonObject handle && handle["$h"] is { } id)
+            return Lookup(id.GetValue<long>());
+        throw new BridgeException("invalid_call", "A call target is a handle or a DB path.");
+    }
+
+    private object Instance(JsonObject call) => Target(call) is TypeReference reference
+        ? throw new BridgeException("invalid_call", $"{reference} is a type; use one of its members.")
+        : Target(call);
+
+    private static string RequireMember(JsonObject call)
+    {
+        var member = call["member"]?.GetValue<string>();
+        return string.IsNullOrWhiteSpace(member) ? throw new BridgeException("invalid_call", "The call names no member.") : member;
+    }
+
+    private long Add(object value)
+    {
+        if (ids.TryGetValue(value, out var id))
+            return id;
+        id = ++nextId;
+        objects[id] = value;
+        ids[value] = id;
+        return id;
+    }
+
+    private void Forget(object value)
+    {
+        if (ids.Remove(value, out var id))
+            objects.Remove(id);
+    }
+
+    private JsonNode? Encode(object? value)
+    {
+        switch (value)
+        {
+            case null:
+                return null;
+            case string text:
+                return text;
+            case bool flag:
+                return flag;
+            case char character:
+                return character.ToString();
+            case byte or sbyte or short or ushort or int or uint or long:
+                return JsonValue.Create(Convert.ToInt64(value, CultureInfo.InvariantCulture));
+            case ulong unsigned:
+                return JsonValue.Create(unsigned);
+            case float or double or decimal:
+                var number = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                return double.IsFinite(number) ? JsonValue.Create(number) : number.ToString(CultureInfo.InvariantCulture);
+        }
+        return new JsonObject
+        {
+            ["$h"] = Add(value),
+            ["type"] = value is TypeReference reference ? $"type {reference}" : TypeName(value.GetType()),
+        };
+    }
+
+    /// <summary>
+    /// A DB path, e.g. Autodesk.Revit.DB.Structure.StructuralType.NonStructural: the longest prefix that names a
+    /// Revit API type, then static members of it and members of what they return.
+    /// </summary>
+    private object ResolvePath(string path)
+    {
+        if (path != RootNamespace && !path.StartsWith(RootNamespace + ".", StringComparison.Ordinal))
+            throw new BridgeException("invalid_call", $"'{path}' is not under DB.");
+        var parts = path.Split('.');
+        for (var length = parts.Length; length > 3; length--)
+        {
+            var type = FindType(string.Join('.', parts, 0, length));
+            if (type is null)
+                continue;
+            object current = new TypeReference(type);
+            for (var index = length; index < parts.Length; index++)
+            {
+                current = current switch
+                {
+                    TypeReference reference when reference.Type.GetNestedType(parts[index], BindingFlags.Public) is { } nested =>
+                        new TypeReference(nested),
+                    TypeReference reference => StaticMember(reference.Type, parts[index])
+                        ?? throw new BridgeException("null_value", $"{reference}.{parts[index]} is null."),
+                    var value => InstanceMember(value, parts[index])
+                        ?? throw new BridgeException("null_value", $"{string.Join('.', parts, 0, index + 1)} is null."),
+                };
+            }
+            return current;
+        }
+        throw new BridgeException("member_not_found", $"'{path}' does not name a Revit API type or member.");
+    }
+
+    private static Type? FindType(string name)
+    {
+        lock (TypeCache)
+        {
+            if (!TypeCache.TryGetValue(name, out var type))
+                TypeCache[name] = type = RevitApi.GetType(name, false) is { IsPublic: true } found ? found : null;
+            return type;
+        }
+    }
+
+    private static object? StaticMember(Type type, string member)
+    {
+        if (FindProperty(type, member, BindingFlags.Static) is { } property)
+            return Invoke(() => property.GetValue(null));
+        if (type.GetField(member, BindingFlags.Public | BindingFlags.Static) is { } field)
+            return Invoke(() => field.GetValue(null));
+        if (HasMethod(type, member, BindingFlags.Static))
+            throw new BridgeException("member_is_method", $"{TypeName(type)}.{member} is a method; call it.");
+        throw MemberNotFound(type, member, BindingFlags.Static);
+    }
+
+    private static object? InstanceMember(object target, string member)
+    {
+        var type = target.GetType();
+        if (FindProperty(type, member, BindingFlags.Instance) is { } property)
+            return Invoke(() => property.GetValue(target));
+        if (type.GetField(member, BindingFlags.Public | BindingFlags.Instance) is { } field)
+            return Invoke(() => field.GetValue(target));
+        throw MemberNotFound(type, member, BindingFlags.Instance);
+    }
+
+    /// <summary>The most derived public, non-indexed property of that name (a derived type may hide a base one).</summary>
+    private static PropertyInfo? FindProperty(Type type, string name, BindingFlags flags) =>
+        type.GetProperties(BindingFlags.Public | flags)
+            .Where(property => property.Name == name && property.GetIndexParameters().Length == 0)
+            .OrderByDescending(property => Depth(property.DeclaringType))
+            .FirstOrDefault();
+
+    private static bool HasMethod(Type type, string name, BindingFlags flags) =>
+        type.GetMethods(BindingFlags.Public | flags).Any(method => method.Name == name);
+
+    private object Construct(Type type, JsonArray arguments)
+    {
+        if (OwnedByDriveIt.Contains(type))
+            throw new BridgeException("member_not_allowed",
+                $"Drive-It owns every transaction; a script cannot create a {type.Name}. Put Revit changes inside `with revit.transaction(\"name\"):`.");
+        if (type.IsAbstract)
+            throw new BridgeException("not_constructible", $"{TypeName(type)} is abstract and cannot be constructed.");
+        var constructor = SelectOverload(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments, out var converted)
+            ?? throw NoOverload(type, ".ctor", type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments);
+        return Invoke(() => ((ConstructorInfo)constructor).Invoke(converted))!;
+    }
+
+    private object? InvokeMethod(Type type, object? target, string name, JsonArray arguments, BindingFlags flags)
+    {
+        var candidates = type.GetMethods(BindingFlags.Public | flags)
+            .Where(method => method.Name == name && !method.ContainsGenericParameters)
+            .ToList();
+        if (candidates.Count == 0)
+            throw MemberNotFound(type, name, flags);
+        var method = SelectOverload(candidates, arguments, out var converted)
+            ?? throw NoOverload(type, name, candidates, arguments);
+        return Invoke(() => method.Invoke(target, converted));
+    }
+
+    private MethodBase? SelectOverload(IEnumerable<MethodBase> candidates, JsonArray arguments, out object?[] converted)
+    {
+        MethodBase? best = null;
+        var bestScore = int.MinValue;
+        converted = [];
+        foreach (var candidate in candidates.OrderBy(method => method.GetParameters().Length))
+        {
+            var parameters = candidate.GetParameters();
+            if (parameters.Any(parameter => parameter.ParameterType.IsByRef || parameter.IsDefined(typeof(ParamArrayAttribute))))
+                continue;
+            var required = parameters.Count(parameter => !parameter.IsOptional);
+            if (arguments.Count < required || arguments.Count > parameters.Length)
+                continue;
+            var values = new object?[parameters.Length];
+            var score = 0;
+            var matches = true;
+            for (var index = 0; index < parameters.Length && matches; index++)
+            {
+                if (index >= arguments.Count)
+                {
+                    values[index] = parameters[index].HasDefaultValue ? parameters[index].DefaultValue : Type.Missing;
+                    continue;
+                }
+                matches = TryConvert(arguments[index], parameters[index].ParameterType, out values[index], out var argumentScore);
+                score += argumentScore;
+            }
+            if (!matches || score <= bestScore)
+                continue;
+            best = candidate;
+            bestScore = score;
+            converted = values;
+        }
+        return best;
+    }
+
+    /// <summary>Converts one script value to a parameter type; a higher score is a closer match.</summary>
+    private bool TryConvert(JsonNode? node, Type target, out object? value, out int score)
+    {
+        value = null;
+        score = 0;
+        var underlying = Nullable.GetUnderlyingType(target);
+        if (node is null)
+        {
+            score = 1;
+            return !target.IsValueType || underlying is not null;
+        }
+        target = underlying ?? target;
+        switch (node)
+        {
+            case JsonObject reference when reference["$h"] is { } id:
+                return TryObject(Lookup(id.GetValue<long>()), target, out value, out score);
+            case JsonObject reference when reference["$path"] is { } path:
+                return TryObject(ResolvePath(path.GetValue<string>()), target, out value, out score);
+            case JsonObject:
+                return false;
+            case JsonArray array:
+                return TryCollection(array, target, out value, out score);
+        }
+
+        var element = node.GetValue<JsonElement>();
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.True or JsonValueKind.False:
+                value = element.GetBoolean();
+                score = target == typeof(bool) ? 100 : 10;
+                return target == typeof(bool) || target == typeof(object);
+            case JsonValueKind.String:
+                var text = element.GetString()!;
+                if (target == typeof(string))
+                {
+                    value = text;
+                    score = 100;
+                    return true;
+                }
+                if (target == typeof(char) && text.Length == 1)
+                {
+                    value = text[0];
+                    score = 60;
+                    return true;
+                }
+                value = text;
+                score = 10;
+                return target == typeof(object);
+            case JsonValueKind.Number:
+                return TryNumber(element, target, out value, out score);
+        }
+        return false;
+    }
+
+    private static bool TryNumber(JsonElement element, Type target, out object? value, out int score)
+    {
+        value = null;
+        score = 0;
+        var raw = element.GetRawText();
+        var integral = raw.IndexOfAny(['.', 'e', 'E']) < 0 && element.TryGetInt64(out _);
+        try
+        {
+            if (integral)
+            {
+                var whole = element.GetInt64();
+                (value, score) = Type.GetTypeCode(target) switch
+                {
+                    TypeCode.Int64 => (whole, 100),
+                    TypeCode.Int32 => ((object)checked((int)whole), 100),
+                    TypeCode.Int16 => (checked((short)whole), 80),
+                    TypeCode.Byte => (checked((byte)whole), 80),
+                    TypeCode.SByte => (checked((sbyte)whole), 80),
+                    TypeCode.UInt16 => (checked((ushort)whole), 80),
+                    TypeCode.UInt32 => (checked((uint)whole), 80),
+                    TypeCode.UInt64 => (checked((ulong)whole), 80),
+                    TypeCode.Double => ((double)whole, 70),
+                    TypeCode.Single => ((float)whole, 60),
+                    TypeCode.Decimal => ((decimal)whole, 60),
+                    _ => (target == typeof(object) ? whole : null, target == typeof(object) ? 10 : 0),
+                };
+                return value is not null;
+            }
+            var real = element.GetDouble();
+            (value, score) = Type.GetTypeCode(target) switch
+            {
+                TypeCode.Double => ((object)real, 100),
+                TypeCode.Single => ((float)real, 80),
+                TypeCode.Decimal => ((decimal)real, 80),
+                _ => (target == typeof(object) ? real : null, target == typeof(object) ? 10 : 0),
+            };
+            return value is not null;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryObject(object source, Type target, out object? value, out int score)
+    {
+        value = null;
+        score = 0;
+        if (source is TypeReference reference)
+        {
+            if (target == typeof(Type))
+            {
+                value = reference.Type;
+                score = 100;
+                return true;
+            }
+            if (target != typeof(object))
+                return false;
+            value = reference;
+            score = 10;
+            return true;
+        }
+        if (!target.IsInstanceOfType(source))
+            return false;
+        value = source;
+        if (target == typeof(object))
+            score = 10;
+        else if (target.IsInterface)
+            score = 50;
+        else
+            score = Math.Max(20, 100 - 5 * (Depth(source.GetType()) - Depth(target)));
+        return true;
+    }
+
+    /// <summary>A Python list becomes the array, list or set the parameter expects.</summary>
+    private bool TryCollection(JsonArray array, Type target, out object? value, out int score)
+    {
+        value = null;
+        score = 0;
+        Type? item;
+        Func<IList, object> build;
+        if (target.IsArray)
+        {
+            item = target.GetElementType()!;
+            build = items =>
+            {
+                var result = Array.CreateInstance(item, items.Count);
+                items.CopyTo(result, 0);
+                return result;
+            };
+        }
+        else if (target.IsGenericType && target.GetGenericArguments().Length == 1)
+        {
+            item = target.GetGenericArguments()[0];
+            var definition = target.GetGenericTypeDefinition();
+            if (definition == typeof(ISet<>) || definition == typeof(HashSet<>))
+                build = items => Activator.CreateInstance(typeof(HashSet<>).MakeGenericType(item), items)!;
+            else if (definition == typeof(IList<>) || definition == typeof(ICollection<>) || definition == typeof(IEnumerable<>)
+                || definition == typeof(List<>) || definition == typeof(IReadOnlyList<>) || definition == typeof(IReadOnlyCollection<>))
+                build = items => items;
+            else
+                return false;
+        }
+        else
+        {
+            return false;
+        }
+
+        var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(item))!;
+        var lowest = 100;
+        foreach (var entry in array)
+        {
+            if (!TryConvert(entry, item, out var converted, out var entryScore))
+                return false;
+            list.Add(converted);
+            lowest = Math.Min(lowest, entryScore);
+        }
+        value = build(list);
+        score = lowest;
+        return true;
+    }
+
+    /// <summary>Runs a reflected member and surfaces what Revit threw, by its own message.</summary>
+    private static object? Invoke(Func<object?> action)
+    {
+        try
+        {
+            return action();
+        }
+        catch (TargetInvocationException exception) when (exception.InnerException is not null)
+        {
+            throw Translate(exception.InnerException);
+        }
+        catch (Exception exception) when (exception is not BridgeException)
+        {
+            throw Translate(exception);
+        }
+    }
+
+    private static void Invoke(Action action) => Invoke(() =>
+    {
+        action();
+        return null;
+    });
+
+    private static BridgeException Translate(Exception exception)
+    {
+        if (exception is BridgeException bridge)
+            return bridge;
+        if (exception is Autodesk.Revit.Exceptions.ModificationOutsideTransactionException)
+            return new BridgeException("modification_outside_transaction",
+                $"{exception.Message} Put Revit changes inside `with revit.transaction(\"name\"):`.");
+        return new BridgeException("revit_api_error", $"{exception.GetType().Name}: {exception.Message}");
+    }
+
+    private static BridgeException MemberNotFound(Type type, string member, BindingFlags flags)
+    {
+        var properties = type.GetProperties(BindingFlags.Public | flags).Where(property => property.GetIndexParameters().Length == 0)
+            .Select(property => property.Name).ToHashSet(StringComparer.Ordinal);
+        var methods = type.GetMethods(BindingFlags.Public | flags).Select(method => method.Name)
+            .Where(name => !name.StartsWith("op_", StringComparison.Ordinal) && !name.StartsWith("add_", StringComparison.Ordinal)
+                && !name.StartsWith("remove_", StringComparison.Ordinal)
+                && !((name.StartsWith("get_", StringComparison.Ordinal) || name.StartsWith("set_", StringComparison.Ordinal)) && properties.Contains(name[4..])));
+        var fields = type.GetFields(BindingFlags.Public | flags).Select(field => field.Name);
+        var names = properties.Concat(methods).Concat(fields).Distinct().Order(StringComparer.Ordinal);
+        var kind = flags.HasFlag(BindingFlags.Static) ? "static member" : "member";
+        return new BridgeException("member_not_found",
+            $"{TypeName(type)} has no {kind} '{member}'. Its {kind}s are: {string.Join(", ", names)}.");
+    }
+
+    private static BridgeException NoOverload(Type type, string name, IEnumerable<MethodBase> candidates, JsonArray arguments)
+    {
+        var signatures = candidates.Select(method =>
+            $"{(name == ".ctor" ? TypeName(type) : name)}({string.Join(", ", method.GetParameters().Select(parameter => $"{TypeName(parameter.ParameterType)} {parameter.Name}"))})");
+        return new BridgeException("no_matching_overload",
+            $"No {TypeName(type)}.{(name == ".ctor" ? "constructor" : name)} takes these {arguments.Count} argument(s). It has: {string.Join("; ", signatures)}.");
+    }
+
+    private static int Depth(Type? type)
+    {
+        var depth = 0;
+        for (; type is not null; type = type.BaseType)
+            depth++;
+        return depth;
+    }
+
+    internal static string TypeName(Type type)
+    {
+        if (!type.IsGenericType)
+            return type.FullName ?? type.Name;
+        var name = type.GetGenericTypeDefinition().FullName ?? type.Name;
+        return $"{name[..name.IndexOf('`')]}<{string.Join(", ", type.GetGenericArguments().Select(TypeName))}>";
+    }
+}
