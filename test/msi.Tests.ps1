@@ -12,20 +12,25 @@ param(
 # companions leg of rst-c installer-bundle/ci-bundle-smoke.ps1), with the tray's command line
 #   msiexec /i <msi> /qn /norestart MSIRESTARTMANAGERCONTROL=Disable
 # where any exit but 0 is a failure (3010 = reboot needed):
-#   - with no Revit 2026 the launch condition blocks a first install;
-#   - with a stub Revit 2026 (C:\Program Files\Autodesk\Revit 2026\Revit.exe) the lower version
-#     installs; this MSI upgrades it with 0 while Drive-It's own node.exe and python.exe hold
+#   - with no supported Revit the launch condition blocks a first install, naming 2026 and 2027;
+#   - with a stub Revit 2026 alone, then a stub Revit 2027 alone (C:\Program Files\Autodesk\
+#     Revit <year>\Revit.exe), the MSI installs with 0 and registers BOTH years' add-ins (spec #22
+#     "Install Rule": a Revit added later finds Drive-It), and /x removes both;
+#   - with both stubs the lower version installs; this MSI upgrades it with 0 while Drive-It's own
+#     node.exe and python.exe hold
 #     files in the install folder (stopped by StopDriveItProcesses, not queued for a reboot),
 #     and with DriveIt.Revit.dll on disk at a higher file version than this MSI's (as
 #     alpha.1/alpha.2 shipped 1.0.0.0), which must still be replaced;
 #   - one product and one Settings > Apps entry remain: DisplayName 'Drive-It', DisplayVersion =
 #     this MSI's ProductVersion;
-#   - one .addin in Addins\2026 with Drive-It's ClientId, VendorId DSOS, Name Drive-It, and
-#     nothing new under %AppData%\RST (C6);
+#   - in Addins\2026 and in Addins\2027, one .addin with Drive-It's ClientId, VendorId DSOS,
+#     Name Drive-It, naming that year's build (app\addin\<year>), and nothing new under
+#     %AppData%\RST (C6);
 #   - the in-place registration (MCP clients, shortcut, operator window) as before;
 #   - installing the lower version over this one is blocked and changes nothing (C3);
 #   - /x /qn exits 0, again with node.exe and python.exe running, and removes registrations
-#     while user data is kept.
+#     (both years' add-ins) while user data is kept.
+# A real Revit on the computer is never hidden: a case that needs that year absent is skipped.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -37,7 +42,8 @@ $productName = 'Drive-It'
 [IO.Directory]::CreateDirectory($LogDirectory) | Out-Null
 $install = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DriveIt'
 $app = Join-Path $install 'app'
-$addinPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026\DriveIt.addin'
+# The supported Revit years (installer/Build-DriveItPackage.ps1); this test names them itself.
+$revitYears = @('2026', '2027')
 $shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drive-It.lnk'
 $previousShortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drive It.lnk'
 $operatorExe = Join-Path $app 'operator\DriveIt.Operator.exe'
@@ -51,6 +57,83 @@ function Assert-MsiTest {
 }
 
 . (Join-Path $PSScriptRoot 'operator-self-test.ps1')
+
+function Get-AddinPath([string]$Year) {
+    return Join-Path ([Environment]::GetFolderPath('ApplicationData')) "Autodesk\Revit\Addins\$Year\DriveIt.addin"
+}
+
+function Assert-AddinsRegistered {
+    # C6 for every supported year: Addins\<year> holds DriveIt.addin alone with Drive-It's
+    # ClientId, VendorId DSOS and Name Drive-It, naming that year's build in the MSI install.
+    param([string]$When)
+    foreach ($year in $revitYears) {
+        $addinPath = Get-AddinPath $year
+        Assert-MsiTest ([IO.File]::Exists($addinPath)) "${When}: Addins\$year has no DriveIt.addin."
+        $withClientId = @(Get-ChildItem -LiteralPath (Split-Path -Parent $addinPath) -Filter '*.addin' -File | Where-Object {
+            (Get-Content -LiteralPath $_.FullName -Raw) -match [regex]::Escape($clientId)
+        })
+        Assert-MsiTest ($withClientId.Count -eq 1 -and $withClientId[0].Name -eq 'DriveIt.addin') "${When}: Addins\$year holds $($withClientId.Count) manifests with ClientId $clientId, expected DriveIt.addin alone."
+        $manifest = ([xml](Get-Content -LiteralPath $addinPath -Raw)).RevitAddIns.AddIn
+        $manifestIdNode = $manifest.SelectSingleNode('ClientId')
+        if ($null -eq $manifestIdNode) {
+            $manifestIdNode = $manifest.SelectSingleNode('AddInId')
+        }
+        $manifestId = if ($null -eq $manifestIdNode) { '' } else { $manifestIdNode.InnerText.Trim() }
+        Assert-MsiTest ($manifestId -eq $clientId) "${When}: the Revit $year add-in ClientId is '$manifestId', expected $clientId."
+        Assert-MsiTest ($manifest.VendorId -eq 'DSOS') "${When}: the Revit $year add-in VendorId is '$($manifest.VendorId)', expected DSOS."
+        $manifestName = $manifest.SelectSingleNode('Name').InnerText
+        Assert-MsiTest ($manifestName -ceq $productName) "${When}: the Revit $year add-in is named '$manifestName', expected '$productName'."
+        $assembly = Join-Path $app "addin\$year\DriveIt.Revit.dll"
+        Assert-MsiTest ($manifest.Assembly -eq $assembly) "${When}: Addins\$year\DriveIt.addin names '$($manifest.Assembly)', expected the MSI install's $year build $assembly."
+        Assert-MsiTest ([IO.File]::Exists($assembly)) "${When}: the Revit $year build is not installed: $assembly."
+    }
+}
+
+function Assert-AddinsRemoved {
+    param([string]$When)
+    foreach ($year in $revitYears) {
+        Assert-MsiTest (-not [IO.File]::Exists((Get-AddinPath $year))) "${When}: the Revit $year add-in is still registered."
+    }
+}
+
+function Get-RevitDirectory([string]$Year) {
+    return Join-Path $env:ProgramW6432 "Autodesk\Revit $Year"
+}
+
+function Test-RevitInstalled([string]$Year) {
+    # A real Revit: Revit.exe in the default folder, or its uninstall entry (the MSI's two searches).
+    $uninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7346B4A0-$($Year.Substring(2))00-0510-0000-705C0D862004}"
+    return [IO.File]::Exists((Join-Path (Get-RevitDirectory $Year) 'Revit.exe')) -or (Test-Path -LiteralPath $uninstallKey)
+}
+
+$script:stubs = @()
+function Set-StubRevit {
+    # Exactly these years present: the stub rst-c's bundle smoke uses (an empty Revit.exe in the
+    # default folder) for each one not really installed, and this test's other stubs removed.
+    param([string[]]$Years = @())
+    foreach ($year in $revitYears) {
+        $directory = Get-RevitDirectory $year
+        $exe = Join-Path $directory 'Revit.exe'
+        if ($Years -contains $year) {
+            if ($realRevit -notcontains $year -and $script:stubs -notcontains $year) {
+                [IO.Directory]::CreateDirectory($directory) | Out-Null
+                [IO.File]::WriteAllText($exe, 'drive-it ci stub')
+                $script:stubs += $year
+            }
+        } elseif ($script:stubs -contains $year) {
+            Remove-Item -LiteralPath $exe -Force
+            if (-not (Get-ChildItem -LiteralPath $directory -Force)) {
+                Remove-Item -LiteralPath $directory -Force
+            }
+            $script:stubs = @($script:stubs | Where-Object { $_ -ne $year })
+        }
+    }
+}
+
+function Test-CaseRunnable([string[]]$Years = @()) {
+    # A case can run when no Revit outside it is really installed.
+    return @($realRevit | Where-Object { $Years -notcontains $_ }).Count -eq 0
+}
 
 function Invoke-Msiexec {
     # The tray's command line exactly. Returns the exit code; -ExpectFailure inverts the check.
@@ -197,23 +280,39 @@ Write-Output "MSI under test: $msi ($version); lower version: $lowerMsi ($lowerV
 Assert-MsiTest ([version]$lowerVersion -lt [version]$version) "The lower MSI ($lowerVersion) is not below the MSI under test ($version)."
 Assert-MsiTest ((Get-RelatedProduct).Count -eq 0) 'Drive-It is already installed on this computer; the test needs a clean user.'
 
-# Launch condition: with no Revit 2026 a first install is blocked and changes nothing.
-$revitDirectory = Join-Path $env:ProgramW6432 'Autodesk\Revit 2026'
-$revitExe = Join-Path $revitDirectory 'Revit.exe'
-$revitUninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7346B4A0-2600-0510-0000-705C0D862004}'
-$stubRevit = $false
-if (-not [IO.File]::Exists($revitExe) -and -not (Test-Path -LiteralPath $revitUninstallKey)) {
-    Invoke-Msiexec -Operation '/i' -Log 'install-no-revit.log' -ExpectFailure | Out-Null
-    Assert-MsiTest ((Get-RelatedProduct).Count -eq 0) 'The MSI installed without Revit 2026.'
-    $noRevitLog = Get-Content -LiteralPath (Join-Path $LogDirectory 'install-no-revit.log') -Raw
-    Assert-MsiTest ($noRevitLog.Contains('Drive-It needs Autodesk Revit 2026')) 'The install without Revit 2026 did not stop on the launch condition.'
-    # The stub rst-c's bundle smoke uses: an empty Revit.exe in the default folder.
-    [IO.Directory]::CreateDirectory($revitDirectory) | Out-Null
-    [IO.File]::WriteAllText($revitExe, 'drive-it ci stub')
-    $stubRevit = $true
-} else {
-    Write-Output 'Revit 2026 is present; skipping the no-Revit launch-condition case.'
+$realRevit = @($revitYears | Where-Object { Test-RevitInstalled $_ })
+if ($realRevit.Count) {
+    Write-Output "Revit $($realRevit -join ' and ') is installed here; cases that need it absent are skipped."
 }
+
+# Neither: the launch condition blocks a first install, changes nothing, and names both years.
+if (Test-CaseRunnable) {
+    Set-StubRevit
+    Invoke-Msiexec -Operation '/i' -Log 'install-no-revit.log' -ExpectFailure | Out-Null
+    Assert-MsiTest ((Get-RelatedProduct).Count -eq 0) 'The MSI installed without Revit 2026 or 2027.'
+    $noRevitLog = Get-Content -LiteralPath (Join-Path $LogDirectory 'install-no-revit.log') -Raw
+    Assert-MsiTest ($noRevitLog.Contains('Drive-It needs Autodesk Revit 2026 or 2027')) 'The install without Revit 2026 or 2027 did not stop on the launch condition naming both.'
+} else {
+    Write-Output 'Skipping the no-Revit launch-condition case.'
+}
+
+# One year alone: the install succeeds and registers every year's add-in; uninstall removes them all.
+foreach ($year in $revitYears) {
+    if (-not (Test-CaseRunnable @($year))) {
+        Write-Output "Skipping the Revit $year-only case."
+        continue
+    }
+    Set-StubRevit @($year)
+    Invoke-Msiexec -Operation '/i' -Log "install-$year-only.log" | Out-Null
+    Assert-InstalledVersion -Version $version -When "After installing with Revit $year alone"
+    Assert-AddinsRegistered -When "After installing with Revit $year alone"
+    Invoke-Msiexec -Operation '/x' -Log "uninstall-$year-only.log" | Out-Null
+    Assert-MsiTest ((Get-RelatedProduct).Count -eq 0) "After the Revit $year-only uninstall the product is still installed."
+    Assert-AddinsRemoved -When "After the Revit $year-only uninstall"
+}
+
+# Both: the full cycle below (upgrade, the in-place registration, blocked downgrade, uninstall).
+Set-StubRevit $revitYears
 $rstBefore = Get-RstFile
 
 # Stand-in client configurations so install and uninstall register with all three clients.
@@ -236,7 +335,7 @@ Assert-InstalledVersion -Version $lowerVersion -When 'After installing the lower
 # Stand in for a previous release whose add-in DLL had a higher file version: any system DLL
 # with a high version will do. Without REINSTALLMODE=amus the upgrade skips the "older" new
 # file, removes the old one with the old version, and fails with nothing installed.
-$revitDll = Join-Path $app 'addin\DriveIt.Revit.dll'
+$revitDll = Join-Path $app 'addin\2026\DriveIt.Revit.dll'
 $packagedHash = (Get-FileHash -LiteralPath $revitDll -Algorithm SHA256).Hash
 Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\msi.dll') -Destination $revitDll -Force
 $higher = [Diagnostics.FileVersionInfo]::GetVersionInfo($revitDll)
@@ -253,27 +352,11 @@ $server = Join-Path $app 'server\index.js'
 Assert-MsiTest ([IO.File]::Exists($node)) 'The MSI did not install private Node.js.'
 Assert-MsiTest ([IO.File]::Exists($python)) 'The MSI did not install private Python.'
 
-# C6: one manifest carrying Drive-It's ClientId in Addins\2026, and nothing under %AppData%\RST.
-$addinDirectory = Split-Path -Parent $addinPath
-$withClientId = @(Get-ChildItem -LiteralPath $addinDirectory -Filter '*.addin' -File | Where-Object {
-    (Get-Content -LiteralPath $_.FullName -Raw) -match [regex]::Escape($clientId)
-})
-Assert-MsiTest ($withClientId.Count -eq 1 -and $withClientId[0].Name -eq 'DriveIt.addin') "Addins\2026 holds $($withClientId.Count) manifests with ClientId $clientId, expected DriveIt.addin alone."
-$manifest = ([xml](Get-Content -LiteralPath $addinPath -Raw)).RevitAddIns.AddIn
-$manifestIdNode = $manifest.SelectSingleNode('ClientId')
-if ($null -eq $manifestIdNode) {
-    $manifestIdNode = $manifest.SelectSingleNode('AddInId')
-}
-$manifestId = if ($null -eq $manifestIdNode) { '' } else { $manifestIdNode.InnerText.Trim() }
-Assert-MsiTest ($manifestId -eq $clientId) "The add-in ClientId is '$manifestId', expected $clientId."
-Assert-MsiTest ($manifest.VendorId -eq 'DSOS') "The add-in VendorId is '$($manifest.VendorId)', expected DSOS."
-$manifestName = $manifest.SelectSingleNode('Name').InnerText
-Assert-MsiTest ($manifestName -ceq $productName) "The add-in is named '$manifestName', expected '$productName'."
+# C6: one manifest carrying Drive-It's ClientId per supported year, and nothing under %AppData%\RST.
+Assert-AddinsRegistered -When 'After the upgrade'
 $rstNew = @((Get-RstFile) | Where-Object { $rstBefore -notcontains $_ })
 Assert-MsiTest ($rstNew.Count -eq 0) ("The install wrote under %AppData%\RST:`n" + ($rstNew -join "`n"))
 
-$addin = [xml](Get-Content -LiteralPath $addinPath -Raw)
-Assert-MsiTest ($addin.RevitAddIns.AddIn.Assembly -eq (Join-Path $app 'addin\DriveIt.Revit.dll')) 'The add-in manifest does not point at the MSI install.'
 $configuration = Get-Content -LiteralPath $mcpPath -Raw | ConvertFrom-Json
 Assert-MsiTest ($configuration.mcpServers.'drive-it'.command -eq $node) 'MCP configuration does not use the installed private Node.js.'
 Assert-MsiTest ($configuration.mcpServers.'drive-it'.args[0] -eq $server) 'MCP configuration does not use the installed server.'
@@ -300,7 +383,7 @@ Assert-MsiTest ($codexText.Contains('[mcp_servers.drive-it]') -and $codexText.Co
 Invoke-Msiexec -Operation '/i' -Package $lowerMsi -Log 'downgrade.log' -ExpectFailure | Out-Null
 Assert-MsiTest ((Get-Content -LiteralPath (Join-Path $LogDirectory 'downgrade.log') -Raw).Contains('A newer version of Drive-It is already installed')) 'The downgrade was not blocked by the downgrade check.'
 Assert-InstalledVersion -Version $version -When 'After the blocked downgrade'
-Assert-MsiTest ([IO.File]::Exists($addinPath)) 'The blocked downgrade removed the add-in registration.'
+Assert-AddinsRegistered -When 'After the blocked downgrade'
 
 $userData = Join-Path $install 'user-data.sentinel'
 [IO.File]::WriteAllText($userData, 'keep')
@@ -315,7 +398,7 @@ Assert-MsiTest ((Get-RelatedProduct).Count -eq 0) 'The product is still installe
 Assert-MsiTest ((Get-ArpEntry).Count -eq 0) 'The product is still in Settings > Apps after uninstall.'
 Assert-MsiTest (-not [IO.File]::Exists($server)) 'Uninstall left the MCP server behind.'
 Assert-MsiTest (-not [IO.File]::Exists($node)) 'Uninstall left private Node.js behind.'
-Assert-MsiTest (-not [IO.File]::Exists($addinPath)) 'Uninstall left the Revit add-in registered.'
+Assert-AddinsRemoved -When 'After uninstall'
 Assert-MsiTest (-not [IO.File]::Exists($shortcutPath)) 'Uninstall left the operator shortcut.'
 Assert-MsiTest (-not [IO.File]::Exists($previousShortcut)) 'Uninstall left the earlier operator shortcut.'
 Assert-MsiTest (-not [IO.File]::Exists($mcpPath)) 'Uninstall left the Drive It MCP configuration.'
@@ -330,8 +413,6 @@ if ([IO.Directory]::Exists($app)) {
     Assert-MsiTest (-not $leftovers) ("Uninstall left application files:`n" + ($leftovers -join "`n"))
 }
 
-if ($stubRevit) {
-    Remove-Item -LiteralPath $revitDirectory -Recurse -Force
-}
+Set-StubRevit
 
 Write-Output 'msi tests passed'

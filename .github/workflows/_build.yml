@@ -10,10 +10,15 @@ name: _build (reusable)
 #   DriveIt                 the add-in and server bundle release.yml zips
 #
 # The MSI is checked against the RST companion contract twice: installer/inspect-msi.ps1 reads
-# its tables (C1-C3, name, version, ARP icon and links, Revit 2026 launch condition, process stop,
-# 450 MB limit), and test/msi.Tests.ps1 installs it for real with the tray's command line
-# (launch condition, upgrade from a lower-version build of the same package, blocked downgrade,
-# ARP name and version, C6 add-in, uninstall; every exit 0, never 3010).
+# its tables (C1-C3, name, version, ARP icon and links, Revit 2026/2027 detection and launch
+# condition, process stop, 450 MB limit), and test/msi.Tests.ps1 installs it for real with the
+# tray's command line (launch condition without Revit; Revit 2026 alone, 2027 alone and both, each
+# registering both years' add-ins; upgrade from a lower-version build of the same package, blocked
+# downgrade, ARP name and version, C6 add-ins, uninstall; every exit 0, never 3010).
+#
+# The add-in is built once per supported Revit year from one project (spec #22): 2026 on .NET 8
+# and 2027 on .NET 10, so both SDKs are installed. test/operator-runtime.Tests.ps1 starts the
+# Drive-It window on .NET 10 alone (R6).
 #
 # Code signing (input sign; true only from release.yml for a pushed v* tag while the repository
 # variable SIGNING_ENABLED is 'true', see RELEASING.md): the job then joins environment
@@ -63,7 +68,9 @@ jobs:
           cache: npm
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Stamp release version
         if: inputs.version != ''
@@ -166,6 +173,11 @@ jobs:
         shell: pwsh
         run: test/installer.Tests.ps1 -PackagePath "$PWD/artifacts/DriveIt-alpha" -InstallRoot "$env:TEMP/DriveIt-installed" -FixtureDirectory "$env:TEMP/DriveIt-installer-test"
 
+      # Spec #22 R6: a computer with Revit 2027 and not 2026 has .NET 10 and no .NET 8.
+      - name: Verify the Drive-It window on .NET 10 alone
+        shell: pwsh
+        run: test/operator-runtime.Tests.ps1 -PackagePath "$PWD/artifacts/DriveIt-alpha" -WorkDirectory "$env:RUNNER_TEMP/operator-net10"
+
       - name: Publish the Windows alpha installer
         uses: actions/upload-artifact@v4
         with:
@@ -224,20 +236,25 @@ jobs:
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
 
-      # From the package's published (and, on a signing run, signed) add-in, so the release zip
-      # carries the same bytes as the MSI.
+      # From the package's published (and, on a signing run, signed) add-ins, so the release zip
+      # carries the same bytes as the MSI: <year>/DriveIt.addin and <year>/DriveIt/ for each
+      # supported Revit year, copied as they are into %AppData%\Autodesk\Revit\Addins\<year>.
       - name: Stage add-in and MCP server
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $addin = "artifacts/DriveIt-alpha/app/addin"
           $stage = "stage/DriveIt"
-          New-Item -ItemType Directory -Force "$stage/DriveIt", "$stage/server" | Out-Null
-          Copy-Item "$addin/DriveIt.Revit.dll", "$addin/DriveIt.UI.dll", "$addin/DriveIt.Core.dll" "$stage/DriveIt/"
-          if (Test-Path "$addin/Resources/icons") {
-            Copy-Item "$addin/Resources" "$stage/DriveIt/" -Recurse
+          New-Item -ItemType Directory -Force "$stage/server" | Out-Null
+          $years = (Get-Content artifacts/DriveIt-alpha/drive-it-package.json -Raw | ConvertFrom-Json).revitYears
+          foreach ($year in $years) {
+            $addin = "artifacts/DriveIt-alpha/app/addin/$year"
+            New-Item -ItemType Directory -Force "$stage/$year/DriveIt" | Out-Null
+            Copy-Item "$addin/DriveIt.Revit.dll", "$addin/DriveIt.UI.dll", "$addin/DriveIt.Core.dll" "$stage/$year/DriveIt/"
+            if (Test-Path "$addin/Resources/icons") {
+              Copy-Item "$addin/Resources" "$stage/$year/DriveIt/" -Recurse
+            }
+            Copy-Item "src/DriveIt.Revit/DriveIt.addin" "$stage/$year/"
           }
-          Copy-Item "src/DriveIt.Revit/DriveIt.addin" "$stage/"
           Copy-Item "server/index.js" "$stage/server/"
           Copy-Item "package.json", "package-lock.json", "README.md", "LICENSE" "$stage/"
           Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName }

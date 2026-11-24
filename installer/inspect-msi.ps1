@@ -2,8 +2,9 @@
   inspect-msi.ps1 - check a built Drive-It MSI against the RST companion contract (Windows only).
   Adapted from splash-it installer/inspect-msi.ps1 (splash-it commit ad7796d), which mirrors
   rst-c companions/README.md "Re-verifying C1-C7" and installer-bundle/ci-bundle-smoke.ps1.
-  Changes: Drive-It's identity; one Revit year (2026); no per-file list (the MSI harvests the
-  package folder); checks the ARP icon and links, the process-stop action, and the size limit.
+  Changes: Drive-It's identity; Revit 2026 and 2027 (spec #22); no per-file list (the MSI
+  harvests the package folder); checks the ARP icon and links, the process-stop action, and the
+  size limit.
 
     powershell -File installer/inspect-msi.ps1 -Msi <path.msi> -Version 1.2.3
     powershell -File installer/inspect-msi.ps1 -Msi <path.msi> -Version 1.2.3-rc.1 -Name DriveIt-1.2.3-rc.1.msi
@@ -21,10 +22,10 @@
       release tag, the tag without its v);
     - ARPPRODUCTICON names an Icon row, and ARPHELPLINK, ARPURLINFOABOUT, ARPURLUPDATEINFO are
       Drive-It's links;
-    - REVIT2026FOUND comes from exactly the two Revit.exe searches (uninstall-key InstallLocation,
-      64-bit, and [ProgramFiles64Folder]Autodesk\Revit 2026), the LaunchCondition table holds
-      'Installed OR REVIT2026FOUND' (plus at most MajorUpgrade's downgrade check), and the admin
-      sequences suppress LaunchConditions;
+    - for each supported year, REVIT<year>FOUND comes from exactly the two Revit.exe searches
+      (uninstall-key InstallLocation, 64-bit, and [ProgramFiles64Folder]Autodesk\Revit <year>), the
+      LaunchCondition table holds 'Installed OR REVIT2026FOUND OR REVIT2027FOUND' (plus at most
+      MajorUpgrade's downgrade check), and the admin sequences suppress LaunchConditions;
     - C4: StopDriveItProcesses is an immediate action before InstallValidate (and so before
       RemoveExistingProducts);
     - the file is at most 450 MB (the contract limit is 512 MB; the margin is for the bundled
@@ -46,7 +47,9 @@ $Links = [ordered]@{
   ARPURLINFOABOUT  = 'https://github.com/jedbjorn/drive-it'
   ARPURLUPDATEINFO = 'https://github.com/jedbjorn/drive-it/releases/latest'
 }
-$LaunchCondition = 'Installed OR REVIT2026FOUND'
+# The supported Revit years (installer/Build-DriveItPackage.ps1); this check names them itself.
+$RevitYears = @('2026', '2027')
+$LaunchCondition = 'Installed OR REVIT2026FOUND OR REVIT2027FOUND'
 $MaxBytes = 450MB
 $LocatorTypeDirectory64 = 16   # msidbLocatorTypeDirectory (0) + msidbLocatorType64bit (16)
 $msidbCustomActionTypeInScript = 0x400
@@ -192,7 +195,7 @@ if ($null -eq $stop -or $stopAction.Count -ne 1) {
   if ($props['WixQuietExecCmdLine'] -notmatch ' -EncodedCommand [A-Za-z0-9+/=]{40,}$') { $problems += 'StopDriveItProcesses has no embedded stop command (WixQuietExecCmdLine)' }
 }
 
-# Revit 2026 detection: REVIT2026FOUND from the two Revit.exe file searches.
+# Revit detection: REVIT<year>FOUND from the two Revit.exe file searches, for every supported year.
 $appSearch = Query 'SELECT `Property`, `Signature_` FROM `AppSearch`' 2
 $sigFile = @{}
 foreach ($r in (Query 'SELECT `Signature`, `FileName` FROM `Signature`' 2)) { $sigFile[$r[0]] = ($r[1] -split '\|')[-1] }
@@ -205,40 +208,47 @@ foreach ($r in (Query 'SELECT `Signature_`, `Root`, `Key`, `Name`, `Type` FROM `
   $regLoc[$r[0]] = @{ Root = [int]$r[1]; Key = $r[2]; Name = $r[3]; Type = [int]$r[4] }
 }
 Write-Host 'Revit detection (AppSearch):'
-$prop = 'REVIT2026FOUND'
-$sigs = @($appSearch | Where-Object { $_[0] -eq $prop } | ForEach-Object { $_[1] })
-$uninstallKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7346B4A0-2600-0510-0000-705C0D862004}'
-$defaultPath = '[ProgramFiles64Folder]Autodesk\Revit 2026'
-$viaRegistry = $false
-$viaDefault = $false
-foreach ($sig in $sigs) {
-  $dr = $drLoc[$sig]
-  if ($sigFile[$sig] -ne 'Revit.exe' -or $null -eq $dr -or "$($dr.Depth)" -notin @('', '0')) {
-    $problems += "$prop search $sig is not a Revit.exe file search at depth 0"
-    continue
+foreach ($year in $RevitYears) {
+  $prop = "REVIT${year}FOUND"
+  $sigs = @($appSearch | Where-Object { $_[0] -eq $prop } | ForEach-Object { $_[1] })
+  $uninstallKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7346B4A0-$($year.Substring(2))00-0510-0000-705C0D862004}"
+  $defaultPath = "[ProgramFiles64Folder]Autodesk\Revit $year"
+  $viaRegistry = $false
+  $viaDefault = $false
+  foreach ($sig in $sigs) {
+    $dr = $drLoc[$sig]
+    if ($sigFile[$sig] -ne 'Revit.exe' -or $null -eq $dr -or "$($dr.Depth)" -notin @('', '0')) {
+      $problems += "$prop search $sig is not a Revit.exe file search at depth 0"
+      continue
+    }
+    $reg = if ($dr.Parent) { $regLoc[$dr.Parent] } else { $null }
+    if ($reg -and -not $dr.Path -and $reg.Root -eq 2 -and $reg.Key -eq $uninstallKey -and
+        $reg.Name -eq 'InstallLocation' -and $reg.Type -eq $LocatorTypeDirectory64) {
+      $viaRegistry = $true
+      Write-Host "  $prop <- Revit.exe in HKLM\$($reg.Key) InstallLocation (64-bit)"
+    } elseif (-not $dr.Parent -and $dr.Path -eq $defaultPath) {
+      $viaDefault = $true
+      Write-Host "  $prop <- Revit.exe in $($dr.Path)"
+    } else {
+      $problems += "$prop search $sig looks in an unexpected place (parent '$($dr.Parent)', path '$($dr.Path)')"
+    }
   }
-  $reg = if ($dr.Parent) { $regLoc[$dr.Parent] } else { $null }
-  if ($reg -and -not $dr.Path -and $reg.Root -eq 2 -and $reg.Key -eq $uninstallKey -and
-      $reg.Name -eq 'InstallLocation' -and $reg.Type -eq $LocatorTypeDirectory64) {
-    $viaRegistry = $true
-    Write-Host "  $prop <- Revit.exe in HKLM\$($reg.Key) InstallLocation (64-bit)"
-  } elseif (-not $dr.Parent -and $dr.Path -eq $defaultPath) {
-    $viaDefault = $true
-    Write-Host "  $prop <- Revit.exe in $($dr.Path)"
-  } else {
-    $problems += "$prop search $sig looks in an unexpected place (parent '$($dr.Parent)', path '$($dr.Path)')"
-  }
+  if ($sigs.Count -ne 2) { $problems += "$prop has $($sigs.Count) AppSearch rows, expected 2" }
+  if (-not $viaRegistry) { $problems += "$prop does not search the InstallLocation of $uninstallKey (64-bit)" }
+  if (-not $viaDefault) { $problems += "$prop does not search $defaultPath" }
 }
-if ($sigs.Count -ne 2) { $problems += "$prop has $($sigs.Count) AppSearch rows, expected 2" }
-if (-not $viaRegistry) { $problems += "$prop does not search the InstallLocation of $uninstallKey (64-bit)" }
-if (-not $viaDefault) { $problems += "$prop does not search $defaultPath" }
 
-# Launch condition: blocks a first install without Revit 2026, never a repair or uninstall.
+# Launch condition: blocks a first install without a supported Revit, never a repair or uninstall.
 $launch = Query 'SELECT `Condition`, `Description` FROM `LaunchCondition`' 2
 Write-Host "Launch conditions ($($launch.Count)):"
 $launch | ForEach-Object { Write-Host "  [$($_[0])] $($_[1])" }
-if (@($launch | Where-Object { $_[0] -eq $LaunchCondition }).Count -ne 1) {
+$supported = @($launch | Where-Object { $_[0] -eq $LaunchCondition })
+if ($supported.Count -ne 1) {
   $problems += "LaunchCondition table has no [$LaunchCondition]"
+} else {
+  foreach ($year in $RevitYears) {
+    if ($supported[0][1] -notmatch "\b$year\b") { $problems += "the launch condition's message '$($supported[0][1])' does not name Revit $year" }
+  }
 }
 foreach ($r in $launch) {
   if ($r[0] -ne $LaunchCondition -and $r[0] -ne 'NOT WIX_DOWNGRADE_DETECTED') {

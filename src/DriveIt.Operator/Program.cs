@@ -15,7 +15,7 @@ namespace DriveIt.Operator;
 /// The Start Menu entry point: opens the operator window in the Windows app theme. A second
 /// launch brings the open window forward instead. <c>--self-test [report.json]</c> opens and
 /// closes the window in each theme against the installed operator.js and writes what it saw
-/// (the installer tests use it; nothing waits for input).
+/// and the .NET version it ran on (the installer tests use it; nothing waits for input).
 /// </summary>
 public static class Program
 {
@@ -105,7 +105,8 @@ public static class Program
     {
         if (_finished) return;
         _finished = true;
-        var report = JsonSerializer.Serialize(new { passed = failure is null, windows, failure }, new JsonSerializerOptions { WriteIndented = true });
+        // runtime: the .NET version the window ran on (test/operator-runtime.Tests.ps1 checks it is 10 when 8 is absent).
+        var report = JsonSerializer.Serialize(new { passed = failure is null, runtime = Environment.Version.ToString(), windows, failure }, new JsonSerializerOptions { WriteIndented = true });
         try
         {
             if (!string.IsNullOrEmpty(reportPath)) File.WriteAllText(reportPath, report);

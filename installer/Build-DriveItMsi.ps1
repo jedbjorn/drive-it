@@ -50,8 +50,20 @@ function ConvertTo-EncodedScript([string]$Name) {
 $stopCommand = ConvertTo-EncodedScript 'Stop-DriveItProcesses.ps1'
 $modeCheckCommand = ConvertTo-EncodedScript 'Test-DriveItModeGate.ps1'
 
+# The supported Revit years, as the package built them (Build-DriveItPackage.ps1): DriveIt.wxs
+# detects each one (REVIT<year>FOUND, from the year's last two digits) and installs when any is found.
+$packageManifest = Get-Content -LiteralPath (Join-Path $package 'drive-it-package.json') -Raw | ConvertFrom-Json
+$revitYears = @(if ($null -ne $packageManifest.PSObject.Properties['revitYears']) { $packageManifest.revitYears })
+if ($revitYears.Count -eq 0 -or @($revitYears | Where-Object { $_ -notmatch '^20\d\d$' }).Count -ne 0) {
+    throw "The package's revitYears ($($revitYears -join ', ')) is not a list of Revit years: $package"
+}
+$revitYearCodes = ($revitYears | ForEach-Object { $_.Substring(2) }) -join ';'
+$revitFound = ($revitYears | ForEach-Object { "REVIT${_}FOUND" }) -join ' OR '
+$revitYearNames = if ($revitYears.Count -eq 1) { $revitYears[0] } else { ($revitYears[0..($revitYears.Count - 2)] -join ', ') + ' or ' + $revitYears[-1] }
+
 & $wix build (Join-Path $PSScriptRoot 'DriveIt.wxs') -arch x64 -ext WixToolset.Util.wixext `
     -bindpath "pkg=$package" -d "Version=$Version" -d "StopCommand=$stopCommand" `
-    -d "ModeCheckCommand=$modeCheckCommand" -o $OutputPath
+    -d "ModeCheckCommand=$modeCheckCommand" -d "RevitYearCodes=$revitYearCodes" `
+    -d "RevitFound=$revitFound" -d "RevitYearNames=$revitYearNames" -o $OutputPath
 
-[ordered]@{ msi = [IO.Path]::GetFullPath($OutputPath); version = $Version; wix = $wixVersion } | ConvertTo-Json
+[ordered]@{ msi = [IO.Path]::GetFullPath($OutputPath); version = $Version; revitYears = $revitYears; wix = $wixVersion } | ConvertTo-Json

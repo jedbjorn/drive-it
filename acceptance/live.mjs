@@ -60,7 +60,8 @@ try {
   check("tools discoverable", ["get_revit_session", "execute_script", "save_script", "search_scripts", "get_script", "promote_script", "retire_script", "get_api_reference"].every(name => names.includes(name)), names);
   check("get_guidance absent", !names.includes("get_guidance"), names);
   const session = await call("get_revit_session", { processId });
-  check("live Revit session", !session.error && session.value.version === "2026", session.value || session.error);
+  // Revit 2026 or 2027 (spec #22 R3/R4): the version is the session's own.
+  check("live Revit session", !session.error && ["2026", "2027"].includes(session.value.version), session.value || session.error);
   const reference = await call("get_api_reference", {});
   check("api reference local", reference.value?.entries?.length > 10, reference.value?.entries?.length);
 

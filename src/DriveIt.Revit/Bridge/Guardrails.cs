@@ -41,7 +41,7 @@ internal static class Guardrails
 
     /// <summary>
     /// Calls that leave the Revit session and cannot be rolled back: synchronize with central, reload latest and print
-    /// (spec #16 "Calls Refused", flag #28). Every Revit 2026 API member that does one of these.
+    /// (spec #16 "Calls Refused", flag #28). Every Revit 2026 and 2027 API member that does one of these.
     /// </summary>
     private static readonly (Type Owner, string Member, string Action)[] LeaveTheSession =
     [

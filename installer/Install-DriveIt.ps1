@@ -134,6 +134,7 @@ function Test-DotnetRuntime {
 
     # The Revit add-in runs in Revit; DriveIt.Operator.exe (the Start Menu window) is a
     # framework-dependent WPF app, so both the base and the Windows Desktop runtime 8+ are required.
+    # It rolls forward, so the .NET 10 that Revit 2027 installs serves it on a computer without 8.
     if (-not [IO.File]::Exists($DotnetPath)) {
         return $false
     }
@@ -229,6 +230,12 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.schemaVersion -ne 1) {
     throw "Unsupported Drive It installer package schema: $($manifest.schemaVersion)"
 }
+# Every supported Revit year's add-in is registered, whether or not that Revit is installed yet
+# (spec #22 "Install Rule"): a Revit added later finds Drive-It already in place.
+$revitYears = @(if ($null -ne $manifest.PSObject.Properties['revitYears']) { $manifest.revitYears })
+if ($revitYears.Count -eq 0) {
+    throw "The Drive It package names no Revit years: $manifestPath"
+}
 
 if (-not [string]::IsNullOrEmpty($Mode) -and $Mode -cnotin @('standard', 'dev')) {
     throw "DRIVEIT_MODE (-Mode) must be 'standard' or 'dev', not '$Mode'."
@@ -266,14 +273,16 @@ try {
     $python = Join-Path $stagedApp 'runtimes\python\python.exe'
     $server = Join-Path $stagedApp 'server\index.js'
     $smokeTest = Join-Path $stagedApp 'server\install-smoke.mjs'
-    $addinTemplate = Join-Path $stagedApp 'addin\DriveIt.addin'
     $requiredFiles = @(
-        $node, $python, $server, $smokeTest, $addinTemplate,
+        $node, $python, $server, $smokeTest,
         (Join-Path $stagedApp 'drive-it-stdio.cmd'),
-        (Join-Path $stagedApp 'addin\DriveIt.Revit.dll'),
-        (Join-Path $stagedApp 'addin\DriveIt.UI.dll'),
         (Join-Path $stagedApp 'operator\DriveIt.Operator.exe')
     )
+    foreach ($year in $revitYears) {
+        foreach ($file in @('DriveIt.addin', 'DriveIt.Revit.dll', 'DriveIt.UI.dll', 'DriveIt.Core.dll')) {
+            $requiredFiles += Join-Path $stagedApp "addin\$year\$file"
+        }
+    }
     foreach ($required in $requiredFiles) {
         if (-not [IO.File]::Exists($required)) {
             throw "The Drive It package is incomplete: $required is missing."
@@ -327,35 +336,41 @@ try {
     $installedNode = Join-Path $app 'runtimes\node\node.exe'
     $installedPython = Join-Path $app 'runtimes\python\python.exe'
     $installedServer = Join-Path $app 'server\index.js'
-    $addinDirectory = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026'
-    [IO.Directory]::CreateDirectory($addinDirectory) | Out-Null
-    $addinPath = Join-Path $addinDirectory 'DriveIt.addin'
-    $addin = [xml](Get-Content -LiteralPath (Join-Path $app 'addin\DriveIt.addin') -Raw)
-    $addin.RevitAddIns.AddIn.Assembly = [string](Join-Path $app 'addin\DriveIt.Revit.dll')
-    # The RST family name; RST's tray and the companion contract (C6) read it.
-    # SelectSingleNode: on an XmlElement, .Name is the element's own tag name.
-    $addinName = $addin.RevitAddIns.AddIn.SelectSingleNode('Name')
-    if ($null -eq $addinName) {
-        $addinName = $addin.RevitAddIns.AddIn.AppendChild($addin.CreateElement('Name'))
-    }
-    $addinName.InnerText = 'Drive-It'
-    $addinTemporary = Join-Path $addinDirectory ('.DriveIt-' + [Guid]::NewGuid().ToString('N') + '.tmp')
-    $addinBackup = $addinTemporary + '.bak'
-    try {
-        $addin.Save($addinTemporary)
-        if ([IO.File]::Exists($addinPath)) {
-            [IO.File]::Replace($addinTemporary, $addinPath, $addinBackup)
-            [IO.File]::Delete($addinBackup)
-        } else {
-            [IO.File]::Move($addinTemporary, $addinPath)
+    # One manifest per supported year, %AppData%\Autodesk\Revit\Addins\<year>\DriveIt.addin, naming
+    # that year's build in app\addin\<year>.
+    $addinPaths = @()
+    foreach ($year in $revitYears) {
+        $addinDirectory = Join-Path ([Environment]::GetFolderPath('ApplicationData')) "Autodesk\Revit\Addins\$year"
+        [IO.Directory]::CreateDirectory($addinDirectory) | Out-Null
+        $addinPath = Join-Path $addinDirectory 'DriveIt.addin'
+        $addin = [xml](Get-Content -LiteralPath (Join-Path $app "addin\$year\DriveIt.addin") -Raw)
+        $addin.RevitAddIns.AddIn.Assembly = [string](Join-Path $app "addin\$year\DriveIt.Revit.dll")
+        # The RST family name; RST's tray and the companion contract (C6) read it.
+        # SelectSingleNode: on an XmlElement, .Name is the element's own tag name.
+        $addinName = $addin.RevitAddIns.AddIn.SelectSingleNode('Name')
+        if ($null -eq $addinName) {
+            $addinName = $addin.RevitAddIns.AddIn.AppendChild($addin.CreateElement('Name'))
         }
-    } finally {
-        if ([IO.File]::Exists($addinTemporary)) {
-            [IO.File]::Delete($addinTemporary)
+        $addinName.InnerText = 'Drive-It'
+        $addinTemporary = Join-Path $addinDirectory ('.DriveIt-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        $addinBackup = $addinTemporary + '.bak'
+        try {
+            $addin.Save($addinTemporary)
+            if ([IO.File]::Exists($addinPath)) {
+                [IO.File]::Replace($addinTemporary, $addinPath, $addinBackup)
+                [IO.File]::Delete($addinBackup)
+            } else {
+                [IO.File]::Move($addinTemporary, $addinPath)
+            }
+        } finally {
+            if ([IO.File]::Exists($addinTemporary)) {
+                [IO.File]::Delete($addinTemporary)
+            }
+            if ([IO.File]::Exists($addinBackup)) {
+                [IO.File]::Delete($addinBackup)
+            }
         }
-        if ([IO.File]::Exists($addinBackup)) {
-            [IO.File]::Delete($addinBackup)
-        }
+        $addinPaths += $addinPath
     }
 
     $serverEntry = [ordered]@{
@@ -482,7 +497,7 @@ try {
         installed = $true
         mode = $installMode
         application = $app
-        addin = $addinPath
+        addins = $addinPaths
         shortcut = $shortcutPath
         mcpConfiguration = $McpConfigPath
         mcpClients = $clients

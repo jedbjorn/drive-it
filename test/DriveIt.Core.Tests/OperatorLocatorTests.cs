@@ -52,9 +52,10 @@ public class OperatorLocatorTests
     }
 
     [Fact]
-    public void ForAssemblyDirectory_IsTheParentOfAddinOrOperator()
+    public void ForAssemblyDirectory_IsTheAppAboveAYearsAddinOrTheOperator()
     {
-        Assert.Equal(App, OperatorHost.ForAssemblyDirectory(Path.Combine(App, "addin")).AppDirectory);
+        Assert.Equal(App, OperatorHost.ForAssemblyDirectory(Path.Combine(App, "addin", "2026")).AppDirectory);
+        Assert.Equal(App, OperatorHost.ForAssemblyDirectory(Path.Combine(App, "addin", "2027") + Path.DirectorySeparatorChar).AppDirectory);
         Assert.Equal(App, OperatorHost.ForAssemblyDirectory(Path.Combine(App, "operator") + Path.DirectorySeparatorChar).AppDirectory);
     }
 

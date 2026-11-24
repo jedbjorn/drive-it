@@ -1,13 +1,20 @@
 <!--
   Per-user Drive-It MSI, an RST family companion (rst-c companions/README.md, C1-C7).
   The MSI owns the package files under %LOCALAPPDATA%\DriveIt; Install-DriveIt.ps1 then
-  verifies the runtimes, runs the MCP smoke check, and registers the Revit add-in, MCP
+  verifies the runtimes, runs the MCP smoke check, and registers the Revit add-ins, MCP
   configuration, and shortcut in place. Uninstall-DriveIt.ps1 removes those registrations;
   user data stays. installer/inspect-msi.ps1 checks the built MSI against the contract.
 
+  Revit years (spec #22): the package carries one add-in build per supported year
+  (app\addin\<year>), and Install-DriveIt.ps1 registers every one of them whatever is installed,
+  so a Revit added later finds Drive-It. The MSI installs when any supported Revit is found.
+
   Build: installer/Build-DriveItMsi.ps1, which runs
          wix build installer/DriveIt.wxs -arch x64 -ext WixToolset.Util.wixext
-         -bindpath pkg=<package directory> -d Version=<x.y.z> -d StopCommand=<base64> -o <msi>
+         -bindpath pkg=<package directory> -d Version=<x.y.z> -d StopCommand=<base64>
+         -d ModeCheckCommand=<base64> -d RevitYearCodes=26;27 -d "RevitFound=REVIT2026FOUND OR REVIT2027FOUND"
+         -d "RevitYearNames=2026 or 2027" -o <msi>
+  The three Revit defines come from the package's supported-years list (drive-it-package.json).
 
   Silent and reboot-free (C4): RST's tray runs
     msiexec /i DriveIt-X.Y.Z.msi /qn /norestart MSIRESTARTMANAGERCONTROL=Disable
@@ -22,7 +29,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="Drive-It" Manufacturer="Designs/OS" Version="$(Version)"
            UpgradeCode="6561188A-BD8D-43A9-B116-BA0894F8001B" Scope="perUser" Language="1033">
-    <SummaryInformation Description="Drive-It: MCP server and add-in for Autodesk Revit 2026" />
+    <SummaryInformation Description="Drive-It: MCP server and add-in for Autodesk Revit $(RevitYearNames)" />
 
     <!-- Default schedule (afterInstallValidate): the old version is removed before anything
          new is installed. A newer installed version is never downgraded (C3). -->
@@ -44,30 +51,35 @@
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/jedbjorn/drive-it" />
     <Property Id="ARPURLUPDATEINFO" Value="https://github.com/jedbjorn/drive-it/releases/latest" />
 
-    <!-- Revit 2026 detection, the same AppSearch pair as splash-it installer/Product.wxs:
-         REVIT2026FOUND is the path of Revit.exe when either search finds it (a search that
-         finds nothing leaves the property alone, so the two act as an OR):
-           1. the folder in InstallLocation of Revit 2026's uninstall entry (64-bit HKLM);
-           2. the default folder, C:\Program Files\Autodesk\Revit 2026\.
+    <!-- Revit detection, one property per supported year (RevitYearCodes: 26 for Revit 2026),
+         the same AppSearch pair as splash-it installer/Product.wxs: REVIT20yyFOUND is the path
+         of Revit.exe when either search finds it (a search that finds nothing leaves the
+         property alone, so the two act as an OR):
+           1. the folder in InstallLocation of that Revit's uninstall entry (64-bit HKLM), whose
+              product code carries the year: {7346B4A0-yy00-0510-0000-705C0D862004};
+           2. the default folder, C:\Program Files\Autodesk\Revit 20yy\.
          A folder without Revit.exe (a leftover) does not count. -->
-    <Property Id="REVIT2026FOUND" Secure="yes">
-      <RegistrySearch Id="Revit2026InstallLocation" Root="HKLM"
-                      Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7346B4A0-2600-0510-0000-705C0D862004}"
+    <?foreach Yy in $(RevitYearCodes)?>
+    <Property Id="REVIT20$(Yy)FOUND" Secure="yes">
+      <RegistrySearch Id="Revit20$(Yy)InstallLocation" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7346B4A0-$(Yy)00-0510-0000-705C0D862004}"
                       Name="InstallLocation" Type="directory" Bitness="always64">
-        <DirectorySearch Id="Revit2026ExeInInstallLocation" Depth="0">
+        <DirectorySearch Id="Revit20$(Yy)ExeInInstallLocation" Depth="0">
           <FileSearch Name="Revit.exe" />
         </DirectorySearch>
       </RegistrySearch>
-      <DirectorySearch Id="Revit2026ExeInDefaultFolder"
-                       Path="[ProgramFiles64Folder]Autodesk\Revit 2026" Depth="0">
+      <DirectorySearch Id="Revit20$(Yy)ExeInDefaultFolder"
+                       Path="[ProgramFiles64Folder]Autodesk\Revit 20$(Yy)" Depth="0">
         <FileSearch Name="Revit.exe" />
       </DirectorySearch>
     </Property>
+    <?endforeach?>
 
-    <!-- A first install needs Revit 2026. "Installed" keeps repair and uninstall available
-         on a computer that no longer has it (an uninstall must always work). -->
-    <Launch Condition="Installed OR REVIT2026FOUND"
-            Message="Drive-It needs Autodesk Revit 2026, and it was not found on this computer." />
+    <!-- A first install needs any supported Revit (RevitFound: REVIT2026FOUND OR
+         REVIT2027FOUND). "Installed" keeps repair and uninstall available on a computer that
+         no longer has one (an uninstall must always work). -->
+    <Launch Condition="Installed OR $(RevitFound)"
+            Message="Drive-It needs Autodesk Revit $(RevitYearNames), and it was not found on this computer." />
 
     <!-- An administrative install (msiexec /a) only unpacks files; inspect-msi.ps1 and
          verify-signatures.ps1 use one on a CI runner without Revit. -->

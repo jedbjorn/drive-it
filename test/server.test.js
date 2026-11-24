@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createDriveItServer } from "../server/app.js";
+import { createDriveItServer, serverInstructions } from "../server/app.js";
 import { apiReference } from "../server/reference.js";
 import { Runtime } from "../server/runtime.js";
 import { WorkspaceStore } from "../server/workspace.js";
@@ -51,7 +51,8 @@ test("discover the Unguided tools and schemas over stdio", async (t) => {
   assert.deepEqual(allReferences.structuredContent.entries, apiReference());
 
   const reference = await client.callTool({ name: "get_api_reference", arguments: { name: "revit.create_level" } });
-  assert.equal(reference.structuredContent.version, "revit-2026-alpha.4");
+  // No Revit session here: the reference names every supported version.
+  assert.equal(reference.structuredContent.version, "revit-2026-2027-alpha.4");
   assert.equal(reference.structuredContent.entries.length, 1);
   assert.equal(reference.structuredContent.entries[0].name, "revit.create_level");
   assert.ok(reference.structuredContent.entries[0].example.includes("revit.create_level"));
@@ -226,6 +227,41 @@ test("the session tool finds the only Revit and tells the agent where to work", 
   assert.ok(!unset.isError, unset.content[0].text);
   assert.equal(unset.structuredContent.workspaceRoot, null);
   assert.equal(unset.structuredContent.mode, "dev");
+});
+
+test("the API reference names the selected session's Revit version", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "drive-it-reference-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const versions = { 4321: "2026", 8765: "2027" };
+  const { server } = createDriveItServer({
+    runtime: new Runtime({ dataDir: base }),
+    processResolver: async processId => {
+      if (processId === undefined) throw Object.assign(new Error("several"), { code: "MULTIPLE_REVIT_SESSIONS" });
+      return processId;
+    },
+    sessionReader: async processId => ({ processId, version: versions[processId], build: "b", connectionIdentity: `pipe-${processId}` }),
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "drive-it-reference-test", version: "1" });
+  await client.connect(clientTransport);
+  t.after(() => client.close());
+  await client.listTools();
+
+  for (const [processId, version] of [[4321, "2026"], [8765, "2027"]]) {
+    const result = await client.callTool({ name: "get_api_reference", arguments: { name: "revit.create_level", processId } });
+    assert.ok(!result.isError, result.content[0].text);
+    assert.equal(result.structuredContent.version, `revit-${version}-alpha.4`);
+    assert.equal(result.structuredContent.entries[0].apiVersion, `revit-${version}-alpha.4`);
+  }
+  const unselected = await client.callTool({ name: "get_api_reference", arguments: { name: "revit.create_level" } });
+  assert.ok(!unselected.isError, unselected.content[0].text);
+  assert.equal(unselected.structuredContent.version, "revit-2026-2027-alpha.4");
+});
+
+test("the server instructions name both supported Revit versions", () => {
+  assert.match(serverInstructions("standard"), /^Drive It drives a live Autodesk Revit 2026 or 2027 session\. /);
+  assert.doesNotMatch(serverInstructions("dev"), /Revit 2026 session/);
 });
 
 test("a pending run tells the agent to resume with the same idempotency key", async (t) => {

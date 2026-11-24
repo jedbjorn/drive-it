@@ -33,10 +33,11 @@ check("workspace root set", operator.root?.toLowerCase() === root.toLowerCase(),
 const client = new Client({ name: "drive-it-primitives-acceptance", version: "1" });
 await client.connect(new StdioClientTransport({ command: entry.command, args: entry.args, env, stderr: "pipe" }));
 try {
-  const reference = (await client.callTool({ name: "get_api_reference", arguments: {} })).structuredContent;
+  const reference = (await client.callTool({ name: "get_api_reference", arguments: { processId } })).structuredContent;
   const names = reference.entries.map(item => item.name);
   const primitives = ["get_active_document", "find_elements", "get_parameters", "list_types", "list_views", "get_selection", "set_selection"];
-  check("api version", reference.version === "revit-2026-alpha.2", reference.version);
+  // The selected session's Revit version (spec #22): revit-2026-alpha.4 or revit-2027-alpha.4.
+  check("api version", /^revit-(2026|2027)-alpha\.4$/.test(reference.version), reference.version);
   check("reference lists every primitive and units", [...primitives.map(name => `revit.${name}`), "units.to_internal", "units.from_internal"].every(name => names.includes(name)), names);
 
   // A script with no document target: find_elements fails with document_not_open naming the fix.
