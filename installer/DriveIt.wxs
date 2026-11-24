@@ -2,11 +2,12 @@
   Per-user Drive-It MSI, an RST family companion (rst-c companions/README.md, C1-C7).
   The MSI owns the package files under %LOCALAPPDATA%\DriveIt; Install-DriveIt.ps1 then
   verifies the runtimes, runs the MCP smoke check, and registers the Revit add-ins, MCP
-  configuration, and shortcut in place.
+  configuration, and shortcut in place. Uninstall-DriveIt.ps1 removes those registrations;
+  user data stays. installer/inspect-msi.ps1 checks the built MSI against the contract.
+
   Revit years (spec #22): the package carries one add-in build per supported year
   (app\addin\<year>), and Install-DriveIt.ps1 registers every one of them whatever is installed,
-  so a Revit added later finds Drive-It. The MSI installs when any supported Revit is found. Uninstall-DriveIt.ps1 removes those registrations;
-  user data stays. installer/inspect-msi.ps1 checks the built MSI against the contract.
+  so a Revit added later finds Drive-It. The MSI installs when any supported Revit is found.
 
   Build: installer/Build-DriveItMsi.ps1, which runs
          wix build installer/DriveIt.wxs -arch x64 -ext WixToolset.Util.wixext
