@@ -3,7 +3,7 @@
     each once), and run history. In Dev Mode (spec #10) a caution banner says no guardrails apply and
     the outside-root requests pane is hidden: nothing waits for one. The Settings button opens the
     settings drawer (spec #23) over the window's right edge: one row per setting, today the Script
-    time limit.
+    time limit, then the Agents row's Detect agents.
     Window conventions follow splash-it src/SplashIt.UI/Settings/SettingsWindow.xaml (splash-it
     commit ad7796d): Segoe UI 12, the palette's WindowBrush/TextBrush, Theme.xaml merged per window, Panel sections, banners, and
     the Primary/Danger buttons. The behavior is the former PowerShell window's
@@ -293,6 +293,30 @@
                                 <TextBlock x:Name="TimeLimitHelp" Grid.Row="3" Grid.ColumnSpan="4" Margin="0,6,0,0"
                                            Style="{StaticResource MutedText}" TextWrapping="Wrap" />
                             </Grid>
+                        </Border>
+
+                        <!--
+                            Agents (spec #23 "Detect Agents"): the installer's MCP client registration on demand,
+                            for a Claude or ChatGPT installed after Drive-It. One plain line per client.
+                        -->
+                        <Border x:Name="AgentsRow" Style="{StaticResource Panel}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource SectionText}" Text="Agents" />
+                                <Button x:Name="DetectAgentsButton" HorizontalAlignment="Left" MinWidth="96"
+                                        Content="Detect agents" Click="OnDetectAgents" />
+                                <TextBlock x:Name="AgentsError" Margin="0,6,0,0" Style="{StaticResource ErrorText}"
+                                           Visibility="Collapsed" AutomationProperties.Name="Detect agents error" />
+                                <ItemsControl x:Name="AgentResults" Margin="0,6,0,0" Visibility="Collapsed" Focusable="False"
+                                              AutomationProperties.Name="Detect agents results">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Margin="0,2,0,0" TextWrapping="Wrap" Text="{Binding Message}" />
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock Margin="0,6,0,0" Style="{StaticResource MutedText}" TextWrapping="Wrap"
+                                           Text="Adds Drive-It to Claude and ChatGPT on this computer. Use it after you install one of them. Then restart that app." />
+                            </StackPanel>
                         </Border>
 
                     </StackPanel>

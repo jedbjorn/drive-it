@@ -26,10 +26,16 @@ namespace DriveIt.UI;
 /// dimmed area close it; closing discards a typed, unsaved value and puts focus back on the
 /// Settings button.
 /// </para>
+/// <para>
+/// The drawer's Agents row runs <c>operator.js clients detect</c> with the mcp.json the window names
+/// and lists one plain line per client; a command that fails shows by the row. Results are cleared
+/// each time the drawer opens.
+/// </para>
 /// </summary>
 public partial class OperatorWindow : Window
 {
     private readonly OperatorClient _client;
+    private readonly string _mcpConfigurationPath;
     private readonly bool _promptForMissingRoot;
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool _busy;
@@ -40,6 +46,7 @@ public partial class OperatorWindow : Window
         InitializeComponent();
         DarkTitleBar.Attach(this);
         _client = client;
+        _mcpConfigurationPath = mcpConfigurationPath;
         _promptForMissingRoot = promptForMissingRoot;
         Mode = mode;
         if (mode == DriveItMode.Dev)
@@ -103,6 +110,15 @@ public partial class OperatorWindow : Window
 
     /// <summary>True while the MCP configuration path is shown under the lists.</summary>
     public bool McpPathShown => McpText.IsVisible && McpText.Text.Length > 0;
+
+    /// <summary>True while the Detect agents button can be used.</summary>
+    public bool DetectAgentsEnabled => DetectAgentsButton.IsEnabled;
+
+    /// <summary>The last Detect agents results, one per client; empty before a run or after a failure.</summary>
+    public IReadOnlyList<AgentResult> AgentResultRows => AgentResults.ItemsSource as IReadOnlyList<AgentResult> ?? [];
+
+    /// <summary>The Agents row's error; null when none is shown.</summary>
+    public string? AgentsErrorMessage => AgentsError.Visibility == Visibility.Visible ? AgentsError.Text : null;
 
     /// <summary>The headings of the drawer's rows, top to bottom.</summary>
     public IReadOnlyList<string> SettingsRowNames => SectionHeadings(SettingsRows);
@@ -179,6 +195,8 @@ public partial class OperatorWindow : Window
     {
         if (_busy || SettingsOpen) return;
         ShowTimeLimitError(null);
+        ShowAgents(null);
+        ShowAgentsError(null);
         MainContent.IsEnabled = false;
         DrawerScrim.Visibility = Visibility.Visible;
         Drawer.Visibility = Visibility.Visible;
@@ -222,6 +240,26 @@ public partial class OperatorWindow : Window
             ?? throw new OperatorException(error!);
         ShowTimeLimit(await _client.SetScriptTimeLimitAsync(seconds));
     }, ShowTimeLimitError);
+
+    private void OnDetectAgents(object sender, RoutedEventArgs e) => _settingsAction = DetectAgentsAsync();
+
+    private Task DetectAgentsAsync()
+    {
+        ShowAgents(null);
+        return RunAsync(async () => ShowAgents(await _client.DetectAgentsAsync(_mcpConfigurationPath)), ShowAgentsError);
+    }
+
+    private void ShowAgents(IReadOnlyList<AgentResult>? rows)
+    {
+        AgentResults.ItemsSource = rows;
+        AgentResults.Visibility = rows is { Count: > 0 } ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ShowAgentsError(string? message)
+    {
+        AgentsError.Text = message ?? "";
+        AgentsError.Visibility = string.IsNullOrEmpty(message) ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     private void ShowTimeLimit(int seconds)
     {
@@ -360,6 +398,7 @@ public partial class OperatorWindow : Window
         SettingsButton.IsEnabled = !_busy;
         TimeLimitText.IsEnabled = !_busy;
         SaveTimeLimitButton.IsEnabled = !_busy;
+        DetectAgentsButton.IsEnabled = !_busy;
         CloseSettingsButton.IsEnabled = !_busy;
     }
 
@@ -383,6 +422,17 @@ public partial class OperatorWindow : Window
         TypeTimeLimit(text);
         _settingsAction = Task.CompletedTask;
         SaveTimeLimitButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, SaveTimeLimitButton));
+        return _settingsAction;
+    }
+
+    /// <summary>
+    /// Clicks Detect agents. The returned task completes once the command has finished; the button is
+    /// already disabled when this returns, while the command runs.
+    /// </summary>
+    public Task ClickDetectAgentsAsync()
+    {
+        _settingsAction = Task.CompletedTask;
+        DetectAgentsButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, DetectAgentsButton));
         return _settingsAction;
     }
 

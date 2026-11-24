@@ -4,11 +4,15 @@
 # drawer opened and closed by Close, Esc and a click outside (AC-1). -DrawerWrites adds AC-2 and
 # AC-6; it saves limits, so run it only with DRIVE_IT_DATA_DIR set to a throwaway directory.
 # -Screenshots <dir> saves the window and the open drawer in each theme as PNGs.
+# -DetectAgents adds AC-11: it presses Detect agents, which writes the current user's MCP client
+# configurations, so pass -ClientProfile <dir> (a throwaway USERPROFILE and APPDATA for the window's
+# operator.js) unless the caller has put stand-in client files in place.
 
 function Invoke-OperatorSelfTest {
     # Opens and closes the installed WPF window in both themes against the installed operator.js.
     # With -Dotnet, $Exe is the window's DLL, run through that dotnet.exe.
-    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Report, [string]$Dotnet, [switch]$DrawerWrites, [string]$Screenshots)
+    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Report, [string]$Dotnet, [switch]$DrawerWrites, [string]$Screenshots,
+        [switch]$DetectAgents, [string]$ClientProfile)
     if ([IO.File]::Exists($Report)) {
         Remove-Item -LiteralPath $Report -Force
     }
@@ -20,11 +24,29 @@ function Invoke-OperatorSelfTest {
     if ($Screenshots) {
         $arguments += @('--screenshots', ('"' + $Screenshots + '"'))
     }
+    if ($DetectAgents) {
+        $arguments += '--detect-agents'
+    }
     if ($Dotnet) {
         $file = $Dotnet
         $arguments = @(('"' + $Exe + '"')) + $arguments
     }
-    $process = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
+    # The window's operator.js reads the client locations from these; the window itself does not.
+    $saved = @{ USERPROFILE = $env:USERPROFILE; APPDATA = $env:APPDATA; CODEX_HOME = $env:CODEX_HOME }
+    if ($ClientProfile) {
+        $env:USERPROFILE = Join-Path $ClientProfile 'home'
+        $env:APPDATA = Join-Path $ClientProfile 'roaming'
+        $env:CODEX_HOME = $null
+        [IO.Directory]::CreateDirectory($env:USERPROFILE) | Out-Null
+        [IO.Directory]::CreateDirectory($env:APPDATA) | Out-Null
+    }
+    try {
+        $process = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
+    } finally {
+        foreach ($name in $saved.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process')
+        }
+    }
     if (-not $process.WaitForExit(180000)) {
         $process.Kill()
         throw 'The operator window self-test did not finish.'
@@ -45,9 +67,16 @@ function Invoke-OperatorSelfTest {
         if ($DrawerWrites) {
             Assert-OperatorDrawerWrites -Window $window -Text $text
         }
+        if ($DetectAgents) {
+            Assert-OperatorAgents -Window $window -Text $text
+        }
     }
     if ($Screenshots) {
-        foreach ($name in @('light-main', 'light-settings', 'dark-main', 'dark-settings')) {
+        $names = @('light-main', 'light-settings', 'dark-main', 'dark-settings')
+        if ($DetectAgents) {
+            $names += @('light-agents', 'dark-agents')
+        }
+        foreach ($name in $names) {
             if (-not [IO.File]::Exists((Join-Path $Screenshots "$name.png"))) {
                 throw "The self-test did not save the $name screenshot in $Screenshots."
             }
@@ -124,4 +153,35 @@ function Assert-OperatorDrawerWrites {
     if ($writes.reread.setByCommandLine -ne 90 -or $writes.reread.shownOnReopen -ne '90' -or $null -ne $writes.reread.error -or -not $writes.closed) {
         throw "The drawer did not re-read the limit on open ($($Window.theme)): $($writes | ConvertTo-Json -Compress -Depth 5)"
     }
+}
+
+function Assert-OperatorAgents {
+    # AC-11: the Agents row lists one result per client with the button disabled while it runs, and a
+    # window naming a missing mcp.json shows the failure by the row. Callers check each client's status.
+    param([Parameter(Mandatory)]$Window, [Parameter(Mandatory)][string]$Text)
+    $agents = $Window.agents
+    if ($null -eq $agents) {
+        throw "The self-test did not press Detect agents ($($Window.theme)): $Text"
+    }
+    $results = @($agents.results)
+    $clients = @($results | ForEach-Object { $_.client })
+    $checks = [ordered]@{
+        agentsRow            = @($agents.rows) -contains 'Agents'
+        disabledWhileRunning = [bool]$agents.disabledWhileRunning
+        enabledAfter         = [bool]$agents.enabledAfter
+        noError              = $null -eq $agents.error
+        everyClient          = ($clients -contains 'claude-desktop') -and ($clients -contains 'claude-code') -and ($clients -contains 'codex')
+        plainLines           = @($results | Where-Object { $_.status -notin @('added', 'already', 'not_installed', 'failed') -or [string]::IsNullOrWhiteSpace($_.message) }).Count -eq 0
+        failureByTheRow      = ([string]$agents.failure.error) -match 'mcp\.json does not exist' -and $agents.failure.results -eq 0 -and [bool]$agents.failure.enabledAfter
+    }
+    $failed = @($checks.Keys | Where-Object { -not $checks[$_] })
+    if ($failed.Count -gt 0) {
+        throw "Detect agents ($($Window.theme)) failed $($failed -join ', '): $($agents | ConvertTo-Json -Compress -Depth 5)"
+    }
+}
+
+function Get-OperatorAgentStatus {
+    # The statuses Detect agents reported for one client id in one window, in order.
+    param([Parameter(Mandatory)]$Window, [Parameter(Mandatory)][string]$Client)
+    return @(@($Window.agents.results) | Where-Object { $_.client -eq $Client } | ForEach-Object { $_.status })
 }

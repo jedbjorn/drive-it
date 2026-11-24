@@ -364,7 +364,24 @@ Assert-MsiTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_PYTHON -eq $py
 Assert-MsiTest ([IO.File]::Exists($shortcutPath)) 'The operator shortcut was not created.'
 Assert-MsiTest ((New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath).TargetPath -eq $operatorExe) 'The shortcut does not open the operator window.'
 # The window finds the install's Node.js, operator.js, and data directory from its own folder and mcp.json.
-$selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test.json') -Screenshots (Join-Path $LogDirectory 'window-screens\standard')
+# Spec #23 AC-10 and AC-11 against the stand-ins: Claude Desktop as if installed after Drive-It (its
+# file without the entry, with a setting of its own). Detect agents adds it back in the first theme;
+# the second theme's run, and Claude Code and Codex already registered by the install, change nothing.
+$desktopWithout = '{"preferences":{"keep":true},"mcpServers":{}}'
+[IO.File]::WriteAllText($claudeDesktop, $desktopWithout)
+$codeBefore = [IO.File]::ReadAllText($claudeCode)
+$codexBefore = [IO.File]::ReadAllText($codex)
+$selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test.json') -Screenshots (Join-Path $LogDirectory 'window-screens\standard') -DetectAgents
+$windows = @($selfTest.windows)
+$agents = [ordered]@{}
+foreach ($client in @('claude-desktop', 'claude-code', 'codex')) {
+    $agents[$client] = (@($windows | ForEach-Object { (Get-OperatorAgentStatus -Window $_ -Client $client) -join ',' }) -join ' then ')
+}
+Assert-MsiTest ($agents['claude-desktop'] -eq 'added then already' -and $agents['claude-code'] -eq 'already then already' -and $agents['codex'] -eq 'already then already') "Detect agents reported $($agents | ConvertTo-Json -Compress)."
+Assert-MsiTest ((@($windows[0].agents.results) | Where-Object { $_.client -eq 'claude-desktop' }).message -match 'Restart Claude Desktop') 'Detect agents did not say to restart Claude Desktop.'
+$desktopAfter = Get-Content -LiteralPath $claudeDesktop -Raw | ConvertFrom-Json
+Assert-MsiTest ($desktopAfter.preferences.keep -eq $true -and [IO.File]::ReadAllText("$claudeDesktop.drive-it.bak") -eq $desktopWithout) 'Detect agents lost a Claude Desktop setting or wrote no backup.'
+Assert-MsiTest ([IO.File]::ReadAllText($claudeCode) -eq $codeBefore -and [IO.File]::ReadAllText($codex) -eq $codexBefore) 'Detect agents changed a client that was already set up.'
 # Standard (spec #10 "Visibility"): no Dev Mode banner, and the outside-root requests pane is shown.
 # msi-mode.Tests.ps1 holds the Dev Mode case.
 foreach ($window in @($selfTest.windows)) {

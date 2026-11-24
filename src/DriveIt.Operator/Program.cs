@@ -24,6 +24,10 @@ namespace DriveIt.Operator;
 /// it saves limits through the drawer and changes one through operator.js, so run it only
 /// against a throwaway data directory (<c>DRIVE_IT_DATA_DIR</c>). <c>--screenshots &lt;dir&gt;</c> saves
 /// the window and the open drawer in each theme as PNGs (<c>light-main.png</c>, <c>light-settings.png</c>, …).
+/// <c>--detect-agents</c> adds AC-11: it presses Detect agents, which writes the current user's MCP
+/// client configurations, so run it only with stand-in or throwaway client files; then it presses it
+/// in a window naming a missing mcp.json, whose failure shows by the row. With <c>--screenshots</c> it
+/// also saves the drawer with the results (<c>light-agents.png</c>, …).
 /// </summary>
 public static class Program
 {
@@ -36,6 +40,7 @@ public static class Program
             return SelfTest(
                 args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal) ? args[1] : null,
                 drawerWrites: args.Contains("--drawer-writes"),
+                detectAgents: args.Contains("--detect-agents"),
                 screenshots: ValueAfter(args, "--screenshots"));
 
         using var instance = new Mutex(initiallyOwned: true, InstanceName, out var first);
@@ -65,7 +70,7 @@ public static class Program
         return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
     }
 
-    private static int SelfTest(string? reportPath, bool drawerWrites, string? screenshots)
+    private static int SelfTest(string? reportPath, bool drawerWrites, bool detectAgents, string? screenshots)
     {
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var windows = new List<object>();
@@ -96,6 +101,7 @@ public static class Program
                     if (screenshots is not null) await Screenshots(window, screenshots, theme.ToString().ToLowerInvariant());
                     var drawer = await DrawerOpenAndClose(window);
                     var writes = drawerWrites ? await DrawerWrites(window) : null;
+                    var agents = detectAgents ? await DetectAgents(window, screenshots, theme.ToString().ToLowerInvariant()) : null;
                     windows.Add(new
                     {
                         theme = theme.ToString(),
@@ -112,6 +118,7 @@ public static class Program
                         mcpPathShown = window.McpPathShown,
                         drawer,
                         drawerWrites = writes,
+                        agents,
                     });
                     window.Close();
                 }
@@ -206,6 +213,48 @@ public static class Program
         window.CloseSettingsBy(SettingsCloseRoute.Escape);
 
         return new { saved, rejected, typed, reread, closed = !window.SettingsOpen };
+    }
+
+    /// <summary>
+    /// AC-11: Detect agents lists one result per client with the button disabled while it runs; a
+    /// second window naming a missing mcp.json shows the command's failure by the row.
+    /// </summary>
+    private static async Task<object> DetectAgents(OperatorWindow window, string? screenshots, string theme)
+    {
+        await Within(window.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
+        var running = window.ClickDetectAgentsAsync();
+        var disabledWhileRunning = !window.DetectAgentsEnabled;
+        await Within(running, "Detect agents did not finish.");
+        var results = window.AgentResultRows.Select(row => new { client = row.Client, status = row.Status, message = row.Message }).ToList();
+        var error = window.AgentsErrorMessage;
+        var enabledAfter = window.DetectAgentsEnabled;
+        var rows = window.SettingsRowNames;
+        if (screenshots is not null) Capture(window, Path.Combine(screenshots, theme + "-agents.png"));
+        window.CloseSettingsBy(SettingsCloseRoute.CloseButton);
+
+        var host = OperatorLauncher.InstalledHost();
+        var missing = Path.Combine(Path.GetTempPath(), "drive-it-self-test-" + Guid.NewGuid().ToString("N"), "mcp.json");
+        var broken = new OperatorWindow(new OperatorClient(new ProcessOperatorRunner(host)), missing, window.Mode, promptForMissingRoot: false)
+        {
+            WindowStartupLocation = WindowStartupLocation.CenterScreen,
+            ShowActivated = false,
+        };
+        broken.Show();
+        object failure;
+        try
+        {
+            await Within(broken.Ready, "The second operator window did not finish loading.");
+            await Within(broken.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
+            await Within(broken.ClickDetectAgentsAsync(), "Detect agents did not finish.");
+            broken.UpdateLayout();
+            failure = new { error = broken.AgentsErrorMessage, results = broken.AgentResultRows.Count, enabledAfter = broken.DetectAgentsEnabled };
+        }
+        finally
+        {
+            broken.Close();
+        }
+
+        return new { rows, disabledWhileRunning, results, error, enabledAfter, failure };
     }
 
     /// <summary>The window, then the window with the drawer open, as PNGs (spec #23 AC-3 and AC-7).</summary>

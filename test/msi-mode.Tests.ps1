@@ -137,10 +137,24 @@ try {
     Assert-ModeTest ((Get-ResolvedMode) -eq 'dev' -and [IO.File]::Exists($marker)) 'The elevated upgrade did not keep Dev Mode.'
 
     # Spec #10 "Visibility": the window resolves Dev Mode itself, shows the banner and hides the requests pane.
-    $selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test-dev.json') -Screenshots (Join-Path $LogDirectory 'window-screens\dev')
+    # Spec #23 AC-11 in Dev Mode: Detect agents against a throwaway profile holding only Claude Desktop,
+    # which gets the install's own mcp.json entry; the second theme's run changes nothing.
+    $clientProfile = Join-Path $LogDirectory 'clients-dev'
+    $claudeDesktop = Join-Path $clientProfile 'roaming\Claude\claude_desktop_config.json'
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $claudeDesktop)) | Out-Null
+    $selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test-dev.json') -Screenshots (Join-Path $LogDirectory 'window-screens\dev') -DetectAgents -ClientProfile $clientProfile
     foreach ($window in @($selfTest.windows)) {
         Assert-ModeTest ($window.mode -eq 'dev' -and $window.devModeBanner -and -not $window.requestsShown) "The Dev Mode window does not show Dev Mode: $($window | ConvertTo-Json -Compress)"
     }
+    $windows = @($selfTest.windows)
+    $agents = (@($windows | ForEach-Object { (Get-OperatorAgentStatus -Window $_ -Client 'claude-desktop') -join ',' }) -join ' then ')
+    Assert-ModeTest ($agents -eq 'added then already') "Detect agents in Dev Mode reported Claude Desktop as $agents, expected added then already."
+    foreach ($client in @('claude-code', 'codex')) {
+        Assert-ModeTest (((Get-OperatorAgentStatus -Window $windows[0] -Client $client) -join ',') -eq 'not_installed') "Detect agents in Dev Mode did not report $client as not installed."
+    }
+    $installedEntry = (Get-Content -LiteralPath (Join-Path $install 'mcp.json') -Raw | ConvertFrom-Json).mcpServers.'drive-it'
+    $detectedEntry = (Get-Content -LiteralPath $claudeDesktop -Raw | ConvertFrom-Json).mcpServers.'drive-it'
+    Assert-ModeTest (($detectedEntry | ConvertTo-Json -Compress -Depth 5) -eq ($installedEntry | ConvertTo-Json -Compress -Depth 5)) 'Detect agents in Dev Mode did not add the install''s own mcp.json entry to Claude Desktop.'
 
     Assert-ModeTest ((Invoke-Msiexec -Operation '/x' -Package $msi -Log 'mode-uninstall.log') -eq 0) 'The uninstall failed.'
     Assert-ModeTest ((Get-RelatedProduct).Count -eq 0) 'The product is still installed after uninstall.'
