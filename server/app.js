@@ -391,11 +391,12 @@ export function createDriveItServer(options = {}) {
       idempotentHint: false,
       openWorldHint: false,
     },
-  }, async input => {
+  }, async (input, extra) => {
     try {
       const resolved = await processResolver(input.processId);
       const { metadata, bytes, absolutePath } = await references.capture({
         ...input,
+        signal: extra?.signal,
         processId: resolved,
         viewId: input.viewId === undefined ? undefined : String(input.viewId),
       });

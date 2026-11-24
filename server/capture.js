@@ -32,13 +32,12 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const PNG_END = Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
 // Revit may round the fitted side; anything beyond this is an export larger than requested.
 const PIXEL_TOLERANCE = 2;
-// The add-in ends every hold within 600 s, the top of the Script time limit setting
-// (HoldSignal.MaximumTimeLimit). A capture queues up to 610 s behind another client on the pipe,
-// which covers a run holding Revit for that long and its rollback (spec #15: capture waits for a
-// hold to end); Revit then gets what is left of 620 s, at most 110 s. The worst case stays under the
-// tool timeout the installer sets for Codex and ChatGPT (server/clients.js).
-export const MAX_HOLD_MS = 600_000;
-export const BROKER_BUDGET = Object.freeze({ connectWaitMs: MAX_HOLD_MS + 10_000, timeoutMs: 110_000, totalMs: 620_000 });
+// A capture waits behind another client on the pipe for as long as the pipe stays busy (spec #15:
+// capture waits until a hold ends). A busy pipe is the add-in's own signal that a hold is still
+// active, including a Revit call that runs past the hold's deadline and the rollback after it, so
+// no fixed wait is assumed. The wait ends when the pipe frees, the client cancels the request, or
+// the session closes. Revit then has 110 s for the export.
+export const BROKER_BUDGET = Object.freeze({ connectWaitMs: Infinity, timeoutMs: 110_000 });
 // A pid alive with a start time this far from the recorded one belongs to another process.
 const START_TOLERANCE_MS = 10_000;
 
@@ -368,6 +367,8 @@ export class ReferenceImages {
     this.sessionCreated = false;
     this.directoryMade = false;
     this.closed = false;
+    // Aborted at shutdown, so a capture waiting behind a hold stops waiting.
+    this.closing = new AbortController();
   }
 
   /**
@@ -481,7 +482,7 @@ export class ReferenceImages {
 
   async capture({
     processId, document, viewId, pixelSize = PIXEL_SIZE.default, purpose, relatedRunIds = [], retain = false,
-    markCategories, markElementIds,
+    markCategories, markElementIds, signal,
   }) {
     if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; no capture was taken.");
     if (!Number.isInteger(pixelSize) || pixelSize < PIXEL_SIZE.min || pixelSize > PIXEL_SIZE.max) {
@@ -540,13 +541,13 @@ export class ReferenceImages {
       try {
         response = await this.brokerExecutor(processId, envelope, {
           ...BROKER_BUDGET,
+          signal: signal ? AbortSignal.any([signal, this.closing.signal]) : this.closing.signal,
           onSession: value => { session = value; },
         });
       } catch (error) {
-        const message = error.code === "EBUSY"
-          ? `Revit stayed busy for ${BROKER_BUDGET.connectWaitMs / 1000} s, longer than a script run may hold it; capture again once Revit responds.`
-          : `The capture did not complete in Revit: ${error.message}`;
-        throw captureError("EXPORT_FAILED", message, { stage: "export" });
+        if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; no capture was taken.", { stage: "export" });
+        if (signal?.aborted) throw captureError("EXPORT_FAILED", "The request was cancelled while Revit was busy; no capture was taken.", { stage: "export" });
+        throw captureError("EXPORT_FAILED", `The capture did not complete in Revit: ${error.message}`, { stage: "export" });
       }
       if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; the capture was discarded.", { stage: "export" });
       if (response?.status !== "succeeded") {
@@ -683,6 +684,7 @@ export class ReferenceImages {
   /** Normal shutdown: removes this session's unretained pairs and, once empty, its directory. */
   closeSync() {
     this.closed = true;
+    this.closing.abort();
     if (!this.sessionCreated) return null;
     const result = sweepSession(this.sessionDirectory, { readdir: this.readdir });
     for (const error of result.errors) this.log(`drive-it: reference-image cleanup failed for ${error.path}: ${error.message}`);

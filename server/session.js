@@ -15,12 +15,14 @@ function pipeName(processId) {
 // serves another client the pipe answers EBUSY; in the moment between instances it is absent
 // (ENOENT). ENOENT gets a short budget of `attempts` consecutive retries, since a pipe that stays
 // absent means Revit is gone. EBUSY is retried for `waitMs` (at least `attempts` times), for
-// callers that may queue behind another client's slow request.
-export async function openPipe(processId, { attempts = 8, waitMs = 0, connector = createConnection } = {}) {
+// callers that may queue behind another client's slow request; with waitMs Infinity, until the
+// pipe frees or `signal` aborts.
+export async function openPipe(processId, { attempts = 8, waitMs = 0, signal, connector = createConnection } = {}) {
   const deadline = Date.now() + waitMs;
   let busy = 0;
   let absent = 0;
   for (;;) {
+    signal?.throwIfAborted();
     const pipe = connector(pipeName(processId));
     try {
       await new Promise((resolve, reject) => {
@@ -40,24 +42,35 @@ export async function openPipe(processId, { attempts = 8, waitMs = 0, connector 
       } else {
         throw error;
       }
-      await new Promise(resolve => setTimeout(resolve, Math.min(25 * (busy + absent), 250)));
+      await pause(Math.min(25 * (busy + absent), 250), signal);
     }
   }
 }
 
-// With totalMs, the time spent queued for the pipe comes out of the time Revit gets, so a caller
-// with a fixed tool timeout can wait behind a long hold and still answer within it.
-async function connect(processId, timeoutMs, { connectWaitMs = 0, totalMs, connector } = {}) {
+function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const aborted = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", aborted);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", aborted, { once: true });
+  });
+}
+
+// timeoutMs runs from the connection, after any wait for the pipe.
+async function connect(processId, timeoutMs, { connectWaitMs = 0, signal, connector } = {}) {
   if (!connector && process.platform !== "win32") {
     throw new Error("Run the MCP server on the Windows machine hosting Revit.");
   }
-  const started = Date.now();
-  const pipe = await openPipe(processId, { waitMs: connectWaitMs, connector });
-  const limitMs = totalMs === undefined ? timeoutMs : Math.min(timeoutMs, totalMs - (Date.now() - started));
+  const pipe = await openPipe(processId, { waitMs: connectWaitMs, signal, connector });
   pipe.setEncoding("utf8");
   const iterator = pipe[Symbol.asyncIterator]();
   let buffered = "";
-  const timeout = setTimeout(() => pipe.destroy(new Error("Revit connection timed out.")), limitMs);
+  const timeout = setTimeout(() => pipe.destroy(new Error("Revit connection timed out.")), timeoutMs);
 
   async function readJson(maxBytes) {
     while (!buffered.includes("\n")) {
@@ -99,8 +112,8 @@ export async function readSession(processId, { timeoutMs = 4000, connectWaitMs =
   }
 }
 
-export async function executeBroker(processId, envelope, { timeoutMs = 30000, connectWaitMs = 0, totalMs, connector, onSession } = {}) {
-  const connection = await connect(processId, timeoutMs, { connectWaitMs, totalMs, connector });
+export async function executeBroker(processId, envelope, { timeoutMs = 30000, connectWaitMs = 0, signal, connector, onSession } = {}) {
+  const connection = await connect(processId, timeoutMs, { connectWaitMs, signal, connector });
   try {
     const session = validateSession(await connection.readJson(4096), processId);
     onSession?.(session);
