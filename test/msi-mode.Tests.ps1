@@ -137,8 +137,9 @@ try {
     Assert-ModeTest ((Get-ResolvedMode) -eq 'dev' -and [IO.File]::Exists($marker)) 'The elevated upgrade did not keep Dev Mode.'
 
     # Spec #10 "Visibility": the window resolves Dev Mode itself, shows the banner and hides the requests pane.
-    # Spec #23 AC-11 in Dev Mode: Detect agents against a throwaway profile holding only Claude Desktop,
-    # which gets the install's own mcp.json entry; the second theme's run changes nothing.
+    # Spec #23 AC-11 in Dev Mode: Detect agents against a throwaway APPDATA holding only Claude Desktop,
+    # which gets the install's own mcp.json entry, and an absent CODEX_HOME; the second theme's run
+    # changes nothing. Claude Code stays at the real profile (operator-self-test.ps1 says why).
     $clientProfile = Join-Path $LogDirectory 'clients-dev'
     $claudeDesktop = Join-Path $clientProfile 'roaming\Claude\claude_desktop_config.json'
     [IO.Directory]::CreateDirectory((Split-Path -Parent $claudeDesktop)) | Out-Null
@@ -149,9 +150,7 @@ try {
     $windows = @($selfTest.windows)
     $agents = (@($windows | ForEach-Object { (Get-OperatorAgentStatus -Window $_ -Client 'claude-desktop') -join ',' }) -join ' then ')
     Assert-ModeTest ($agents -eq 'added then already') "Detect agents in Dev Mode reported Claude Desktop as $agents, expected added then already."
-    foreach ($client in @('claude-code', 'codex')) {
-        Assert-ModeTest (((Get-OperatorAgentStatus -Window $windows[0] -Client $client) -join ',') -eq 'not_installed') "Detect agents in Dev Mode did not report $client as not installed."
-    }
+    Assert-ModeTest (((Get-OperatorAgentStatus -Window $windows[0] -Client 'codex') -join ',') -eq 'not_installed') 'Detect agents in Dev Mode did not report Codex as not installed.'
     $installedEntry = (Get-Content -LiteralPath (Join-Path $install 'mcp.json') -Raw | ConvertFrom-Json).mcpServers.'drive-it'
     $detectedEntry = (Get-Content -LiteralPath $claudeDesktop -Raw | ConvertFrom-Json).mcpServers.'drive-it'
     Assert-ModeTest (($detectedEntry | ConvertTo-Json -Compress -Depth 5) -eq ($installedEntry | ConvertTo-Json -Compress -Depth 5)) 'Detect agents in Dev Mode did not add the install''s own mcp.json entry to Claude Desktop.'

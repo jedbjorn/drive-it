@@ -5,8 +5,11 @@
 # AC-6; it saves limits, so run it only with DRIVE_IT_DATA_DIR set to a throwaway directory.
 # -Screenshots <dir> saves the window and the open drawer in each theme as PNGs.
 # -DetectAgents adds AC-11: it presses Detect agents, which writes the current user's MCP client
-# configurations, so pass -ClientProfile <dir> (a throwaway USERPROFILE and APPDATA for the window's
-# operator.js) unless the caller has put stand-in client files in place.
+# configurations, so pass -ClientProfile <dir> (a throwaway APPDATA and CODEX_HOME for the window's
+# operator.js: Claude Desktop, both builds, and Codex/ChatGPT) unless the caller has put stand-in client
+# files in place. USERPROFILE is not redirected: Windows expands the window's own LocalAppData from it,
+# where the window reads the install mode, so Claude Code's ~\.claude.json stays the real one, which the
+# install itself already registers.
 
 function Invoke-OperatorSelfTest {
     # Opens and closes the installed WPF window in both themes against the installed operator.js.
@@ -31,13 +34,11 @@ function Invoke-OperatorSelfTest {
         $file = $Dotnet
         $arguments = @(('"' + $Exe + '"')) + $arguments
     }
-    # The window's operator.js reads the client locations from these; the window itself does not.
-    $saved = @{ USERPROFILE = $env:USERPROFILE; APPDATA = $env:APPDATA; CODEX_HOME = $env:CODEX_HOME }
+    # The window's operator.js reads these client locations; the window itself does not.
+    $saved = @{ APPDATA = $env:APPDATA; CODEX_HOME = $env:CODEX_HOME }
     if ($ClientProfile) {
-        $env:USERPROFILE = Join-Path $ClientProfile 'home'
         $env:APPDATA = Join-Path $ClientProfile 'roaming'
-        $env:CODEX_HOME = $null
-        [IO.Directory]::CreateDirectory($env:USERPROFILE) | Out-Null
+        $env:CODEX_HOME = Join-Path $ClientProfile 'codex'
         [IO.Directory]::CreateDirectory($env:APPDATA) | Out-Null
     }
     try {
