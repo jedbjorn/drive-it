@@ -81,6 +81,8 @@ public static class Program
                     if (await Task.WhenAny(window.Ready, Task.Delay(TimeSpan.FromSeconds(90))) != window.Ready)
                         throw new TimeoutException("The operator window did not finish loading.");
                     window.UpdateLayout();
+                    // The limit the window read when it opened, before the drawer reads or saves one.
+                    var scriptTimeLimitSeconds = window.ScriptTimeLimitSeconds;
                     var drawer = await DrawerOpenAndClose(window);
                     var writes = drawerWrites ? await DrawerWrites(window) : null;
                     windows.Add(new
@@ -88,7 +90,7 @@ public static class Program
                         theme = theme.ToString(),
                         title = window.Title,
                         workspaceRoot = window.WorkspaceRoot,
-                        scriptTimeLimitSeconds = window.ScriptTimeLimitSeconds,
+                        scriptTimeLimitSeconds,
                         pending = window.PendingCount,
                         history = window.HistoryCount,
                         error = window.ErrorMessage,
