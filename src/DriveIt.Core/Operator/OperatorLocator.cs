@@ -102,6 +102,19 @@ public static class OperatorLocator
         return new OperatorLaunch(node, script, string.IsNullOrWhiteSpace(data) ? null : data);
     }
 
+    /// <summary>
+    /// The data directory operator.js and the MCP server use: <c>DRIVE_IT_DATA_DIR</c>, else the one
+    /// mcp.json gives the MCP server, else <c>%LOCALAPPDATA%\DriveIt</c> (server/store.js's default).
+    /// </summary>
+    public static string DataDirectory(OperatorHost host)
+    {
+        var configured = host.GetEnvironmentVariable(DataDirectoryVariable);
+        if (!string.IsNullOrWhiteSpace(configured)) return configured;
+        if (ReadServerEntry(host)?.DataDirectory is { } fromConfiguration && !string.IsNullOrWhiteSpace(fromConfiguration))
+            return fromConfiguration;
+        return Path.Combine(host.LocalApplicationData, "DriveIt");
+    }
+
     private sealed record ServerEntry(string? Command, string? Server, string? DataDirectory);
 
     /// <summary>The <c>mcpServers.drive-it</c> entry of mcp.json; null when the file is missing or unreadable.</summary>

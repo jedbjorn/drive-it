@@ -130,7 +130,7 @@ export function createDriveItServer(options = {}) {
       arguments: z.record(z.string(), z.unknown()).optional().describe("JSON arguments exposed to Python as args; saved scripts validate them against the revision's inputSchema and apply its defaults"),
       document: document.optional().describe("Optional model path and broker-issued document handle"),
       idempotencyKey: z.string().min(1).max(200).optional().describe("Replay key; completed runs return their original receipt. To resume a run that returned status pending, call again with the same idempotencyKey and the same request; a new key starts a new request that needs a new approval"),
-      timeoutMs: z.number().int().positive().max(120000).optional().describe("Worker timeout, default 30000 ms"),
+      timeoutMs: z.number().int().positive().max(600000).optional().describe("This run's time limit in ms, default 30000 (or the user's script time limit when that is lower). It may not exceed the script time limit the user sets in the Drive-It window (120 s unless changed, 10 to 600 s); a larger value is rejected with the limit. Run a long task as a chain of scripts, each within the limit"),
     },
     // Must list every receipt field: MCP clients reject structured content with undeclared properties.
     outputSchema: {

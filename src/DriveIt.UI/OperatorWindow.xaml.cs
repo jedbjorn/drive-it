@@ -11,9 +11,10 @@ namespace DriveIt.UI;
 
 /// <summary>
 /// The operator window, with the PowerShell window's behavior: on open it shows the selected
-/// root and refreshes both lists (selecting the first row of each), then offers the folder
-/// picker when no root is selected yet. Save root, Approve and Deny call operator.js; a
-/// decision refreshes the lists. Failures show in the banner instead of a message box.
+/// root and the Script time limit and refreshes both lists (selecting the first row of each),
+/// then offers the folder picker when no root is selected yet. Save root, Save limit, Approve
+/// and Deny call operator.js; a decision refreshes the lists. Failures show in the banner
+/// instead of a message box.
 /// </summary>
 public partial class OperatorWindow : Window
 {
@@ -30,6 +31,7 @@ public partial class OperatorWindow : Window
         _promptForMissingRoot = promptForMissingRoot;
         McpText.Text = "MCP configuration: " + mcpConfigurationPath;
         McpText.ToolTip = mcpConfigurationPath;
+        TimeLimitHelp.Text = ScriptTimeLimit.HelpText;
         if (icon is not null) Icon = icon;
         Loaded += OnLoaded;
         UpdateButtons();
@@ -43,6 +45,9 @@ public partial class OperatorWindow : Window
 
     /// <summary>The message in the error banner; null when it is hidden.</summary>
     public string? ErrorMessage => ErrorPanel.Visibility == Visibility.Visible ? ErrorText.Text : null;
+
+    /// <summary>The Script time limit operator.js reported, in seconds; null until it has been read.</summary>
+    public int? ScriptTimeLimitSeconds { get; private set; }
 
     public int PendingCount => RequestList.Items.Count;
 
@@ -59,6 +64,7 @@ public partial class OperatorWindow : Window
                 WorkspaceRoot = await _client.GetWorkspaceAsync();
                 RootText.Text = WorkspaceRoot ?? "";
                 found = true;
+                ShowTimeLimit(await _client.GetScriptTimeLimitAsync());
                 await RefreshListsAsync();
             });
             if (found && WorkspaceRoot is null && _promptForMissingRoot && BrowseForRoot()) await SaveRootAsync();
@@ -104,6 +110,19 @@ public partial class OperatorWindow : Window
         WorkspaceRoot = await _client.SetWorkspaceAsync(RootText.Text);
         RootText.Text = WorkspaceRoot;
     });
+
+    private async void OnSaveTimeLimit(object sender, RoutedEventArgs e) => await RunAsync(async () =>
+    {
+        var seconds = ScriptTimeLimit.Parse(TimeLimitText.Text, out var error)
+            ?? throw new OperatorException(error!);
+        ShowTimeLimit(await _client.SetScriptTimeLimitAsync(seconds));
+    });
+
+    private void ShowTimeLimit(int seconds)
+    {
+        ScriptTimeLimitSeconds = seconds;
+        TimeLimitText.Text = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
 
     private async void OnApprove(object sender, RoutedEventArgs e) => await DecideAsync(approve: true);
 
@@ -195,6 +214,7 @@ public partial class OperatorWindow : Window
         ApproveButton.IsEnabled = !_busy && selected;
         DenyButton.IsEnabled = !_busy && selected;
         SaveRootButton.IsEnabled = !_busy;
+        SaveTimeLimitButton.IsEnabled = !_busy;
         BrowseButton.IsEnabled = !_busy;
         RefreshButton.IsEnabled = !_busy;
     }

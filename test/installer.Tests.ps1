@@ -106,6 +106,7 @@ Assert-InstallerTest ((Get-DriveItWorkspace).root -eq $workspace) 'The selected 
 $selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $FixtureDirectory 'operator-self-test.json')
 foreach ($window in @($selfTest.windows)) {
     Assert-InstallerTest ($window.workspaceRoot -eq $workspace) "The operator window did not show the selected root: [$($window.workspaceRoot)]."
+    Assert-InstallerTest ($window.scriptTimeLimitSeconds -eq 120) "The operator window did not show the default script time limit: [$($window.scriptTimeLimitSeconds)]."
 }
 
 & $installer -SourcePath $package -InstallRoot $InstallRoot -McpConfigPath $mcpPath -NoLaunch | Out-Null

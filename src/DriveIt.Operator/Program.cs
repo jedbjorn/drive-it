@@ -78,6 +78,7 @@ public static class Program
                         theme = theme.ToString(),
                         title = window.Title,
                         workspaceRoot = window.WorkspaceRoot,
+                        scriptTimeLimitSeconds = window.ScriptTimeLimitSeconds,
                         pending = window.PendingCount,
                         history = window.HistoryCount,
                         error = window.ErrorMessage,
