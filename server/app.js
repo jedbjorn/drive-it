@@ -158,6 +158,10 @@ export function createDriveItServer(options = {}) {
       createdViews: z.array(z.object({ id: z.string(), name: z.string(), type: z.string() }).passthrough()).optional()
         .describe("Views created by this run, e.g. by create_3d_view; pass id to capture_revit_view as viewId"),
       checks: z.array(z.unknown()),
+      // Optional only so receipts stored before the API bridge still replay; new receipts always carry it.
+      held: z.object({ ms: z.number(), calls: z.number().int() }).nullable().optional()
+        .describe("null for a run that never used the API bridge; otherwise how long it held Revit and how many calls it made"),
+      warnings: z.array(z.unknown()).optional().describe("Revit warnings raised while the run held Revit"),
       policyDecisionIds: z.array(z.string()),
       policyRequests: z.array(z.unknown()),
       result: z.unknown().nullable(),

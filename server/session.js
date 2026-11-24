@@ -149,3 +149,142 @@ export async function resolveProcessId(processId, { lister = listSessions } = {}
   const list = sessions.map(session => `processId ${session.processId} (${session.version ? `Revit ${session.version}` : "busy"})`).join(", ");
   throw sessionLookupError("MULTIPLE_REVIT_SESSIONS", `Several Revit sessions are running: ${list}. Ask the user which Revit window to use and pass its processId.`);
 }
+
+function holdError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+// Newline-framed replies on one long-lived pipe connection. next() resolves null once the add-in closes it.
+function lineReader(pipe, maxBytes) {
+  let buffered = "";
+  let closed = false;
+  const waiting = [];
+  function drain() {
+    while (waiting.length) {
+      const end = buffered.indexOf("\n");
+      if (end >= 0) {
+        const line = buffered.slice(0, end);
+        buffered = buffered.slice(end + 1);
+        waiting.shift().resolve(line);
+      } else if (closed) {
+        waiting.shift().resolve(null);
+      } else {
+        return;
+      }
+    }
+  }
+  pipe.on("data", chunk => {
+    buffered += chunk;
+    if (buffered.length > maxBytes) pipe.destroy(new Error("Revit response is too large."));
+    drain();
+  });
+  pipe.on("close", () => {
+    closed = true;
+    drain();
+  });
+  pipe.on("error", () => {});
+  return { next: () => new Promise(resolve => { waiting.push({ resolve }); drain(); }) };
+}
+
+// The outcome of a hold the add-in has ended, read without Revit's thread.
+export async function readHoldResult(processId, runId, { timeoutMs = 4000, connectWaitMs = 2000 } = {}) {
+  const connection = await connect(processId, timeoutMs, connectWaitMs);
+  try {
+    validateSession(await connection.readJson(4096), processId);
+    await connection.writeJson({ id: runId, type: "hold.result" });
+    const response = await connection.readJson(1024 * 1024);
+    if (response.status !== "ended") throw holdError("HOLD_RESULT_UNKNOWN", `Revit has no ended hold for run ${runId} (${response.status}).`);
+    return response.hold;
+  } finally {
+    connection.close();
+  }
+}
+
+// A run's hold: one pipe connection kept from the run's first bridge call to its end. While it is open the
+// add-in serves nothing else, so other clients wait (EBUSY) as they wait behind any Revit work.
+export async function openHold(processId, { runId, displayName, timeLimitMs, waitMs = timeLimitMs, resultReader = readHoldResult } = {}) {
+  if (process.platform !== "win32") {
+    throw new Error("Run the MCP server on the Windows machine hosting Revit.");
+  }
+  const pipe = await openPipe(processId, { waitMs });
+  pipe.setEncoding("utf8");
+  const lines = lineReader(pipe, 10 * 1024 * 1024);
+  // Revit may be busy before it can enter the hold; the run's own time bounds the wait.
+  const timer = setTimeout(() => pipe.destroy(), Math.max(1, timeLimitMs));
+  try {
+    const session = await lines.next();
+    if (session === null) throw holdError("HOLD_LOST", "Revit closed the connection before the hold began.");
+    validateSession(JSON.parse(session), processId);
+    pipe.write(`${JSON.stringify({ id: runId, type: "hold.begin", hold: { displayName: displayName ?? null, timeLimitMs } })}\n`);
+    const reply = await lines.next();
+    if (reply === null) throw holdError("HOLD_LOST", "Revit closed the connection before the hold began.");
+    const begun = JSON.parse(reply);
+    if (begun.status !== "held") throw holdError(begun.error?.code || "HOLD_REFUSED", begun.error?.message || "Revit did not hold the run.");
+    return new HoldConnection({ pipe, lines, processId, runId, begun: begun.hold, resultReader });
+  } catch (error) {
+    pipe.destroy();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+class HoldConnection {
+  constructor({ pipe, lines, processId, runId, begun, resultReader }) {
+    Object.assign(this, { pipe, lines, processId, runId, begun, resultReader });
+    this.sequence = 0;
+    this.queue = Promise.resolve();
+    this.closing = false;
+    this.lost = false;
+    this.listeners = [];
+    this.ending = null;
+    pipe.on("close", () => {
+      if (this.closing) return;
+      this.lost = true;
+      for (const listener of this.listeners.splice(0)) listener();
+    });
+  }
+
+  // Called once if the add-in ends the hold on its own (deadline, Stop, or Revit closing).
+  onLost(listener) {
+    if (this.lost) queueMicrotask(listener);
+    else this.listeners.push(listener);
+  }
+
+  // One request at a time on the held connection; the reply is the add-in's response object.
+  send(message) {
+    const result = this.queue.then(async () => {
+      if (this.lost) throw holdError("HOLD_LOST", "Revit is no longer held for this run.");
+      const id = `${this.runId}:${++this.sequence}`;
+      this.pipe.write(`${JSON.stringify({ ...message, id: message.type === "model.execute" ? message.id : id })}\n`);
+      const line = await this.lines.next();
+      if (line === null) throw holdError("HOLD_LOST", "Revit is no longer held for this run.");
+      return JSON.parse(line);
+    });
+    this.queue = result.catch(() => {});
+    return result;
+  }
+
+  // Ends the hold, committing or rolling back, and returns the add-in's summary. After a loss it reads the
+  // outcome the add-in kept. Repeated calls return the same summary.
+  end(outcome) {
+    this.ending ||= (async () => {
+      if (!this.lost) {
+        try {
+          const reply = await this.send({ type: "hold.end", end: { outcome } });
+          this.closing = true;
+          this.pipe.destroy();
+          if (reply.hold) return reply.hold;
+        } catch (error) {
+          if (error.code !== "HOLD_LOST") throw error;
+        }
+      }
+      this.closing = true;
+      this.pipe.destroy();
+      return this.resultReader(this.processId, this.runId);
+    })();
+    return this.ending;
+  }
+}

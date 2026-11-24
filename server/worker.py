@@ -56,6 +56,184 @@ class RevitError(Exception):
         self.response = response
 
 
+# --- The API bridge: script-side proxies for Revit objects the add-in holds (spec #15). ---
+# A handle names an object in the add-in's per-run table; every use of it is one bridge call.
+# Numbers, strings, booleans and None cross by value; lists convert to the collection a method takes.
+
+_member_kinds = {}
+
+
+def _bridge(call):
+    response = _request("bridge.call", call)
+    if response.get("status") != "succeeded":
+        raise RevitError(response)
+    return response.get("value")
+
+
+def _encode(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, _Handle):
+        return {"$h": object.__getattribute__(value, "_h_id")}
+    if isinstance(value, _Path):
+        return {"$path": object.__getattribute__(value, "_p_path")}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_encode(item) for item in value]
+    raise TypeError(f"A {type(value).__name__} cannot cross to Revit; pass numbers, strings, booleans, None, lists or Revit handles.")
+
+
+def _decode(value):
+    if isinstance(value, dict) and "$h" in value:
+        return _Handle(value["$h"], value.get("type", ""))
+    return value
+
+
+def _arguments(args, kwargs):
+    if kwargs:
+        raise TypeError("Revit API calls take positional arguments only; pass them in the order the method lists them.")
+    return [_encode(arg) for arg in args]
+
+
+class _Member:
+    """A method of a Revit object or DB type, called through the bridge."""
+
+    __slots__ = ("_m_target", "_m_name")
+
+    def __init__(self, target, name):
+        object.__setattr__(self, "_m_target", target)
+        object.__setattr__(self, "_m_name", name)
+
+    def __call__(self, *args, **kwargs):
+        target = object.__getattribute__(self, "_m_target")
+        name = object.__getattribute__(self, "_m_name")
+        return _decode(_bridge({"op": "call", "target": target, "member": name, "args": _arguments(args, kwargs)}))
+
+    def __repr__(self):
+        return f"<Revit method {object.__getattribute__(self, '_m_name')}>"
+
+
+class _Proxy:
+    __slots__ = ()
+
+    def _target(self):
+        raise NotImplementedError
+
+    def __setattr__(self, name, value):
+        _bridge({"op": "set", "target": self._target(), "member": name, "value": _encode(value)})
+
+    def __getitem__(self, key):
+        return _decode(_bridge({"op": "index", "target": self._target(), "key": _encode(key)}))
+
+    def __iter__(self):
+        chunk = _bridge({"op": "iter", "target": self._target()})
+        while True:
+            for item in chunk["items"]:
+                yield _decode(item)
+            if chunk["done"]:
+                return
+            chunk = _bridge({"op": "next", "iterator": chunk["$iter"]})
+
+    def __len__(self):
+        return _bridge({"op": "len", "target": self._target()})
+
+    def __eq__(self, other):
+        try:
+            encoded = _encode(other)
+        except TypeError:
+            return False
+        return _bridge({"op": "eq", "target": self._target(), "other": encoded})
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __str__(self):
+        return _bridge({"op": "str", "target": self._target()})
+
+    def __bool__(self):
+        return True
+
+
+class _Handle(_Proxy):
+    """A Revit object held by the add-in for this run."""
+
+    __slots__ = ("_h_id", "_h_type")
+
+    def __init__(self, handle_id, type_name):
+        object.__setattr__(self, "_h_id", handle_id)
+        object.__setattr__(self, "_h_type", type_name)
+
+    def _target(self):
+        return {"$h": object.__getattribute__(self, "_h_id")}
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        type_name = object.__getattribute__(self, "_h_type")
+        if _member_kinds.get((type_name, name)) == "method":
+            return _Member(self._target(), name)
+        value = _bridge({"op": "get", "target": self._target(), "member": name})
+        if isinstance(value, dict) and "$method" in value:
+            _member_kinds[(type_name, name)] = "method"
+            return _Member(self._target(), name)
+        return _decode(value)
+
+    def __hash__(self):
+        return hash(object.__getattribute__(self, "_h_type"))
+
+    def __repr__(self):
+        return f"<Revit {object.__getattribute__(self, '_h_type')} handle>"
+
+
+class _Path(_Proxy):
+    """A name under DB (a namespace, type, enum value or static member), resolved by the add-in when used."""
+
+    __slots__ = ("_p_path",)
+
+    def __init__(self, path):
+        object.__setattr__(self, "_p_path", path)
+
+    def _target(self):
+        return {"$path": object.__getattribute__(self, "_p_path")}
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Path(f"{object.__getattribute__(self, '_p_path')}.{name}")
+
+    def __call__(self, *args, **kwargs):
+        return _decode(_bridge({"op": "call", "target": self._target(), "args": _arguments(args, kwargs)}))
+
+    def __hash__(self):
+        return hash(object.__getattribute__(self, "_p_path"))
+
+    def __repr__(self):
+        return f"<DB {object.__getattribute__(self, '_p_path')[len('Autodesk.Revit.'):]}>"
+
+
+class _Transaction:
+    """with revit.transaction("name"): commits on leaving the block, rolls back if it raises."""
+
+    def __init__(self, revit, name, document):
+        self._revit = revit
+        self._name = str(name)
+        self._document = document
+        self._id = None
+
+    def __enter__(self):
+        self._id = _bridge({"op": "tx.start", "name": self._name, "document": self._revit._document_target(self._document)})
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if exc_type is None:
+            _bridge({"op": "tx.commit", "transaction": self._id})
+            return False
+        try:
+            _bridge({"op": "tx.rollback", "transaction": self._id})
+        except RevitError:
+            pass
+        return False
+
+
 class RuntimeRestriction(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname not in ALLOWED_MODULES:
@@ -374,7 +552,7 @@ class Revit:
 
     def __init__(self, process_id, document, policy_pending, policy_denied):
         self.process_id = process_id
-        self.document = document
+        self._current = document
         self._policy_pending = policy_pending
         self._policy_denied = policy_denied
 
@@ -388,7 +566,7 @@ class Revit:
             normalized.append({"type": operation["type"], "arguments": arguments})
         response = _request("broker.execute", {
             "processId": self.process_id,
-            "document": document if document is not None else self.document,
+            "document": document if document is not None else self._current,
             "operations": normalized,
         })
         status = response.get("status")
@@ -404,9 +582,9 @@ class Revit:
             raise RevitError(response)
         if normalized and normalized[-1]["type"] in ("close_document", "delete_document"):
             # The closed document's handle is stale; later calls must open or create another.
-            self.document = None
+            self._current = None
         elif response.get("document"):
-            self.document = response["document"]
+            self._current = response["document"]
         return response
 
     def _primitive(self, name, document, arguments):
@@ -450,6 +628,29 @@ class Revit:
 
     def edit_family(self, familyId, document=None):
         return self._primitive("edit_family", document, {"familyId": familyId})
+
+    def _document_target(self, document):
+        if document is None:
+            document = self._current
+        if isinstance(document, _Handle):
+            return {"$h": object.__getattribute__(document, "_h_id")}
+        if document is None or isinstance(document, dict):
+            return document
+        raise TypeError("document= takes a document from a receipt or a Document handle.")
+
+    def document(self, document=None):
+        """A handle to the script's current document, or the one a receipt's document names."""
+        return _decode(_bridge({"op": "document", "document": self._document_target(document)}))
+
+    def element(self, id, document=None):
+        """A handle to one element by its integer id."""
+        if isinstance(id, bool) or not isinstance(id, int):
+            raise TypeError("revit.element takes an integer element id, e.g. element.Id.Value.")
+        return _decode(_bridge({"op": "element", "id": id, "document": self._document_target(document)}))
+
+    def transaction(self, name, document=None):
+        """A with block; Revit changes go inside one. Leaving it commits; an exception rolls it back."""
+        return _Transaction(self, name, document)
 
     def __getattr__(self, name):
         if name not in self.OPERATIONS:
@@ -519,6 +720,7 @@ def main():
             "revit": Revit(run["processId"], run.get("document"), policy_pending, policy_denied),
             "checks": Checks(),
             "units": Units(),
+            "DB": _Path("Autodesk.Revit.DB"),
             "result": None,
         }
         exec(compile(run["source"], "<drive-it-script>", "exec"), scope)
