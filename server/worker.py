@@ -1,4 +1,5 @@
 import builtins
+import datetime
 import importlib.abc
 import io
 import json
@@ -47,6 +48,16 @@ ALLOWED_MODULES = frozenset({
     "base64", "binascii", "hashlib", "uuid",
     "pathlib", "fnmatch", "glob",
 })
+
+
+def _import_allowed(name):
+    """An allowlisted module, or one of Python's own pure-Python text codecs, which load on first use (open(path, encoding="utf-16")).
+
+    A script's import statement still names only ALLOWED_MODULES; a codec module is loaded by Python's codec lookup.
+    """
+    return name in ALLOWED_MODULES or name.startswith("encodings.")
+
+
 IMPORT_DISABLED = "Package installation, process and thread execution, and native loading are disabled in the Drive It worker; only allowlisted modules can be imported."
 SCRIPT_FILENAME = "<drive-it-script>"
 
@@ -89,6 +100,11 @@ def _bridge(call):
 def _encode(value):
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, datetime.datetime):
+        # A System.DateTime: an aware datetime crosses as the same instant in UTC; a naive one as it reads.
+        if value.utcoffset() is not None:
+            return {"$datetime": value.astimezone(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="microseconds"), "utc": True}
+        return {"$datetime": value.isoformat(timespec="microseconds"), "utc": False}
     if isinstance(value, _Handle):
         return {"$h": object.__getattribute__(value, "_h_id")}
     if isinstance(value, _Path):
@@ -101,12 +117,16 @@ def _encode(value):
             "Where Revit takes a type, pass the DB type, for example DB.Wall.")}})
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_encode(item) for item in value]
-    raise TypeError(f"A {type(value).__name__} cannot cross to Revit; pass numbers, strings, booleans, None, lists or Revit handles.")
+    raise TypeError(f"A {type(value).__name__} cannot cross to Revit; pass numbers, strings, booleans, None, datetimes, lists or Revit handles.")
 
 
 def _decode(value):
     if isinstance(value, dict) and "$h" in value:
         return _Handle(value["$h"], value.get("type", ""))
+    if isinstance(value, dict) and "$datetime" in value:
+        # A System.DateTime: one Revit marked as UTC is an aware datetime in UTC, any other is naive.
+        moment = datetime.datetime.fromisoformat(value["$datetime"])
+        return moment.replace(tzinfo=datetime.timezone.utc) if value.get("utc") else moment
     if isinstance(value, dict) and "$tuple" in value:
         # A method with out parameters: its return value, then each out value.
         return tuple(_decode(item) for item in value["$tuple"])
@@ -352,7 +372,7 @@ class _Transaction:
 
 class RuntimeRestriction(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname not in ALLOWED_MODULES:
+        if not _import_allowed(fullname):
             raise ImportError(IMPORT_DISABLED)
         return None
 
@@ -498,7 +518,7 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
         return original_import(name, globals, locals, fromlist, level)
 
     def audit(event, arguments):
-        if event == "import" and arguments[0] not in ALLOWED_MODULES:
+        if event == "import" and not _import_allowed(arguments[0]):
             raise ImportError(IMPORT_DISABLED)
         if event in {
             "_winapi.CreateProcess",
@@ -516,7 +536,8 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
             raise RuntimeError("Process execution is disabled in the Drive It worker.")
         if event in {"open", "os.listdir", "os.scandir"}:
             frame = getframe(1)
-            if frame.f_code.co_filename.startswith("<frozen importlib"):
+            # A module load the import hook let through; the bundled Python reads its standard library from a zip.
+            if frame.f_code.co_filename.startswith(("<frozen importlib", "<frozen zipimport")):
                 while frame:
                     if frame.f_code is importing.__code__:
                         return
