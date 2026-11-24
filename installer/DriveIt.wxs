@@ -104,9 +104,20 @@
     <CustomAction Id="StopDriveItProcesses" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec"
                   Execute="immediate" Return="ignore" />
 
+    <!-- The install mode (spec #10 "Mode Selection"), on the command line only, never in a UI:
+         msiexec /i DriveIt.msi DRIVEIT_MODE=dev from an elevated administrator prompt. Not set,
+         Install-DriveIt.ps1 keeps the recorded mode (upgrade, repair) or installs standard; it
+         validates the value and holds the elevated-administrator gate, where the deferred
+         action's token is observable. Secure: a public property reaches the execute sequence.
+         -Mode is passed only when the property is set (powershell.exe -File drops an empty "").
+         RST's command lines never pass it, so RST installs are standard. -->
+    <Property Id="DRIVEIT_MODE" Secure="yes" />
+    <SetProperty Id="DriveItModeArgument" Sequence="execute" After="CostFinalize" Condition="DRIVEIT_MODE"
+                 Value=" -Mode &quot;[DRIVEIT_MODE]&quot;" />
+
     <!-- "[INSTALLFOLDER]." keeps the trailing backslash from escaping the closing quote. -->
     <SetProperty Id="RegisterDriveIt" Sequence="execute" Before="RegisterDriveIt"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]Install-DriveIt.ps1&quot; -SourcePath &quot;[INSTALLFOLDER].&quot; -InstallRoot &quot;[INSTALLFOLDER].&quot; -NoLaunch" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]Install-DriveIt.ps1&quot; -SourcePath &quot;[INSTALLFOLDER].&quot; -InstallRoot &quot;[INSTALLFOLDER].&quot; -NoLaunch[DriveItModeArgument]" />
     <CustomAction Id="RegisterDriveIt" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec"
                   Execute="deferred" Impersonate="yes" Return="check" />
 

@@ -19,7 +19,8 @@ async function clientFor(t, dataDir) {
   await client.connect(new StdioClientTransport({
     command: process.execPath,
     args: [fileURLToPath(new URL("../server/index.js", import.meta.url))],
-    env: { ...process.env, DRIVE_IT_DATA_DIR: dataDir },
+    // LOCALAPPDATA: no user mode file, so the install mode is standard whatever this machine has.
+    env: { ...process.env, DRIVE_IT_DATA_DIR: dataDir, LOCALAPPDATA: dataDir },
   }));
   t.after(() => client.close());
   return client;
@@ -84,6 +85,7 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
       ...info,
       connectionIdentity: `current-user:named-pipe:drive-it-${processId}`,
       workspaceRoot: null,
+      mode: "standard",
     };
     const result = await call();
     assert.ok(!result.isError, result.content[0].text);
@@ -190,6 +192,7 @@ test("the session tool finds the only Revit and tells the agent where to work", 
     processResolver: async processId => processId ?? 4321,
     sessionReader: async processId => ({ processId, version: "2026", build: "b", connectionIdentity: `pipe-${processId}` }),
     contentReader: async () => content,
+    modeResolver: async () => "standard",
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -203,6 +206,7 @@ test("the session tool finds the only Revit and tells the agent where to work", 
   assert.equal(result.structuredContent.processId, 4321);
   assert.equal(result.structuredContent.workspaceRoot, await runtime.workspace.getRoot());
   assert.deepEqual(result.structuredContent.content, content);
+  assert.equal(result.structuredContent.mode, "standard");
 
   const fresh = new Runtime({ dataDir: path.join(base, "fresh") });
   const { server: freshServer } = createDriveItServer({
@@ -210,6 +214,7 @@ test("the session tool finds the only Revit and tells the agent where to work", 
     processResolver: async processId => processId ?? 4321,
     sessionReader: async processId => ({ processId, version: "2026", build: "b", connectionIdentity: `pipe-${processId}` }),
     contentReader: async () => content,
+    modeResolver: async () => "dev",
   });
   const [freshClientTransport, freshServerTransport] = InMemoryTransport.createLinkedPair();
   await freshServer.connect(freshServerTransport);
@@ -220,6 +225,7 @@ test("the session tool finds the only Revit and tells the agent where to work", 
   const unset = await freshClient.callTool({ name: "get_revit_session", arguments: {} });
   assert.ok(!unset.isError, unset.content[0].text);
   assert.equal(unset.structuredContent.workspaceRoot, null);
+  assert.equal(unset.structuredContent.mode, "dev");
 });
 
 test("a pending run tells the agent to resume with the same idempotency key", async (t) => {

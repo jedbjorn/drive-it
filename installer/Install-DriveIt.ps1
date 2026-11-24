@@ -5,6 +5,9 @@ param(
     [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DriveIt'),
     [string]$WorkspaceRoot,
     [string]$McpConfigPath,
+    # standard or dev (spec #10 "Mode Selection"); the MSI passes DRIVEIT_MODE. Empty keeps the
+    # recorded mode (upgrade, repair), else standard. dev needs an elevated administrator.
+    [string]$Mode,
     [switch]$NoLaunch
 )
 
@@ -40,6 +43,87 @@ function Write-JsonAtomic {
         if ([IO.File]::Exists($backup)) {
             [IO.File]::Delete($backup)
         }
+    }
+}
+
+$DevModeElevationMessage = 'Dev Mode must be installed from an elevated administrator prompt'
+$DefaultWorkspaceRoot = 'C:\DriveIt\default'
+
+function Test-ElevatedAdministrator {
+    # True only for a full administrator token: under UAC an administrator's filtered token is not
+    # in the Administrators role.
+    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-TokenDescription {
+    # For the install log: who runs this, and the token's integrity level (S-1-16-12288 high, i.e.
+    # elevated; S-1-16-8192 medium).
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $integrity = [regex]::Match((& whoami.exe /groups 2>$null | Out-String), 'S-1-16-\d+').Value
+    return "user $($identity.Name) ($($identity.User.Value)), integrity $integrity, elevated administrator $(Test-ElevatedAdministrator)"
+}
+
+function Get-DevModeMarkerPath {
+    param([Parameter(Mandatory)][string]$Sid)
+    return Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) "DriveIt\dev-mode\$Sid.json"
+}
+
+function New-DevModeSecurity {
+    # SYSTEM and Administrators full control, Users read; owned by Administrators, nothing inherited,
+    # so a standard user can neither create nor alter a marker (server/mode.js checks the owner).
+    param([switch]$Directory)
+    $security = if ($Directory) { New-Object Security.AccessControl.DirectorySecurity } else { New-Object Security.AccessControl.FileSecurity }
+    $security.SetOwner((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'))
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = if ($Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [Security.AccessControl.InheritanceFlags]::None }
+    foreach ($grant in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            (New-Object Security.Principal.SecurityIdentifier $grant[0]),
+            [Security.AccessControl.FileSystemRights]$grant[1], $inheritance,
+            [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)))
+    }
+    return $security
+}
+
+function Set-DevModeMarker {
+    param([Parameter(Mandatory)][string]$Sid)
+    $path = Get-DevModeMarkerPath -Sid $Sid
+    $directory = [IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+    $directory.SetAccessControl((New-DevModeSecurity -Directory))
+    if ([IO.File]::Exists($path)) {
+        [IO.File]::Delete($path)
+    }
+    $marker = [ordered]@{
+        mode = 'dev'
+        sid = $Sid
+        user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        installedAt = [DateTime]::UtcNow.ToString('o')
+    }
+    [IO.File]::WriteAllText($path, ($marker | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+    [IO.File]::SetAccessControl($path, (New-DevModeSecurity))
+}
+
+function Set-UserPathEntry {
+    # Adds or removes one folder in the user's PATH (HKCU\Environment), keeping the value's kind and
+    # every other entry, %VARIABLE% references unexpanded. New SSH sessions read it from there.
+    param([Parameter(Mandatory)][string]$Directory, [bool]$Present)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+        $exists = $null -ne $key.GetValue('Path')
+        $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $entries = @($current -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $Directory.TrimEnd('\') })
+        if ($Present) {
+            $entries += $Directory
+        }
+        $next = $entries -join ';'
+        if ($next -ceq $current) {
+            return
+        }
+        $kind = if ($exists) { $key.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+        $key.SetValue('Path', $next, $kind)
+    } finally {
+        $key.Dispose()
     }
 }
 
@@ -144,6 +228,13 @@ if ($manifest.schemaVersion -ne 1) {
     throw "Unsupported Drive It installer package schema: $($manifest.schemaVersion)"
 }
 
+if (-not [string]::IsNullOrEmpty($Mode) -and $Mode -cnotin @('standard', 'dev')) {
+    throw "DRIVEIT_MODE (-Mode) must be 'standard' or 'dev', not '$Mode'."
+}
+$elevated = Test-ElevatedAdministrator
+$userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+Write-Host "Drive-It install token: $(Get-TokenDescription)"
+
 if (-not [string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
     $resolvedWorkspace = Get-Item -LiteralPath $WorkspaceRoot -Force
     if (-not $resolvedWorkspace.PSIsContainer) {
@@ -176,6 +267,7 @@ try {
     $addinTemplate = Join-Path $stagedApp 'addin\DriveIt.addin'
     $requiredFiles = @(
         $node, $python, $server, $smokeTest, $addinTemplate,
+        (Join-Path $stagedApp 'drive-it-stdio.cmd'),
         (Join-Path $stagedApp 'addin\DriveIt.Revit.dll'),
         (Join-Path $stagedApp 'addin\DriveIt.UI.dll'),
         (Join-Path $stagedApp 'operator\DriveIt.Operator.exe')
@@ -193,6 +285,25 @@ try {
     & $python -I -c "import json, sys; assert sys.version_info >= (3, 12); print(sys.version)"
     if ($LASTEXITCODE -ne 0) {
         throw 'The private Python runtime failed its installation check.'
+    }
+
+    # The recorded mode, from the one Node resolver (server/mode.js), is kept when no mode is named.
+    # Both of its paths are set from the known folders: a custom action's environment may lack them.
+    $env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData')
+    $env:ProgramData = [Environment]::GetFolderPath('CommonApplicationData')
+    $installMode = $Mode
+    if ([string]::IsNullOrEmpty($installMode)) {
+        $installMode = 'standard'
+        $recorded = & $node (Join-Path $stagedApp 'server\mode.js') 2>$null | Out-String
+        if ($LASTEXITCODE -eq 0 -and ($recorded | ConvertFrom-Json).mode -eq 'dev') {
+            $installMode = 'dev'
+        }
+    }
+    Write-Host "Drive-It install mode: $installMode$(if ([string]::IsNullOrEmpty($Mode)) { ' (recorded)' })"
+    # The admin gate: before anything outside the staged package changes.
+    if ($installMode -eq 'dev' -and -not $elevated) {
+        $leave = if ([string]::IsNullOrEmpty($Mode)) { ' This install is in Dev Mode; upgrade or repair it elevated, or install with DRIVEIT_MODE=standard to leave Dev Mode.' } else { '' }
+        throw "$DevModeElevationMessage.$leave"
     }
 
     $dotnet = Install-DotnetRuntime -Destination (Join-Path $stagedApp 'runtimes\dotnet')
@@ -288,6 +399,19 @@ try {
     Import-Module (Join-Path $app 'operator\DriveIt.Operator.psm1') -Force -DisableNameChecking
     if (-not [string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
         Set-DriveItWorkspace -Root $WorkspaceRoot | Out-Null
+    } else {
+        # Both modes start in the default workspace when no root is set (spec #10 "Default
+        # Workspace"); an upgrade keeps the root already chosen. Failing to create it is not fatal:
+        # the first run then asks for a workspace.
+        try {
+            if ($null -eq (Get-DriveItWorkspace)) {
+                [IO.Directory]::CreateDirectory($DefaultWorkspaceRoot) | Out-Null
+                Set-DriveItWorkspace -Root $DefaultWorkspaceRoot | Out-Null
+                Write-Host "Drive-It workspace root: $DefaultWorkspaceRoot"
+            }
+        } catch {
+            Write-Warning "Drive-It could not set the default workspace $DefaultWorkspaceRoot ($($_.Exception.Message)); choose one in the Drive-It window."
+        }
     }
 
     # A private runtime provisioned while staging now lives under the installed app.
@@ -310,6 +434,21 @@ try {
     $shortcut.Description = 'Choose the workspace, approve requests, and review what the agent ran.'
     $shortcut.Save()
 
+    # The mode's two keys (server/mode.js reads them): the admin marker first for dev, the user file
+    # first for standard. drive-it-stdio.cmd is on the user's PATH only in Dev Mode.
+    $userModeFile = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DriveIt\install-mode.json'
+    if ($installMode -eq 'dev') {
+        Set-DevModeMarker -Sid $userSid
+        Write-JsonAtomic -Value ([ordered]@{ mode = 'dev' }) -Path $userModeFile
+    } else {
+        Write-JsonAtomic -Value ([ordered]@{ mode = 'standard' }) -Path $userModeFile
+        $marker = Get-DevModeMarkerPath -Sid $userSid
+        if ($elevated -and [IO.File]::Exists($marker)) {
+            [IO.File]::Delete($marker)
+        }
+    }
+    Set-UserPathEntry -Directory $app -Present ($installMode -eq 'dev')
+
     if ([IO.Directory]::Exists($backup)) {
         Remove-Item -LiteralPath $backup -Recurse -Force
     }
@@ -324,6 +463,7 @@ try {
 
     [ordered]@{
         installed = $true
+        mode = $installMode
         application = $app
         addin = $addinPath
         shortcut = $shortcutPath

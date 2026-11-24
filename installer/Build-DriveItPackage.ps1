@@ -33,6 +33,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $repository 'operator') -Destination (Join-Path $app 'operator') -Recurse
     Copy-Item -LiteralPath (Join-Path $repository 'package.json') -Destination (Join-Path $app 'package.json')
     Copy-Item -LiteralPath (Join-Path $repository 'package-lock.json') -Destination (Join-Path $app 'package-lock.json')
+    Copy-Item -LiteralPath (Join-Path $repository 'installer\drive-it-stdio.cmd') -Destination (Join-Path $app 'drive-it-stdio.cmd')
     Copy-Item -LiteralPath (Join-Path $repository 'installer\Install-DriveIt.ps1') -Destination (Join-Path $package 'Install-DriveIt.ps1')
     Copy-Item -LiteralPath (Join-Path $repository 'installer\Uninstall-DriveIt.ps1') -Destination (Join-Path $package 'Uninstall-DriveIt.ps1')
 

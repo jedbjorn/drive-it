@@ -139,4 +139,80 @@ try {
     Move-Item -LiteralPath "$missingNode.missing" -Destination $missingNode
 }
 
+# Spec #10: the default workspace and the two install modes. A second install with no root starts in
+# C:\DriveIt\default; then dev and back to standard. CI runners are elevated administrators, so
+# the dev install passes the gate here; the unelevated gate is proven live on W10C (AC-3).
+$userModeFile = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DriveIt\install-mode.json'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$marker = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) "DriveIt\dev-mode\$sid.json"
+$modeRoot = Join-Path $FixtureDirectory 'mode-install'
+$modeMcp = Join-Path $FixtureDirectory 'mode-client.json'
+$modeApp = Join-Path $modeRoot 'app'
+function Get-UserPath {
+    return [string](Get-Item -LiteralPath 'HKCU:\Environment').GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+}
+function Test-OnUserPath {
+    param([string]$Directory)
+    return @((Get-UserPath) -split ';' | Where-Object { $_.TrimEnd('\') -ieq $Directory.TrimEnd('\') }).Count -gt 0
+}
+function Invoke-ModeInstall {
+    # The installer's JSON result; the Python check's version line precedes it on the output.
+    param([hashtable]$Extra = @{})
+    $output = @(& $installer -SourcePath $package -InstallRoot $modeRoot -McpConfigPath $modeMcp -NoLaunch @Extra)
+    return @($output | Where-Object { "$_".TrimStart().StartsWith('{') })[-1] | ConvertFrom-Json
+}
+function Get-ResolvedMode {
+    return (& $node (Join-Path $modeApp 'server\mode.js') | ConvertFrom-Json).mode
+}
+
+$standard = Invoke-ModeInstall
+$env:DRIVE_IT_DATA_DIR = $modeRoot
+Assert-InstallerTest ($standard.mode -eq 'standard') "A default install reported mode [$($standard.mode)]."
+Assert-InstallerTest ((Get-Content -LiteralPath $userModeFile -Raw | ConvertFrom-Json).mode -eq 'standard') 'A default install did not record standard.'
+Assert-InstallerTest (-not [IO.File]::Exists($marker)) 'A standard install left an admin marker.'
+Assert-InstallerTest ([IO.File]::Exists((Join-Path $modeApp 'drive-it-stdio.cmd'))) 'A standard install has no drive-it-stdio.cmd.'
+Assert-InstallerTest (-not (Test-OnUserPath $modeApp)) 'A standard install put drive-it-stdio.cmd on PATH.'
+Assert-InstallerTest ((Get-DriveItWorkspace).root -eq 'C:\DriveIt\default') "A fresh install did not start in C:\DriveIt\default: [$((Get-DriveItWorkspace).root)]."
+Assert-InstallerTest ((Get-ResolvedMode) -eq 'standard') 'The resolver did not say standard.'
+
+$chosen = Join-Path $FixtureDirectory 'chosen'
+[IO.Directory]::CreateDirectory($chosen) | Out-Null
+Set-DriveItWorkspace -Root $chosen | Out-Null
+$dev = Invoke-ModeInstall @{ Mode = 'dev' }
+Assert-InstallerTest ($dev.mode -eq 'dev') "A dev install reported mode [$($dev.mode)]."
+Assert-InstallerTest ((Get-DriveItWorkspace).root -eq $chosen) 'An upgrade replaced the chosen workspace with the default.'
+Assert-InstallerTest ((Get-Content -LiteralPath $userModeFile -Raw | ConvertFrom-Json).mode -eq 'dev') 'A dev install did not record dev.'
+$markerContent = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+Assert-InstallerTest ($markerContent.mode -eq 'dev' -and $markerContent.sid -eq $sid) 'The admin marker does not name this user.'
+$acl = Get-Acl -LiteralPath $marker
+Assert-InstallerTest ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544') "The admin marker is owned by $($acl.Owner)."
+Assert-InstallerTest ($acl.AreAccessRulesProtected) 'The admin marker inherits access rules.'
+$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+$change = [Security.AccessControl.FileSystemRights]'Write, Delete, ChangePermissions, TakeOwnership'
+$writers = @($rules | Where-Object { ($_.FileSystemRights -band $change) -ne 0 } | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+Assert-InstallerTest (($writers -join ',') -eq 'S-1-5-18,S-1-5-32-544') "Not only SYSTEM and Administrators may change the admin marker: [$($writers -join ',')]."
+Assert-InstallerTest (@($rules | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-545' -and ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -eq [Security.AccessControl.FileSystemRights]::Read }).Count -eq 1) 'Users cannot read the admin marker.'
+
+Assert-InstallerTest (Test-OnUserPath $modeApp) 'A dev install did not put drive-it-stdio.cmd on PATH.'
+Assert-InstallerTest ((Get-ResolvedMode) -eq 'dev') 'The resolver did not say dev after a dev install.'
+
+$kept = Invoke-ModeInstall
+Assert-InstallerTest ($kept.mode -eq 'dev') 'A repair without a mode did not keep dev.'
+
+$invalid = $false
+try {
+    Invoke-ModeInstall @{ Mode = 'developer' } | Out-Null
+} catch {
+    $invalid = $_.Exception.Message -match "must be 'standard' or 'dev'"
+}
+Assert-InstallerTest $invalid 'An invalid mode did not fail with a clear error.'
+Assert-InstallerTest ((Get-ResolvedMode) -eq 'dev') 'A failed install changed the mode.'
+
+$back = Invoke-ModeInstall @{ Mode = 'standard' }
+Assert-InstallerTest ($back.mode -eq 'standard') 'A standard install did not leave Dev Mode.'
+Assert-InstallerTest (-not [IO.File]::Exists($marker)) 'An elevated standard install did not delete the admin marker.'
+Assert-InstallerTest (-not (Test-OnUserPath $modeApp)) 'Leaving Dev Mode left drive-it-stdio.cmd on PATH.'
+Assert-InstallerTest ((Get-ResolvedMode) -eq 'standard') 'The resolver did not say standard after leaving Dev Mode.'
+
 Write-Output 'installer tests passed'
+
