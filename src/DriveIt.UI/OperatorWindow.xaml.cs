@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
+using DriveIt.Core.Mode;
 using DriveIt.Core.Operator;
 using DriveIt.UI.Theming;
 using Microsoft.Win32;
@@ -14,7 +15,8 @@ namespace DriveIt.UI;
 /// root and the Script time limit and refreshes both lists (selecting the first row of each),
 /// then offers the folder picker when no root is selected yet. Save root, Save limit, Approve
 /// and Deny call operator.js; a decision refreshes the lists. Failures show in the banner
-/// instead of a message box.
+/// instead of a message box. In Dev Mode the "Dev Mode: no guardrails" banner stays shown and
+/// the outside-root requests pane is hidden (spec #10 "Visibility").
 /// </summary>
 public partial class OperatorWindow : Window
 {
@@ -23,12 +25,20 @@ public partial class OperatorWindow : Window
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool _busy;
 
-    public OperatorWindow(OperatorClient client, string mcpConfigurationPath, ImageSource? icon = null, bool promptForMissingRoot = true)
+    public OperatorWindow(OperatorClient client, string mcpConfigurationPath, DriveItMode mode, ImageSource? icon = null, bool promptForMissingRoot = true)
     {
         InitializeComponent();
         DarkTitleBar.Attach(this);
         _client = client;
         _promptForMissingRoot = promptForMissingRoot;
+        Mode = mode;
+        if (mode == DriveItMode.Dev)
+        {
+            DevModePanel.Visibility = Visibility.Visible;
+            RequestsPanel.Visibility = Visibility.Collapsed;
+            RequestsRow.Height = new GridLength(0);
+            RequestsRow.MinHeight = 0;
+        }
         McpText.Text = "MCP configuration: " + mcpConfigurationPath;
         McpText.ToolTip = mcpConfigurationPath;
         TimeLimitHelp.Text = ScriptTimeLimit.HelpText;
@@ -39,6 +49,15 @@ public partial class OperatorWindow : Window
 
     /// <summary>Completes once the first load (root and both lists) has finished, whether or not it failed.</summary>
     public Task Ready => _ready.Task;
+
+    /// <summary>The install mode the window was opened in.</summary>
+    public DriveItMode Mode { get; }
+
+    /// <summary>True while the "Dev Mode: no guardrails" banner is shown.</summary>
+    public bool DevModeBannerShown => DevModePanel.Visibility == Visibility.Visible;
+
+    /// <summary>True while the outside-root requests pane is shown.</summary>
+    public bool RequestsShown => RequestsPanel.Visibility == Visibility.Visible;
 
     /// <summary>The root operator.js reported, or null when none is selected.</summary>
     public string? WorkspaceRoot { get; private set; }

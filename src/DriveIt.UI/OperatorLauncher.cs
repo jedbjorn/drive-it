@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using DriveIt.Core.Mode;
 using DriveIt.Core.Operator;
 using DriveIt.Core.Theming;
 using DriveIt.UI.Theming;
@@ -61,7 +62,7 @@ public static class OperatorLauncher
     {
         var host = OperatorHost.ForAssemblyDirectory(AssemblyDirectory());
         var client = new OperatorClient(new ProcessOperatorRunner(host));
-        return new OperatorWindow(client, OperatorLocator.McpConfigurationPath(host), LoadIcon(host), promptForMissingRoot);
+        return new OperatorWindow(client, OperatorLocator.McpConfigurationPath(host), InstallMode.Current, LoadIcon(host), promptForMissingRoot);
     }
 
     private static string? AssemblyDirectory() => Path.GetDirectoryName(typeof(OperatorLauncher).Assembly.Location);

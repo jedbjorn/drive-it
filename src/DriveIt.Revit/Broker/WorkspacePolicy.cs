@@ -1,7 +1,15 @@
+using DriveIt.Core.Mode;
+
 namespace DriveIt.Revit.Broker;
 
 public static class WorkspacePolicy
 {
+    /// <summary>
+    /// An outside-root path needs a person's decision (policy_required) in standard; in Dev Mode (spec #10) every path
+    /// is allowed and the check is skipped.
+    /// </summary>
+    public static bool DecisionRequired => !InstallMode.IsDev;
+
     public static string CanonicalRoot(string? path)
     {
         var root = Canonicalize(path, "workspaceRoot");

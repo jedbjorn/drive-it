@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Threading;
+using DriveIt.Core.Mode;
 using DriveIt.Core.Theming;
 using DriveIt.UI;
 using DriveIt.UI.Theming;
@@ -82,6 +83,9 @@ public static class Program
                         pending = window.PendingCount,
                         history = window.HistoryCount,
                         error = window.ErrorMessage,
+                        mode = InstallMode.Name(window.Mode),
+                        devModeBanner = window.DevModeBannerShown,
+                        requestsShown = window.RequestsShown,
                     });
                     window.Close();
                 }

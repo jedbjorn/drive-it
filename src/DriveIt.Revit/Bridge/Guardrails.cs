@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text.Json.Nodes;
 using Autodesk.Revit.DB;
+using DriveIt.Core.Mode;
 using RevitApplication = Autodesk.Revit.ApplicationServices.Application;
 
 namespace DriveIt.Revit.Bridge;
@@ -9,7 +10,8 @@ namespace DriveIt.Revit.Bridge;
 /// <summary>
 /// What stays out of a script's reach through the bridge (spec #15 "Guardrails"): handles only for Revit model
 /// API objects, the document calls that stay with built-in operations, and callbacks a script cannot write.
-/// A guardrail, not a sandbox.
+/// A guardrail, not a sandbox. In Dev Mode (spec #10) every guardrail here allows; the technical limits (callbacks a
+/// script cannot write, the handle cap) stay in both modes.
 /// </summary>
 internal static class Guardrails
 {
@@ -50,16 +52,40 @@ internal static class Guardrails
         (typeof(PrintManager), "SubmitPrint", "print"),
     ];
 
-    /// <summary>Refuses a handle for anything but a Revit model API object or a standard collection of them.</summary>
+    /// <summary>
+    /// Document calls that need the run's transaction group closed first, as the built-in save and close close it. Only a
+    /// Dev Mode script reaches them directly; the bridge then keeps what the run did to that document before the call.
+    /// </summary>
+    private static readonly HashSet<string> CommitPoints = ["Save", "SaveAs", "SaveAsCloud", "Close", "SynchronizeWithCentral", "ReloadLatest"];
+
+    /// <summary>Refuses a handle for anything but a Revit model API object or a standard collection of them; in Dev Mode any object gets one.</summary>
     public static void RequireAllowed(Type type)
     {
-        if (!IsAllowed(type))
+        if (!InstallMode.IsDev && !IsAllowed(type))
             throw new BridgeException("type_not_allowed",
                 $"Drive-It gives a script handles only to Revit model API objects (Autodesk.Revit.DB and the collections it returns); a {BridgeCalls.TypeName(type)} is not one.");
     }
 
-    /// <summary>Refuses the document and transaction calls that stay with Drive-It, naming the built-in to use.</summary>
+    /// <summary>
+    /// Refuses the document calls that stay with Drive-It, naming the built-in to use; in Dev Mode they are callable.
+    /// Events stay refused in both modes: a script cannot write the handler.
+    /// </summary>
     public static void RequireCallable(Type type, string member)
+    {
+        if (!InstallMode.IsDev)
+            RequireNotRefused(type, member);
+        if (member.StartsWith("add_", StringComparison.Ordinal) || member.StartsWith("remove_", StringComparison.Ordinal))
+        {
+            if (type.GetEvent(member[(member.IndexOf('_') + 1)..]) is not null)
+                throw new BridgeException("callback_not_supported",
+                    $"{BridgeCalls.TypeName(type)}.{member[(member.IndexOf('_') + 1)..]} is an event; a script cannot subscribe to Revit events.");
+        }
+    }
+
+    /// <summary>True for a Document call that needs the run's group on that document closed first (Dev Mode only).</summary>
+    public static bool IsCommitPoint(Type type, string member) => typeof(Document).IsAssignableFrom(type) && CommitPoints.Contains(member);
+
+    private static void RequireNotRefused(Type type, string member)
     {
         foreach (var (owner, name, action) in LeaveTheSession)
         {
@@ -72,12 +98,6 @@ internal static class Guardrails
             if (name == member && owner.IsAssignableFrom(type))
                 throw new BridgeException("member_not_allowed",
                     $"{owner.Name}.{member} stays with Drive-It's built-in operations, which apply the workspace policy and record the file in the receipt; call revit.{instead}(...) instead.");
-        }
-        if (member.StartsWith("add_", StringComparison.Ordinal) || member.StartsWith("remove_", StringComparison.Ordinal))
-        {
-            if (type.GetEvent(member[(member.IndexOf('_') + 1)..]) is not null)
-                throw new BridgeException("callback_not_supported",
-                    $"{BridgeCalls.TypeName(type)}.{member[(member.IndexOf('_') + 1)..]} is an event; a script cannot subscribe to Revit events.");
         }
     }
 

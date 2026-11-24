@@ -96,7 +96,7 @@ internal sealed class HeldRun : IHeldDocuments
     public HeldRun(string runId, string? displayName, int? timeLimitMs)
     {
         RunId = runId;
-        calls = new BridgeCalls(() => transactions.Count > 0);
+        calls = new BridgeCalls(this, AnyTransactionOpen);
         DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName.Trim();
         requestedLimit = timeLimitMs is > 0 ? TimeSpan.FromMilliseconds(timeLimitMs.Value) : TimeSpan.MaxValue;
     }
@@ -125,6 +125,9 @@ internal sealed class HeldRun : IHeldDocuments
     private string GroupName => $"Drive-It: {DisplayName ?? $"run {RunId[..Math.Min(8, RunId.Length)]}"}";
 
     public void RequestStop() => stopRequested = true;
+
+    /// <summary>A revit.transaction, or a transaction a Dev Mode script made, is open somewhere in the run.</summary>
+    private bool AnyTransactionOpen() => transactions.Count > 0 || calls.ScriptTransactionOpen;
 
     /// <summary>The client is gone. Before the hold starts this cancels it; during it, it ends it.</summary>
     public void Disconnect()
@@ -555,12 +558,16 @@ internal sealed class HeldRun : IHeldDocuments
     private HoldSummary End(string reason)
     {
         var commit = reason == "committed";
+        // A Dev Mode script's own transactions first (innermost), then the revit.transaction ones, then once more for a
+        // script group that was around a revit.transaction and can close only after it.
+        calls.RollBackScriptTransactions();
         foreach (var (transaction, _) in transactions.Values)
         {
             RollBackQuietly(transaction);
             transaction.Dispose();
         }
         transactions.Clear();
+        calls.RollBackScriptTransactions();
 
         foreach (var entry in groups)
         {
