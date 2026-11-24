@@ -893,6 +893,25 @@ result = {"child": child, "system": status, "thread": seen, "native": ctypes.siz
   assert.equal(receipt.logs, "logged\n");
 });
 
+test("in Dev Mode a process the script leaves running does not hold the run past its end or its time limit", async (t) => {
+  const { root, runtime } = await fixture(t, DEV_MODE);
+  const children = [];
+  t.after(() => children.forEach(pid => { try { process.kill(pid); } catch {} }));
+  const start = "import subprocess, sys\nchild = subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(10)\"])\n";
+
+  let began = Date.now();
+  const finished = await runtime.execute(request(root, { source: `${start}result = child.pid`, idempotencyKey: "dev-left-running", timeoutMs: 5000 }));
+  children.push(finished.result);
+  assert.equal(finished.status, "succeeded", JSON.stringify(finished));
+  assert.ok(Date.now() - began < 5000, `settled after ${Date.now() - began} ms`);
+
+  began = Date.now();
+  const stopped = await runtime.execute(request(root, { source: `${start}print(child.pid)\nwhile True: pass`, idempotencyKey: "dev-left-running-timeout", timeoutMs: 1500 }));
+  assert.equal(stopped.status, "timed_out", JSON.stringify(stopped));
+  assert.equal(stopped.error.code, "RUN_TIMEOUT");
+  assert.ok(Date.now() - began < 5000, `settled after ${Date.now() - began} ms`);
+});
+
 test("native library calls cannot write outside the root or produce success receipts", async (t) => {
   const { root, outside, runtime } = await fixture(t);
   const target = path.join(outside, "native-escape.txt");

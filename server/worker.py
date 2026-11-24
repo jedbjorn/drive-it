@@ -823,7 +823,10 @@ def _serializable(value):
 def _detach_protocol():
     """Dev Mode: a process a script starts inherits the worker's standard handles. The protocol moves to
     descriptors of its own that no child inherits; standard input becomes NUL and standard output goes to
-    stderr, so a child can neither read the protocol nor write into it."""
+    stderr, so a child can neither read the protocol nor write into it.
+
+    The protocol input re-opens descriptor 0 directly, so it relies on sys.stdin having buffered nothing past
+    the run line. That holds because Node writes nothing more until the worker sends its first request."""
     global _protocol_in, _protocol_out
     _protocol_in = open(os.dup(0), "r", encoding="utf-8")
     _protocol_out = open(os.dup(1), "w", encoding="utf-8", newline="\n")

@@ -144,7 +144,7 @@ export function createDriveItServer(options = {}) {
   });
 
   server.registerTool("execute_script", {
-    description: "Run inline Python or an exact saved script revision in the isolated fixed worker. File and typed Revit effects follow the persistent workspace policy and return a durable receipt.",
+    description: "Run inline Python or an exact saved script revision in the Python worker. Its file and typed Revit effects are recorded in a durable receipt; the server instructions say which guardrails apply in this install.",
     inputSchema: {
       processId: processId.optional().describe("Windows process ID of the selected Revit.exe; omit it to use the only running Revit"),
       displayName: z.string().trim().min(1).max(200).describe("Required. One plain-language line, written for the user, saying what this run does to their files or model, e.g. \"Add Level 3 at 24 ft to the tower model\". Shown in the Drive-It operator window's run history and approval requests"),
