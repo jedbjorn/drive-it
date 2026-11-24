@@ -89,8 +89,10 @@ function New-DevModeSecurity {
 function Set-DevModeMarker {
     param([Parameter(Mandatory)][string]$Sid)
     $path = Get-DevModeMarkerPath -Sid $Sid
-    $directory = [IO.Directory]::CreateDirectory((Split-Path -Parent $path))
-    $directory.SetAccessControl((New-DevModeSecurity -Directory))
+    # Set-Acl, not the .NET methods: Windows PowerShell (the MSI) and PowerShell 7 (a script
+    # install) expose different ones.
+    $directory = [IO.Directory]::CreateDirectory((Split-Path -Parent $path)).FullName
+    Set-Acl -LiteralPath $directory -AclObject (New-DevModeSecurity -Directory)
     if ([IO.File]::Exists($path)) {
         [IO.File]::Delete($path)
     }
@@ -101,7 +103,7 @@ function Set-DevModeMarker {
         installedAt = [DateTime]::UtcNow.ToString('o')
     }
     [IO.File]::WriteAllText($path, ($marker | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
-    [IO.File]::SetAccessControl($path, (New-DevModeSecurity))
+    Set-Acl -LiteralPath $path -AclObject (New-DevModeSecurity)
 }
 
 function Set-UserPathEntry {
