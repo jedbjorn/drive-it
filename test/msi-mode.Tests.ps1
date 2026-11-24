@@ -137,7 +137,7 @@ try {
     Assert-ModeTest ((Get-ResolvedMode) -eq 'dev' -and [IO.File]::Exists($marker)) 'The elevated upgrade did not keep Dev Mode.'
 
     # Spec #10 "Visibility": the window resolves Dev Mode itself, shows the banner and hides the requests pane.
-    $selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test-dev.json')
+    $selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test-dev.json') -Screenshots (Join-Path $LogDirectory 'window-screens\dev')
     foreach ($window in @($selfTest.windows)) {
         Assert-ModeTest ($window.mode -eq 'dev' -and $window.devModeBanner -and -not $window.requestsShown) "The Dev Mode window does not show Dev Mode: $($window | ConvertTo-Json -Compress)"
     }

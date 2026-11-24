@@ -3,6 +3,8 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using DriveIt.Core.Mode;
 using DriveIt.Core.Operator;
@@ -20,7 +22,8 @@ namespace DriveIt.Operator;
 /// theme it also opens the settings drawer three times, closing it by its Close button, by Esc
 /// and by a click on the dimmed area (spec #23 AC-1). <c>--drawer-writes</c> adds AC-2 and AC-6:
 /// it saves limits through the drawer and changes one through operator.js, so run it only
-/// against a throwaway data directory (<c>DRIVE_IT_DATA_DIR</c>).
+/// against a throwaway data directory (<c>DRIVE_IT_DATA_DIR</c>). <c>--screenshots &lt;dir&gt;</c> saves
+/// the window and the open drawer in each theme as PNGs (<c>light-main.png</c>, <c>light-settings.png</c>, …).
 /// </summary>
 public static class Program
 {
@@ -31,8 +34,9 @@ public static class Program
     {
         if (args.Length > 0 && args[0] == "--self-test")
             return SelfTest(
-                args.Skip(1).FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal)),
-                drawerWrites: args.Contains("--drawer-writes"));
+                args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal) ? args[1] : null,
+                drawerWrites: args.Contains("--drawer-writes"),
+                screenshots: ValueAfter(args, "--screenshots"));
 
         using var instance = new Mutex(initiallyOwned: true, InstanceName, out var first);
         if (!first)
@@ -55,7 +59,13 @@ public static class Program
         return app.Run();
     }
 
-    private static int SelfTest(string? reportPath, bool drawerWrites)
+    private static string? ValueAfter(string[] args, string option)
+    {
+        var index = Array.IndexOf(args, option);
+        return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+    }
+
+    private static int SelfTest(string? reportPath, bool drawerWrites, string? screenshots)
     {
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var windows = new List<object>();
@@ -83,6 +93,7 @@ public static class Program
                     window.UpdateLayout();
                     // The limit the window read when it opened, before the drawer reads or saves one.
                     var scriptTimeLimitSeconds = window.ScriptTimeLimitSeconds;
+                    if (screenshots is not null) await Screenshots(window, screenshots, theme.ToString().ToLowerInvariant());
                     var drawer = await DrawerOpenAndClose(window);
                     var writes = drawerWrites ? await DrawerWrites(window) : null;
                     windows.Add(new
@@ -195,6 +206,30 @@ public static class Program
         window.CloseSettingsBy(SettingsCloseRoute.Escape);
 
         return new { saved, rejected, typed, reread, closed = !window.SettingsOpen };
+    }
+
+    /// <summary>The window, then the window with the drawer open, as PNGs (spec #23 AC-3 and AC-7).</summary>
+    private static async Task Screenshots(OperatorWindow window, string directory, string theme)
+    {
+        Directory.CreateDirectory(directory);
+        Capture(window, Path.Combine(directory, theme + "-main.png"));
+        await Within(window.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
+        Capture(window, Path.Combine(directory, theme + "-settings.png"));
+        window.CloseSettingsBy(SettingsCloseRoute.CloseButton);
+    }
+
+    /// <summary>Renders the window's client area (its content's size, from the top left) to a PNG.</summary>
+    private static void Capture(OperatorWindow window, string path)
+    {
+        window.UpdateLayout();
+        var content = (FrameworkElement)window.Content;
+        var bitmap = new RenderTargetBitmap(
+            (int)Math.Ceiling(content.ActualWidth), (int)Math.Ceiling(content.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(window);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var file = File.Create(path);
+        encoder.Save(file);
     }
 
     private static async Task Within(Task task, string message)

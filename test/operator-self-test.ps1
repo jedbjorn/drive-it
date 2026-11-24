@@ -3,11 +3,12 @@
 # checks the settings drawer (spec #23): the main window without the time limit (AC-3), and the
 # drawer opened and closed by Close, Esc and a click outside (AC-1). -DrawerWrites adds AC-2 and
 # AC-6; it saves limits, so run it only with DRIVE_IT_DATA_DIR set to a throwaway directory.
+# -Screenshots <dir> saves the window and the open drawer in each theme as PNGs.
 
 function Invoke-OperatorSelfTest {
     # Opens and closes the installed WPF window in both themes against the installed operator.js.
     # With -Dotnet, $Exe is the window's DLL, run through that dotnet.exe.
-    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Report, [string]$Dotnet, [switch]$DrawerWrites)
+    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Report, [string]$Dotnet, [switch]$DrawerWrites, [string]$Screenshots)
     if ([IO.File]::Exists($Report)) {
         Remove-Item -LiteralPath $Report -Force
     }
@@ -15,6 +16,9 @@ function Invoke-OperatorSelfTest {
     $arguments = @('--self-test', ('"' + $Report + '"'))
     if ($DrawerWrites) {
         $arguments += '--drawer-writes'
+    }
+    if ($Screenshots) {
+        $arguments += @('--screenshots', ('"' + $Screenshots + '"'))
     }
     if ($Dotnet) {
         $file = $Dotnet
@@ -40,6 +44,13 @@ function Invoke-OperatorSelfTest {
         Assert-OperatorDrawer -Window $window -Text $text
         if ($DrawerWrites) {
             Assert-OperatorDrawerWrites -Window $window -Text $text
+        }
+    }
+    if ($Screenshots) {
+        foreach ($name in @('light-main', 'light-settings', 'dark-main', 'dark-settings')) {
+            if (-not [IO.File]::Exists((Join-Path $Screenshots "$name.png"))) {
+                throw "The self-test did not save the $name screenshot in $Screenshots."
+            }
         }
     }
     return $result

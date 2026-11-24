@@ -364,7 +364,7 @@ Assert-MsiTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_PYTHON -eq $py
 Assert-MsiTest ([IO.File]::Exists($shortcutPath)) 'The operator shortcut was not created.'
 Assert-MsiTest ((New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath).TargetPath -eq $operatorExe) 'The shortcut does not open the operator window.'
 # The window finds the install's Node.js, operator.js, and data directory from its own folder and mcp.json.
-$selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test.json')
+$selfTest = Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test.json') -Screenshots (Join-Path $LogDirectory 'window-screens\standard')
 # Standard (spec #10 "Visibility"): no Dev Mode banner, and the outside-root requests pane is shown.
 # msi-mode.Tests.ps1 holds the Dev Mode case.
 foreach ($window in @($selfTest.windows)) {
