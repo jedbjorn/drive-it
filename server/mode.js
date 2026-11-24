@@ -76,10 +76,10 @@ export function decideMode(userFileText, marker) {
 // One Windows PowerShell call: this user's SID, and the owner and text of that user's marker.
 const INSPECT_MARKER = `$ErrorActionPreference = 'Stop'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$path = Join-Path $env:DRIVE_IT_DEV_MARKER_DIRECTORY ($sid + '.json')
+$path = [IO.Path]::Combine($env:DRIVE_IT_DEV_MARKER_DIRECTORY, $sid + '.json')
 $result = [ordered]@{ sid = $sid; owner = $null; text = $null }
 if ([IO.File]::Exists($path)) {
-    $result.owner = (Get-Acl -LiteralPath $path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+    $result.owner = [IO.File]::GetAccessControl($path, 'Owner').GetOwner([Security.Principal.SecurityIdentifier]).Value
     $result.text = [IO.File]::ReadAllText($path)
 }
 $result | ConvertTo-Json -Compress`;
@@ -88,9 +88,12 @@ $result | ConvertTo-Json -Compress`;
 export function inspectMarker(markerDirectory, env = process.env) {
   const powershell = path.win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const encoded = Buffer.from(INSPECT_MARKER, "utf16le").toString("base64");
+  // PowerShell 7 puts its own modules on PSModulePath, which Windows PowerShell 5.1 cannot load;
+  // without it, 5.1 uses its default module path.
+  const inherited = Object.fromEntries(Object.entries(env).filter(([name]) => name.toLowerCase() !== "psmodulepath"));
   return new Promise((resolve, reject) => {
     execFile(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
-      env: { ...env, DRIVE_IT_DEV_MARKER_DIRECTORY: markerDirectory },
+      env: { ...inherited, DRIVE_IT_DEV_MARKER_DIRECTORY: markerDirectory },
       timeout: 20000,
       windowsHide: true,
     }, (error, stdout) => {
