@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Events;
 using Autodesk.Revit.UI;
+using DriveIt.Core.Bridge;
 using DriveIt.Revit.Broker;
 
 namespace DriveIt.Revit.Bridge;
@@ -399,7 +400,7 @@ internal sealed class HeldRun : IHeldDocuments
         catch (Exception exception)
         {
             transaction.Dispose();
-            throw new BridgeException("revit_api_error", $"{exception.GetType().Name}: {exception.Message}");
+            throw new BridgeException("revit_api_error", ApiErrors.Message(nameof(Transaction), nameof(Transaction.Start), exception));
         }
         if (status != TransactionStatus.Started)
         {
@@ -427,7 +428,7 @@ internal sealed class HeldRun : IHeldDocuments
         catch (Exception exception)
         {
             RollBackQuietly(transaction);
-            throw new BridgeException("revit_api_error", $"{exception.GetType().Name}: {exception.Message}");
+            throw new BridgeException("revit_api_error", ApiErrors.Message(nameof(Transaction), nameof(Transaction.Commit), exception));
         }
         finally
         {

@@ -738,7 +738,7 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
         if (exception is Autodesk.Revit.Exceptions.ModificationOutsideTransactionException || ForbiddenOutsideTransaction(exception, target, arguments))
             return new BridgeException("modification_outside_transaction",
                 $"{called}: {exception.Message} Put Revit changes inside `with revit.transaction(\"name\"):`.", exception);
-        return new BridgeException("revit_api_error", $"{called}: {exception.GetType().Name}: {exception.Message}", exception);
+        return new BridgeException("revit_api_error", ApiErrors.Message(owner.Name, member, exception), exception);
     }
 
     /// <summary>
