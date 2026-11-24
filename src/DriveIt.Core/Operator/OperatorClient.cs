@@ -80,8 +80,8 @@ public sealed class ProcessOperatorRunner(OperatorHost host) : IOperatorRunner
 /// <summary>
 /// The operator.js contract the window uses, with the PowerShell module's behavior
 /// (<c>operator/DriveIt.Operator.psm1</c>): <c>workspace get|set</c>, <c>decisions list|approve|deny</c>
-/// (only <c>pending</c> rows are listed), <c>history list</c> (newest first, at most 100) and
-/// <c>settings get|set-time-limit</c> (the Script time limit).
+/// (only <c>pending</c> rows are listed), <c>history list</c> (newest first, at most 100),
+/// <c>settings get|set-time-limit</c> (the Script time limit) and <c>clients detect</c> (Detect agents).
 /// </summary>
 public sealed class OperatorClient(IOperatorRunner runner)
 {
@@ -159,6 +159,24 @@ public sealed class OperatorClient(IOperatorRunner runner)
             ["settings", "set-time-limit", seconds.ToString(System.Globalization.CultureInfo.InvariantCulture)], cancellationToken)
             .ConfigureAwait(false);
         return ReadTimeLimit(Parse(result));
+    }
+
+    /// <summary>
+    /// Detect agents (spec #23): <c>operator.js clients detect &lt;mcp.json&gt;</c> adds the install's
+    /// <c>drive-it</c> entry to each MCP client installed for this Windows user. One result per client,
+    /// in operator.js's order; a command that could not run is an <see cref="OperatorException"/>.
+    /// </summary>
+    public async Task<IReadOnlyList<AgentResult>> DetectAgentsAsync(string mcpConfigurationPath, CancellationToken cancellationToken = default)
+    {
+        var result = await runner.RunAsync(["clients", "detect", mcpConfigurationPath], cancellationToken).ConfigureAwait(false);
+        using var document = Parse(result);
+        var rows = new List<AgentResult>();
+        if (document?.RootElement is { ValueKind: JsonValueKind.Array } array)
+            foreach (var row in array.EnumerateArray())
+                if (Json.String(row, "message") is { Length: > 0 } message)
+                    rows.Add(new AgentResult(Json.String(row, "client") ?? "", Json.String(row, "status") ?? "", message));
+        if (rows.Count == 0) throw new OperatorException("Drive It did not report any agents.");
+        return rows;
     }
 
     private static int ReadTimeLimit(JsonDocument? document)

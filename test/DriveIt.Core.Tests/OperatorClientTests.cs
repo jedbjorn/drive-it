@@ -223,6 +223,35 @@ public class OperatorClientTests
     }
 
     [Fact]
+    public async Task DetectAgents_PassesMcpJsonAndListsOneLinePerClient()
+    {
+        var runner = new FakeRunner().Ok(@"clients detect C:\DriveIt\mcp.json", """
+            [ { "client": "claude-desktop", "name": "Claude Desktop", "status": "added", "message": "Claude Desktop: Added. Restart Claude Desktop to use Drive-It." },
+              { "client": "claude-code", "name": "Claude Code", "status": "already", "message": "Claude Code: Already set up." },
+              { "client": "codex", "name": "ChatGPT and Codex", "status": "failed", "reason": "x", "message": "ChatGPT and Codex: Could not add. x" } ]
+            """);
+        var rows = await new OperatorClient(runner).DetectAgentsAsync(@"C:\DriveIt\mcp.json");
+        Assert.Equal(new[] { "added", "already", "failed" }, rows.Select(row => row.Status).ToArray());
+        Assert.Equal("Claude Code: Already set up.", rows[1].Message);
+        Assert.Equal("claude-desktop", rows[0].Client);
+    }
+
+    [Fact]
+    public async Task DetectAgents_FailureCarriesTheReason()
+    {
+        var runner = new FakeRunner().Fail(@"clients detect C:\DriveIt\mcp.json", "OPERATOR_COMMAND_FAILED: C:\\DriveIt\\mcp.json does not exist; reinstall Drive-It\n");
+        var error = await Assert.ThrowsAsync<OperatorException>(() => new OperatorClient(runner).DetectAgentsAsync(@"C:\DriveIt\mcp.json"));
+        Assert.Contains("does not exist; reinstall Drive-It", error.Message);
+    }
+
+    [Fact]
+    public async Task DetectAgents_WithNoRows_IsAnError()
+    {
+        var runner = new FakeRunner().Ok(@"clients detect C:\m.json", "[]");
+        await Assert.ThrowsAsync<OperatorException>(() => new OperatorClient(runner).DetectAgentsAsync(@"C:\m.json"));
+    }
+
+    [Fact]
     public void PendingDetails_ListsNameIdsOperationsAndPaths()
     {
         using var json = JsonDocument.Parse("""

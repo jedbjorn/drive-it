@@ -5,6 +5,15 @@ using System.Text.Json;
 
 namespace DriveIt.Core.Operator;
 
+/// <summary>
+/// One client's Detect agents result: <see cref="Status"/> is <c>added</c>, <c>already</c>,
+/// <c>not_installed</c> or <c>failed</c>; <see cref="Message"/> is the plain line the drawer shows.
+/// </summary>
+public sealed record AgentResult(string Client, string Status, string Message)
+{
+    public override string ToString() => Message;
+}
+
 /// <summary>One operation of an outside-root request and the canonical paths it resolved to.</summary>
 public sealed record RequestedOperation(string Operation, IReadOnlyList<string> Paths);
 
