@@ -1,4 +1,5 @@
-# Live checks for the built-in primitives (spec #9 Phase A criteria 2-4, Phase B criterion 5) over the add-in's pipe.
+# Live checks for the built-in primitives (spec #9 Phase A criteria 2-4, Phase B criterion 5, Phase C
+# criteria 6-7) over the add-in's pipe.
 # A document the broker creates is never active in Revit's window, so the run has phases:
 #   Prepare   - Revit open with no document: get_active_document fails with no_active_document; then
 #               build the fixture (5 walls on two levels, a named 3D view), save it, and close it.
@@ -13,16 +14,23 @@
 #               wall heights (value and valueString) with parameter_readback checks, sets a type
 #               parameter on the type id only, and every rejection (read-only, ambiguous, missing,
 #               type mismatch) leaves every value unchanged. The commit is left unsaved for undo.
+#   Families  - any open Revit (criteria 6 and 7, Phase C), on documents the phase creates itself:
+#               a Generic Model family with two types made by create_family_type gets Manufacturer
+#               per type and for all types, a formula, and every rejection, with CurrentType
+#               restored; then a project from the default template has its first editable loadable
+#               family opened with edit_family, read, and saved into the workspace, with the project
+#               unmodified, and a system family refused. Everything it opens it closes.
 # Each phase prints one JSON summary and throws on the first failed assertion.
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Prepare", "Active", "Selection", "Parameters")]
+    [ValidateSet("Prepare", "Active", "Selection", "Parameters", "Families")]
     [string]$Phase,
     [Parameter(Mandatory = $true)]
     [string]$FixturePath,
     [string]$ProjectTemplate,
+    [string]$FamilyTemplate,
     [string]$WorkspaceRoot = "C:\DriveIt"
 )
 
@@ -181,6 +189,223 @@ if ($Phase -eq "Prepare") {
     $expectations | ConvertTo-Json -Depth 6 | Set-Content -Path $expectationsPath -Encoding UTF8
     [ordered]@{ status = "succeeded"; phase = $Phase; processId = $ProcessId; receiptLog = $receiptLog; checks = @($checks); expectations = $expectations } |
         ConvertTo-Json -Depth 8
+    return
+}
+
+if ($Phase -eq "Families") {
+    Assert-True (-not [string]::IsNullOrWhiteSpace($ProjectTemplate)) "Families needs -ProjectTemplate (an .rte inside the workspace root)."
+    Assert-True (-not [string]::IsNullOrWhiteSpace($FamilyTemplate)) "Families needs -FamilyTemplate (Generic Model.rft inside the workspace root)."
+    $folder = Split-Path -Parent $FixturePath
+    $projectPath = Join-Path $folder "f8-families.rvt"
+    $observed = [ordered]@{}
+
+    # --- Criterion 6: family parameters per type ---
+    $family = Invoke-Broker @(Op "create_document" @{ kind = "rfa"; templatePath = $FamilyTemplate }) $null
+    Assert-Status $family "succeeded" "create family"
+    $familyId = $family.document.uniqueId
+    $typeA = "F8 Type A"
+    $typeB = "F8 Type B"
+    $typed = Invoke-Broker @((Op "create_family_type" @{ name = $typeA }), (Op "create_family_type" @{ name = $typeB })) (Target $familyId)
+    Assert-Status $typed "succeeded" "create two family types"
+
+    function Family-Read { return Read-Primitive $familyId "get_family_parameters" }
+    function Family-Parameter($Read, [string]$Name) { return @($Read.parameters | Where-Object { $_.name -eq $Name }) | Select-Object -First 1 }
+    function Family-Value($Read, [string]$Name, [string]$Type) { return Get-Field (Get-Field (Family-Parameter $Read $Name).values $Type) "value" }
+    function Assert-FamilyRejected([object[]]$Changes, [string]$Code, [string]$Label) {
+        $response = Invoke-Broker @(Op "set_family_parameters" @{ changes = $Changes }) (Target $familyId)
+        Assert-Failure $response $Code $Label
+        Assert-True (@($response.changes).Count -eq 0) "${Label}: reported changes."
+        Assert-True (@($response.checks | Where-Object { $_.name -in "family_parameter_readback", "transaction_commit" }).Count -eq 0) "${Label}: a transaction ran."
+        return $response
+    }
+
+    $read = Family-Read
+    $original = $read.currentType
+    Assert-True ((Compare-Object @($read.types) @($typeA, $typeB)) -eq $null) "get_family_parameters types: $($read.types -join ', ')"
+    Assert-True ($original -in $typeA, $typeB) "currentType is '$original'."
+    $manufacturer = Family-Parameter $read "Manufacturer"
+    Assert-True ($null -ne $manufacturer) "No Manufacturer family parameter among: $(@($read.parameters | ForEach-Object name) -join ', ')"
+    Assert-True ($manufacturer.storageType -eq "String" -and $null -eq $manufacturer.formula) "Manufacturer entry: $($manufacturer | ConvertTo-Json -Compress -Depth 6)"
+    foreach ($type in $typeA, $typeB) {
+        Assert-True ($null -ne (Get-Field $manufacturer.values $type)) "Manufacturer has no values entry for '$type'."
+    }
+    Assert-True ((Family-Read).currentType -eq $original) "Reading changed currentType."
+    $observed.parameterNames = @($read.parameters | ForEach-Object name)
+    $observed.manufacturerEntry = $manufacturer
+    Pass "get_family_parameters_lists_types_and_identity_data_without_changing_current_type"
+
+    # Per type. The current type is set first, so the other one is current last and the restore shows.
+    $other = if ($original -eq $typeA) { $typeB } else { $typeA }
+    $tag = [guid]::NewGuid().ToString("N").Substring(0, 6)
+    $perType = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(
+        @{ parameter = "Manufacturer"; type = $original; value = "F8 $tag $original" },
+        @{ parameter = "Manufacturer"; type = $other; value = "F8 $tag $other" }
+    ) }) (Target $familyId)
+    Assert-Status $perType "succeeded" "set_family_parameters per type"
+    $readbacks = @($perType.checks | Where-Object { $_.name -eq "family_parameter_readback" })
+    Assert-True ($readbacks.Count -eq 2 -and @($readbacks | Where-Object { -not $_.passed }).Count -eq 0) "family_parameter_readback: $($readbacks | ConvertTo-Json -Compress)"
+    Assert-True (@($perType.checks | Where-Object { $_.name -eq "transaction_commit" -and $_.passed }).Count -eq 1) "No committed transaction."
+    Assert-True (@($perType.changes).Count -eq 2) "Expected two changes lines: $($perType.changes -join '; ')"
+    Assert-True (@($perType.results).Count -eq 1 -and $null -eq $perType.results[0]) "set_family_parameters put an output in results."
+    $read = Family-Read
+    foreach ($type in $typeA, $typeB) {
+        Assert-True ((Family-Value $read "Manufacturer" $type) -eq "F8 $tag $type") "Manufacturer for '$type' re-read as '$(Family-Value $read 'Manufacturer' $type)'."
+    }
+    Assert-True ($read.currentType -eq $original) "currentType after the per-type call is '$($read.currentType)', not '$original'."
+    $observed.perType = [ordered]@{ changes = @($perType.changes); readbacks = $readbacks; currentType = $read.currentType }
+    Pass "per_type_values_read_back_and_current_type_restored"
+
+    $all = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = "Manufacturer"; allTypes = $true; value = "F8 $tag all" }) }) (Target $familyId)
+    Assert-Status $all "succeeded" "set_family_parameters allTypes"
+    Assert-True (@($all.checks | Where-Object { $_.name -eq "family_parameter_readback" -and $_.passed }).Count -eq 2) "allTypes readback: $($all.checks | ConvertTo-Json -Compress)"
+    $read = Family-Read
+    foreach ($type in $typeA, $typeB) {
+        Assert-True ((Family-Value $read "Manufacturer" $type) -eq "F8 $tag all") "allTypes: Manufacturer for '$type' re-read as '$(Family-Value $read 'Manufacturer' $type)'."
+    }
+    Assert-True ($read.currentType -eq $original) "currentType after allTypes is '$($read.currentType)'."
+    $observed.allTypes = [ordered]@{ changes = @($all.changes); currentType = $read.currentType }
+    Pass "all_types_values_read_back_and_current_type_restored"
+
+    # A formula: the first parameter among these that Revit accepts one for. Then a value on it is
+    # refused with parameter_has_formula, a bad formula with invalid_formula, the per-type shape sets
+    # one, and "" clears it.
+    $formulaTarget = $null
+    $attempts = @()
+    foreach ($candidate in @(@{ name = "Cost"; formula = "2 * 60" }, @{ name = "Manufacturer"; formula = "`"F8 formula`"" }, @{ name = "Model"; formula = "`"F8 formula`"" })) {
+        if ($null -eq (Family-Parameter (Family-Read) $candidate.name)) { continue }
+        $response = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = $candidate.name; allTypes = $true; formula = $candidate.formula }) }) (Target $familyId)
+        $attempts += [ordered]@{ parameter = $candidate.name; formula = $candidate.formula; status = $response.status; error = (Get-Field $response "error"); checks = @($response.checks) }
+        if ($response.status -eq "succeeded") { $formulaTarget = $candidate; break }
+        Assert-True ($response.status -eq "failed") "A refused formula on $($candidate.name) left status $($response.status)."
+    }
+    $observed.formulaAttempts = $attempts
+    Assert-True ($null -ne $formulaTarget) "No candidate parameter accepted a formula: $($attempts | ConvertTo-Json -Compress -Depth 6)"
+    $read = Family-Read
+    $withFormula = Family-Parameter $read $formulaTarget.name
+    Assert-True ($withFormula.formula -eq $formulaTarget.formula) "$($formulaTarget.name) formula re-read as '$($withFormula.formula)'."
+    Assert-True ($read.currentType -eq $original) "currentType after the formula is '$($read.currentType)'."
+    $valueForFormula = if ($withFormula.storageType -eq "String") { "x" } else { 5 }
+    $hasFormula = Assert-FamilyRejected @(@{ parameter = $formulaTarget.name; type = $typeA; value = $valueForFormula }) "parameter_has_formula" "value on a formula-driven parameter"
+    $invalid = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = $formulaTarget.name; allTypes = $true; formula = "1 +* (" }) }) (Target $familyId)
+    Assert-Failure $invalid "invalid_formula" "malformed formula"
+    Assert-True (@($invalid.changes).Count -eq 0) "invalid_formula reported changes."
+    Assert-True ((Family-Parameter (Family-Read) $formulaTarget.name).formula -eq $formulaTarget.formula) "invalid_formula changed the formula."
+    # The spec's per-type shape: a formula with type A (not the current type) sets the parameter's
+    # formula, reads it back, names the type in the receipt, and restores the current type.
+    $perTypeFormula = if ($withFormula.storageType -eq "String") { "`"F8 per type`"" } else { "3 * 40" }
+    $typed = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = $formulaTarget.name; type = $typeA; formula = $perTypeFormula }) }) (Target $familyId)
+    Assert-Status $typed "succeeded" "set_family_parameters formula for one type"
+    Assert-True (@($typed.checks | Where-Object { $_.name -eq "family_parameter_readback" -and $_.passed }).Count -eq 1) "per-type formula readback: $($typed.checks | ConvertTo-Json -Compress)"
+    Assert-True ((@($typed.changes) -join "`n") -match [regex]::Escape("from type '$typeA'")) "per-type formula receipt: $(@($typed.changes) -join ' | ')"
+    $read = Family-Read
+    Assert-True ((Family-Parameter $read $formulaTarget.name).formula -eq $perTypeFormula) "$($formulaTarget.name) per-type formula re-read as '$((Family-Parameter $read $formulaTarget.name).formula)'."
+    Assert-True ($read.currentType -eq $original) "currentType after the per-type formula is '$($read.currentType)'."
+    $cleared = Invoke-Broker @(Op "set_family_parameters" @{ changes = @(@{ parameter = $formulaTarget.name; type = $typeB; formula = "" }) }) (Target $familyId)
+    Assert-Status $cleared "succeeded" "clear the formula for one type"
+    $read = Family-Read
+    Assert-True ($null -eq (Family-Parameter $read $formulaTarget.name).formula) "The formula did not clear."
+    Assert-True ($read.currentType -eq $original) "currentType after clearing the formula is '$($read.currentType)'."
+    $observed.formula = [ordered]@{ parameter = $formulaTarget.name; formula = $formulaTarget.formula; hasFormulaError = $hasFormula.error; invalidFormula = [ordered]@{ error = $invalid.error; checks = @($invalid.checks) }; perType = [ordered]@{ formula = $perTypeFormula; changes = @($typed.changes); checks = @($typed.checks) }; cleared = @($cleared.changes) }
+    Pass "formula_set_per_type_and_all_types_has_formula_and_invalid_formula_refused_then_cleared"
+
+    $before = Family-Read
+    $notFound = Assert-FamilyRejected @(
+        @{ parameter = "Manufacturer"; type = $typeA; value = "must not apply" },
+        @{ parameter = "Manufacturer"; type = "No Such Type F8"; value = "x" }
+    ) "family_type_not_found" "missing family type"
+    Assert-FamilyRejected @(@{ parameter = "No Such Parameter F8"; allTypes = $true; value = "x" }) "parameter_not_found" "missing family parameter" | Out-Null
+    Assert-FamilyRejected @(@{ parameter = "Manufacturer"; allTypes = $true; value = 5 }) "value_type_mismatch" "number for a String" | Out-Null
+    Assert-FamilyRejected @(@{ parameter = "Manufacturer"; type = $typeA; allTypes = $true; value = "x" }) "invalid_arguments" "type and allTypes" | Out-Null
+    $after = Family-Read
+    foreach ($type in $typeA, $typeB) {
+        Assert-True ((Family-Value $after "Manufacturer" $type) -eq (Family-Value $before "Manufacturer" $type)) "A rejected call changed Manufacturer for '$type'."
+    }
+    Assert-True ($after.currentType -eq $original) "A rejected call changed currentType."
+    $observed.familyTypeNotFound = $notFound.error
+    Pass "family_type_not_found_and_validation_failures_change_nothing"
+
+    # --- Criterion 7: edit_family on a project created from the default template ---
+    $project = Invoke-Broker @(Op "create_document" @{ kind = "rvt"; templatePath = $ProjectTemplate }) $null
+    Assert-Status $project "succeeded" "create project"
+    $created = $project.document.uniqueId
+    Assert-Status (Invoke-Broker @(Op "save_as_document" @{ destinationPath = $projectPath; overwrite = $true }) (Target $created)) "succeeded" "save project"
+    Assert-Status (Invoke-Broker @(Op "close_document") (Target $created)) "succeeded" "close project"
+    # Reopened, the project starts unmodified, so project_unmodified observes a real false -> false.
+    $opened = Invoke-Broker @(Op "open_document" @{ path = $projectPath }) $null
+    Assert-Status $opened "succeeded" "open project"
+    $projectId = $opened.document.uniqueId
+    $projectBefore = $opened.document
+
+    $wrongKind = Invoke-Broker @(Op "get_family_parameters") (Target $projectId)
+    Assert-Failure $wrongKind "wrong_document_kind" "get_family_parameters on an RVT"
+
+    # The first loadable family find_elements returns, by category; the first one Revit lets us edit.
+    $edited = $null
+    $tried = @()
+    foreach ($category in "OST_Doors", "OST_Windows", "OST_Furniture", "OST_GenericModel", "OST_TitleBlocks", "OST_LevelHeads", "OST_SectionHeads", "OST_GridHeads") {
+        $page = Read-Primitive $projectId "find_elements" @{ category = $category; kind = "type"; limit = 2000 }
+        foreach ($element in @($page.elements | Where-Object { $null -ne $_.familyId })) {
+            $batch = Invoke-Broker @((Op "edit_family" @{ familyId = [long]$element.familyId }), (Op "get_family_parameters")) (Target $projectId)
+            $tried += [ordered]@{ category = $category; familyId = $element.familyId; familyName = $element.familyName; status = $batch.status; error = (Get-Field $batch "error") }
+            if ($batch.status -eq "succeeded") { $edited = [ordered]@{ element = $element; response = $batch }; break }
+            Assert-Failure $batch "family_not_editable" "edit_family on $($element.familyName)"
+        }
+        if ($null -ne $edited) { break }
+    }
+    $observed.editAttempts = $tried
+    Assert-True ($null -ne $edited) "No loadable family in the project could be opened for editing."
+    $response = $edited.response
+    $familyDocument = $response.document
+    Assert-True ($familyDocument.kind -eq "rfa") "edit_family returned a $($familyDocument.kind) document."
+    Assert-True ($familyDocument.uniqueId -ne $projectId) "edit_family returned the project's identity."
+    Assert-True (@($response.changes) -contains "Opened family $($edited.element.familyName) for editing.") "edit_family changes: $($response.changes -join '; ')"
+    $unmodified = @($response.checks | Where-Object { $_.name -eq "project_unmodified" }) | Select-Object -First 1
+    Assert-True ($null -ne $unmodified -and $unmodified.passed -and $unmodified.observed -match "IsModified False before and False after") "project_unmodified: $($unmodified | ConvertTo-Json -Compress)"
+    Assert-True ($null -eq $response.results[0]) "edit_family put an output in results."
+    $familyRead = $response.results[1]
+    Assert-True ($null -ne $familyRead -and $null -ne $familyRead.parameters -and @($familyRead.parameters).Count -gt 0) "get_family_parameters after edit_family in the same batch read nothing: $($familyRead | ConvertTo-Json -Compress -Depth 4)"
+    $observed.edited = [ordered]@{ category = $edited.element.category; familyId = $edited.element.familyId; familyName = $edited.element.familyName; document = $familyDocument; changes = @($response.changes); projectUnmodified = $unmodified; types = @($familyRead.types); currentType = $familyRead.currentType; parameterCount = @($familyRead.parameters).Count }
+    Pass "edit_family_opens_rfa_and_next_get_family_parameters_reads_it"
+
+    $projectAfter = Invoke-Broker @(Op "read_document") (Target $projectId)
+    Assert-Status $projectAfter "succeeded" "read project after edit_family"
+    Assert-True ($projectAfter.document.wallCount -eq $projectBefore.wallCount -and @($projectAfter.document.levels).Count -eq @($projectBefore.levels).Count) "The project's snapshot changed after edit_family."
+    Pass "project_unmodified"
+
+    $rfaPath = Join-Path $folder "f8-edited-family.rfa"
+    if (Test-Path -LiteralPath $rfaPath) { Remove-Item -LiteralPath $rfaPath -Force }
+    $savedFamily = Invoke-Broker @(Op "save_as_document" @{ destinationPath = $rfaPath }) (Target $familyDocument.uniqueId)
+    Assert-Status $savedFamily "succeeded" "save the edited family"
+    Assert-True (Test-Path -LiteralPath $rfaPath) "The family file was not written: $rfaPath"
+    Assert-True (@($savedFamily.checks | Where-Object { $_.name -eq "file_saved" -and $_.passed }).Count -eq 1) "file_saved: $($savedFamily.checks | ConvertTo-Json -Compress)"
+    $observed.savedFamily = [ordered]@{ path = $rfaPath; bytes = (Get-Item -LiteralPath $rfaPath).Length; document = $savedFamily.document }
+    Pass "save_as_document_writes_the_rfa_into_the_workspace"
+
+    # A second edit_family of the same, still-open family: recorded as Revit answers it.
+    $again = Invoke-Broker @(Op "edit_family" @{ familyId = [long]$edited.element.familyId }) (Target $projectId)
+    $observed.secondEdit = [ordered]@{ status = $again.status; error = (Get-Field $again "error"); document = (Get-Field $again "document") }
+
+    $wallTypes = Read-Primitive $projectId "list_types" @{ category = "Walls" }
+    $systemType = @($wallTypes)[0]
+    $system = Invoke-Broker @(Op "edit_family" @{ familyId = [long]$systemType.id }) (Target $projectId)
+    Assert-Failure $system "family_not_editable" "edit_family on a system family type"
+    $missing = Invoke-Broker @(Op "edit_family" @{ familyId = 999999901 }) (Target $projectId)
+    Assert-Failure $missing "element_not_found" "edit_family on a missing id"
+    $onFamily = Invoke-Broker @(Op "edit_family" @{ familyId = [long]$edited.element.familyId }) (Target $familyDocument.uniqueId)
+    Assert-Failure $onFamily "wrong_document_kind" "edit_family on an RFA"
+    $observed.refusals = [ordered]@{ systemFamily = [ordered]@{ id = $systemType.id; name = $systemType.name; error = $system.error }; missing = $missing.error; onFamily = $onFamily.error; getFamilyParametersOnProject = $wrongKind.error }
+    Pass "family_not_editable_element_not_found_wrong_document_kind"
+
+    foreach ($id in @($familyDocument.uniqueId, $(if ($again.status -eq "succeeded" -and $again.document.uniqueId -ne $familyDocument.uniqueId) { $again.document.uniqueId }), $projectId, $familyId)) {
+        if ($id) { Invoke-Broker @(Op "close_document") (Target $id) | Out-Null }
+    }
+
+    [ordered]@{
+        status = "succeeded"; phase = $Phase; processId = $ProcessId; receiptLog = $receiptLog
+        familyTypes = @($typeA, $typeB); originalCurrentType = $original
+        observed = $observed
+        checks = @($checks)
+    } | ConvertTo-Json -Depth 10
     return
 }
 

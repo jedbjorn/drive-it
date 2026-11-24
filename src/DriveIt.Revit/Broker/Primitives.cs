@@ -6,9 +6,10 @@ using Autodesk.Revit.UI;
 namespace DriveIt.Revit.Broker;
 
 /// <summary>
-/// Built-in primitives that read the model or the UI selection (spec #9 Phase A). They carry no
-/// policy paths and start no transaction. Reads put their output in the response's results array;
-/// get_active_document and set_selection answer with the document and receipt lines instead.
+/// Built-in primitives that read the model or the UI selection (spec #9 Phase A), plus
+/// get_family_parameters and edit_family (Phase C). They carry no policy paths and start no
+/// transaction. Reads put their output in the response's results array; get_active_document,
+/// set_selection, and edit_family answer with the document and receipt lines instead.
 /// </summary>
 public sealed partial class DocumentDispatcher
 {
@@ -19,7 +20,7 @@ public sealed partial class DocumentDispatcher
 
     private static bool IsQuery(string type) =>
         type is "get_active_document" or "find_elements" or "get_parameters" or "list_types" or "list_views"
-            or "get_selection" or "set_selection";
+            or "get_selection" or "set_selection" or "get_family_parameters" or "edit_family";
 
     /// <summary>Parses and bounds query arguments before any Revit call; a limit is rejected, never truncated.</summary>
     private static object PrepareQuery(TypedOperation operation)
@@ -59,6 +60,11 @@ public sealed partial class DocumentDispatcher
                 var selection = Deserialize<SetSelectionArguments>(operation.Arguments);
                 selection.ElementIds = RequireElementIds(selection.ElementIds, operation.Type);
                 return selection;
+            case "edit_family":
+                var family = Deserialize<EditFamilyArguments>(operation.Arguments);
+                if (family.FamilyId is null or <= 0)
+                    throw new RequestRejectedException("invalid_arguments", "edit_family requires familyId, the element id of a loadable family (familyId from find_elements or list_types).");
+                return family;
             default:
                 return Deserialize<NoArguments>(operation.Arguments);
         }
@@ -71,9 +77,13 @@ public sealed partial class DocumentDispatcher
             return ActiveDocument(application, response);
 
         var state = RequireDocument(current);
+        if (operation.Query is EditFamilyArguments family)
+            return EditFamily(state, family, response);
+
         var document = state.Document;
         JsonNode? output = operation.Query switch
         {
+            _ when operation.Type == "get_family_parameters" => GetFamilyParameters(document),
             FindElementsArguments find => FindElements(document, find),
             GetParametersArguments parameters => GetParameters(document, parameters),
             ListTypesArguments types => ListTypes(document, types),

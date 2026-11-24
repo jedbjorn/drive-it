@@ -115,30 +115,46 @@ public sealed partial class DocumentDispatcher
         var id = element.Id.Value;
         if (parameter.IsReadOnly)
             throw new RequestRejectedException("parameter_read_only", $"'{name}' on element {id} is read-only.");
+        if (ValueMismatch(document, parameter.Definition, parameter.StorageType, $"'{name}' on element {id}", entry.Value, entry.ValueString)
+            is { } mismatch)
+            throw new RequestRejectedException("value_type_mismatch", mismatch);
+    }
 
-        if (entry.ValueString is { } text)
+    /// <summary>
+    /// Why value or valueString cannot be stored in a parameter of this storage type, or null when it
+    /// can. subject names the parameter in the message, such as "'Comments' on element 7".
+    /// </summary>
+    private static string? ValueMismatch(Document document, Definition definition, StorageType storageType, string subject,
+        JsonNode? value, string? valueString)
+    {
+        if (valueString is not null)
         {
-            var spec = parameter.Definition.GetDataType();
-            if (parameter.StorageType != StorageType.Double || spec is null || spec.Empty() || !UnitUtils.IsMeasurableSpec(spec))
-                throw new RequestRejectedException("value_type_mismatch",
-                    $"'{name}' on element {id} stores {parameter.StorageType} without display units, so valueString does not apply; pass value.");
-            if (!UnitFormatUtils.TryParse(document.GetUnits(), spec, text, out _))
-                throw new RequestRejectedException("value_type_mismatch",
-                    $"'{text}' is not a value of '{name}' on element {id} in this document's units.");
-            return;
+            var spec = definition.GetDataType();
+            if (storageType != StorageType.Double || spec is null || spec.Empty() || !UnitUtils.IsMeasurableSpec(spec))
+                return $"{subject} stores {storageType} without display units, so valueString does not apply; pass value.";
+            return UnitFormatUtils.TryParse(document.GetUnits(), spec, valueString, out _)
+                ? null
+                : $"'{valueString}' is not a value of {subject} in this document's units.";
         }
 
-        var expected = parameter.StorageType switch
+        var expected = storageType switch
         {
-            StorageType.Double => TryDouble(entry.Value!, out _) ? null : "a number in Revit internal units",
-            StorageType.Integer => TryInteger(entry.Value!, out _) ? null : "an integer or boolean",
-            StorageType.String => entry.Value!.GetValueKind() == JsonValueKind.String ? null : "a string",
-            StorageType.ElementId => TryLong(entry.Value!, out _) ? null : "an integer element id",
+            StorageType.Double => TryDouble(value!, out _) ? null : "a number in Revit internal units",
+            StorageType.Integer => TryInteger(value!, out _) ? null : "an integer or boolean",
+            StorageType.String => value!.GetValueKind() == JsonValueKind.String ? null : "a string",
+            StorageType.ElementId => TryLong(value!, out _) ? null : "an integer element id",
             _ => "nothing: it stores no value",
         };
-        if (expected is not null)
-            throw new RequestRejectedException("value_type_mismatch",
-                $"'{name}' on element {id} stores {parameter.StorageType}, so value must be {expected}; received {entry.Value!.ToJsonString()}.");
+        return expected is null ? null : $"{subject} stores {storageType}, so value must be {expected}; received {value!.ToJsonString()}.";
+    }
+
+    /// <summary>A valueString read back: the request parsed and formatted in document units equals the stored display.</summary>
+    private static bool DisplayMatches(Document document, Definition definition, string valueString, string? display)
+    {
+        var units = document.GetUnits();
+        var spec = definition.GetDataType();
+        return UnitFormatUtils.TryParse(units, spec, valueString, out var requested)
+            && UnitFormatUtils.Format(units, spec, requested, false) == display;
     }
 
     private static bool SetValue(Parameter parameter, JsonNode value) => parameter.StorageType switch
@@ -159,10 +175,7 @@ public sealed partial class DocumentDispatcher
         bool passed;
         if (entry.ValueString is { } text)
         {
-            var units = document.GetUnits();
-            var spec = parameter.Definition.GetDataType();
-            passed = UnitFormatUtils.TryParse(units, spec, text, out var requested)
-                && UnitFormatUtils.Format(units, spec, requested, false) == parameter.AsValueString();
+            passed = DisplayMatches(document, parameter.Definition, text, parameter.AsValueString());
         }
         else
         {
@@ -198,9 +211,11 @@ public sealed partial class DocumentDispatcher
         _ => "none",
     };
 
-    private static string? BuiltInName(Parameter parameter)
+    private static string? BuiltInName(Parameter parameter) => BuiltInName(parameter.Definition);
+
+    private static string? BuiltInName(Definition definition)
     {
-        var builtIn = (parameter.Definition as InternalDefinition)?.BuiltInParameter ?? BuiltInParameter.INVALID;
+        var builtIn = (definition as InternalDefinition)?.BuiltInParameter ?? BuiltInParameter.INVALID;
         return builtIn == BuiltInParameter.INVALID ? null : builtIn.ToString();
     }
 

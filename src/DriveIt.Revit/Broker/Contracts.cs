@@ -68,6 +68,32 @@ public sealed class ModelChangeRequest
     public PointRequest? End { get; set; }
     /// <summary>set_parameters entries, validated together before the model transaction.</summary>
     public List<ParameterChange>? Changes { get; set; }
+    /// <summary>set_family_parameters entries, parsed from that operation's own arguments shape.</summary>
+    [JsonIgnore]
+    public List<FamilyParameterChange>? FamilyChanges { get; set; }
+}
+
+/// <summary>The arguments of set_family_parameters.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class FamilyParameterArguments
+{
+    public List<FamilyParameterChange>? Changes { get; set; }
+}
+
+/// <summary>
+/// One set_family_parameters entry: a family parameter by name, exactly one of Type (a type name) or
+/// AllTypes true, and exactly one of Value (raw, in Revit internal units), ValueString (document
+/// display units), or Formula. A formula belongs to the parameter, not a type, so it takes AllTypes.
+/// </summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class FamilyParameterChange
+{
+    public string? Parameter { get; set; }
+    public string? Type { get; set; }
+    public bool? AllTypes { get; set; }
+    public JsonNode? Value { get; set; }
+    public string? ValueString { get; set; }
+    public string? Formula { get; set; }
 }
 
 /// <summary>
@@ -85,7 +111,7 @@ public sealed class ParameterChange
     public string? ValueString { get; set; }
 }
 
-/// <summary>Arguments of get_active_document and get_selection, which take none.</summary>
+/// <summary>Arguments of get_active_document, get_selection, and get_family_parameters, which take none.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class NoArguments { }
 
@@ -120,6 +146,12 @@ public sealed class ListViewsArguments
     public List<string>? ViewTypes { get; set; }
     public bool? IncludeSheets { get; set; }
     public bool? IncludeTemplates { get; set; }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class EditFamilyArguments
+{
+    public long? FamilyId { get; set; }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]

@@ -89,19 +89,23 @@ public sealed partial class DocumentDispatcher
             if (IsQuery(operation.Type))
             {
                 // Queries and selection carry no policy paths. get_active_document retargets the
-                // operations after it to the active document, at its projected path; the rest
-                // leave the current document unchanged.
+                // operations after it to the active document, at its projected path, and edit_family
+                // to an unsaved family copy; the rest leave the current document unchanged.
                 if (operation.Type == "get_active_document")
                     current = application.ActiveUIDocument?.Document is { IsLinked: false } active
                         ? Track(tracked, active)
                         : null;
+                else if (operation.Type == "edit_family")
+                    current = new ProjectedDocument(null, null);
                 item.Query = PrepareQuery(operation);
                 prepared.Add(item);
                 continue;
             }
             if (IsModelChange(operation.Type))
             {
-                item.ModelChange = Deserialize<ModelChangeRequest>(operation.Arguments);
+                item.ModelChange = operation.Type == "set_family_parameters"
+                    ? new ModelChangeRequest { FamilyChanges = Deserialize<FamilyParameterArguments>(operation.Arguments).Changes }
+                    : Deserialize<ModelChangeRequest>(operation.Arguments);
                 item.ModelChange.Type = operation.Type;
                 prepared.Add(item);
                 continue;
@@ -376,6 +380,9 @@ public sealed partial class DocumentDispatcher
                     case "set_parameters":
                         ApplyParameterChanges(state.Document, change, response);
                         break;
+                    case "set_family_parameters":
+                        ApplyFamilyParameterChanges(state.Document, change, response);
+                        break;
                     case "delete_element":
                         var deleted = state.Document.Delete(new ElementId(change.ElementId!.Value));
                         foreach (var id in deleted)
@@ -494,6 +501,7 @@ public sealed partial class DocumentDispatcher
     private static void ValidateChanges(Document document, List<ModelChangeRequest> changes)
     {
         var newViewNames = new HashSet<string>(StringComparer.Ordinal);
+        var newFamilyTypes = new HashSet<string>(StringComparer.Ordinal);
         foreach (var change in changes)
         {
             switch (change.Type)
@@ -533,9 +541,13 @@ public sealed partial class DocumentDispatcher
                         throw new RequestRejectedException("invalid_model_change", "create_family_type requires a name.");
                     if (document.FamilyManager.Types.Cast<FamilyType>().Any(type => type.Name == change.Name))
                         throw new RequestRejectedException("duplicate_family_type", $"Family type '{change.Name}' already exists.");
+                    newFamilyTypes.Add(change.Name);
                     break;
                 case "set_parameters":
                     ValidateParameterChanges(document, change);
+                    break;
+                case "set_family_parameters":
+                    ValidateFamilyParameterChanges(document, change, newFamilyTypes);
                     break;
                 case "delete_element":
                     if (change.ElementId is null or <= 0 || document.GetElement(new ElementId(change.ElementId.Value)) is null)
@@ -703,7 +715,7 @@ public sealed partial class DocumentDispatcher
 
     private static bool IsModelChange(string type) =>
         type is "create_level" or "create_wall" or "create_3d_view" or "create_family_type" or "delete_element"
-            or "set_parameters";
+            or "set_parameters" or "set_family_parameters";
 
     private static T Deserialize<T>(System.Text.Json.Nodes.JsonObject? arguments)
     {

@@ -80,6 +80,20 @@ const revitPrimitives = {
   "Full response with a changes line per entry naming the element, parameter and new display value, each element id in affectedElements, and a parameter_readback check per entry (doubles within 1e-9 internal units; valueString by display string)",
   "Changes instance or type parameters in the model transaction, all or nothing, undoable in Revit as Drive It model batch. A type parameter is set on the type's id (get_parameters returns it as type.id); an instance id is never redirected to its type. The whole call is validated first and rejected with nothing applied on element_not_found, parameter_not_found, ambiguous_parameter (a name several parameters share; it lists their builtIn and guid), parameter_read_only, or value_type_mismatch",
   "revit.set_parameters(changes=[{\"elementId\": 123, \"parameter\": \"Comments\", \"value\": \"Checked\"}])"],
+  get_family_parameters: [withCurrentDocument({}),
+    "Returns the result directly: {types: [type names], currentType, parameters: [{name, builtIn, guid, isInstance, isShared, isReporting, storageType, formula, values: {<typeName>: {value, display}}}]}; value is raw, doubles in Revit internal units, null when unset",
+    "Reads every family parameter's value for every type of an RFA document without changing the current type; an RVT fails with wrong_document_kind. No transaction, the family is unchanged",
+    "family = revit.get_family_parameters()"],
+  set_family_parameters: [withCurrentDocument({
+    changes: "Required: List of {parameter, type | allTypes, value | valueString | formula}. parameter is the family parameter's name; type is one type's name, or allTypes: True sets every type. value matches the storage type as in set_parameters; valueString is parsed in the document's display units; formula sets the parameter's formula (\"\" clears it) with type or allTypes; a Revit formula belongs to the parameter, so either way it applies to every type",
+  }),
+  "Full response with a changes line per type and parameter and a family_parameter_readback check per change",
+  "Changes family parameter values per type, or formulas, in an RFA model transaction, all or nothing, undoable in Revit as Drive It model batch. Each type is made current to set it, and the family's original current type is restored before commit. The whole call is validated first and rejected with nothing applied on wrong_document_kind, family_type_not_found, parameter_not_found, parameter_has_formula (a value for a formula-driven parameter), parameter_read_only, or value_type_mismatch; a formula Revit rejects fails with invalid_formula and the transaction rolls back",
+  "revit.set_family_parameters(changes=[{\"parameter\": \"Manufacturer\", \"allTypes\": True, \"value\": \"Acme\"}])"],
+  edit_family: [withCurrentDocument({ familyId: "Required: Element id of a loadable family in the RVT, the familyId find_elements and list_types return" }),
+    "Full response; document is the opened family's snapshot (kind rfa, unsaved), with a changes line and a project_unmodified check",
+    `Opens a loadable family of the RVT for editing as an unsaved, in-memory family document. ${targetsActive}, so get_family_parameters() works on the next line; save it into the workspace with save_as_document. The project is not modified. In-place and non-editable families, and ids that are not families (system families such as walls have none), fail with family_not_editable; a missing id fails with element_not_found`,
+    "family = revit.edit_family(familyId=123)"],
 };
 
 const unitsOperations = {

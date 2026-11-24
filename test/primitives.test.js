@@ -1,4 +1,4 @@
-// Built-in Revit primitives (spec #9 Phases A and B): the worker's call shape, the units helper, and the
+// Built-in Revit primitives (spec #9 Phases A, B and C): the worker's call shape, the units helper, and the
 // published reference, against a stub broker. Live Revit behaviour is proven on the Windows seat.
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
@@ -9,8 +9,8 @@ import { SERVER_INSTRUCTIONS } from "../server/app.js";
 import { API_VERSION, apiReference } from "../server/reference.js";
 import { Runtime } from "../server/runtime.js";
 
-const READ_PRIMITIVES = ["find_elements", "get_parameters", "list_types", "list_views", "get_selection"];
-const RESPONSE_PRIMITIVES = ["get_active_document", "set_selection", "set_parameters"];
+const READ_PRIMITIVES = ["find_elements", "get_parameters", "list_types", "list_views", "get_selection", "get_family_parameters"];
+const RESPONSE_PRIMITIVES = ["get_active_document", "set_selection", "set_parameters", "set_family_parameters", "edit_family"];
 
 async function fixture(t, brokerExecutor) {
   const base = await realpath(await mkdtemp(path.join(tmpdir(), "drive-it-primitives-")));
@@ -51,6 +51,7 @@ test("read primitives return the broker's results entry directly", async (t) => 
     list_types: [{ id: 9, name: "Generic - 200mm" }],
     list_views: [{ id: 11, name: "{3D}", viewType: "ThreeD", capturable: true }],
     get_selection: [{ id: 7, name: "Wall" }],
+    get_family_parameters: { types: ["A", "B"], currentType: "A", parameters: [{ name: "Manufacturer", values: { A: { value: null, display: null } } }] },
   };
   const envelopes = [];
   const run = await fixture(t, stubBroker(envelopes, outputs));
@@ -60,6 +61,7 @@ test("read primitives return the broker's results entry directly", async (t) => 
     list_types: "revit.list_types(\"Walls\")",
     list_views: "revit.list_views()",
     get_selection: "revit.get_selection()",
+    get_family_parameters: "revit.get_family_parameters()",
   };
   for (const name of READ_PRIMITIVES) {
     const receipt = await run(`result = ${calls[name]}`);
@@ -73,6 +75,7 @@ test("read primitives return the broker's results entry directly", async (t) => 
     { type: "list_types", arguments: { category: "Walls" } },
     { type: "list_views", arguments: { includeSheets: true, includeTemplates: false } },
     { type: "get_selection", arguments: {} },
+    { type: "get_family_parameters", arguments: {} },
   ]);
 });
 
@@ -122,6 +125,55 @@ test("set_parameters sends its changes as one operation and returns the full res
   assert.equal(envelopes[1].document.uniqueId, "doc-active");
   assert.deepEqual(envelopes[2].operations.map(operation => operation.type), ["set_parameters", "get_parameters"]);
   assert.deepEqual(receipt.result.batch.results, [null, null]);
+});
+
+test("edit_family returns the full response and later calls target the opened family", async (t) => {
+  const envelopes = [];
+  const family = { uniqueId: "doc-family", title: "Desk", path: null, kind: "rfa", familyTypes: ["A", "B"] };
+  const run = await fixture(t, async (processId, envelope) => {
+    envelopes.push(envelope);
+    const type = envelope.operations[0].type;
+    return {
+      id: envelope.id,
+      status: "succeeded",
+      document: type === "get_active_document" ? { uniqueId: "doc-project", title: "Project", path: null, kind: "rvt" } : family,
+      changes: type === "edit_family" ? ["Opened family Desk for editing."] : [],
+      affectedFiles: [],
+      affectedElements: [],
+      checks: [],
+      results: envelope.operations.map(operation => operation.type === "get_family_parameters" ? { types: ["A", "B"], currentType: "A", parameters: [] } : null),
+    };
+  });
+  const changes = [
+    { parameter: "Manufacturer", type: "A", value: "Acme" },
+    { parameter: "Width", allTypes: true, valueString: "600 mm" },
+    { parameter: "Depth", allTypes: true, formula: "Width / 2" },
+    { parameter: "Height", type: "B", formula: "Width * 2" },
+  ];
+  const receipt = await run([
+    "revit.get_active_document()",
+    "opened = revit.edit_family(familyId=42)",
+    "params = revit.get_family_parameters()",
+    `changed = revit.set_family_parameters(${JSON.stringify(changes).replaceAll("true", "True")})`,
+    "result = {'opened': opened, 'params': params, 'changed': changed}",
+  ].join("\n"));
+  assert.equal(receipt.status, "succeeded", JSON.stringify(receipt.error));
+  assert.equal(receipt.result.opened.status, "succeeded");
+  assert.equal(receipt.result.opened.document.uniqueId, "doc-family");
+  assert.deepEqual(receipt.result.opened.changes, ["Opened family Desk for editing."]);
+  assert.deepEqual(receipt.result.opened.results, [null]);
+  assert.deepEqual(receipt.result.params, { types: ["A", "B"], currentType: "A", parameters: [] });
+  assert.equal(receipt.result.changed.status, "succeeded");
+  assert.deepEqual(receipt.result.changed.results, [null]);
+  assert.deepEqual(envelopes.map(envelope => [envelope.operations[0].type, envelope.document.uniqueId]), [
+    ["get_active_document", null],
+    ["edit_family", "doc-project"],
+    ["get_family_parameters", "doc-family"],
+    ["set_family_parameters", "doc-family"],
+  ]);
+  assert.deepEqual(envelopes[1].operations[0].arguments, { familyId: 42 });
+  assert.deepEqual(envelopes[2].operations[0].arguments, {});
+  assert.deepEqual(envelopes[3].operations, [{ type: "set_family_parameters", arguments: { changes } }]);
 });
 
 test("a rejected set_parameters raises RevitError with the broker's code", async (t) => {
@@ -238,6 +290,17 @@ test("get_api_reference lists every primitive and units with an example that run
   }
   assert.match(setParameters.effects, /Drive It model batch/);
   assert.match(setParameters.results, /parameter_readback/);
+  const setFamilyParameters = apiReference("revit.set_family_parameters")[0];
+  for (const code of ["wrong_document_kind", "family_type_not_found", "parameter_not_found", "parameter_has_formula", "value_type_mismatch", "invalid_formula"]) {
+    assert.match(setFamilyParameters.effects, new RegExp(code), code);
+  }
+  assert.match(setFamilyParameters.effects, /original current type is restored/);
+  assert.match(setFamilyParameters.results, /family_parameter_readback/);
+  const editFamily = apiReference("revit.edit_family")[0];
+  assert.match(editFamily.effects, /Later calls in the same script target the returned document/);
+  for (const code of ["family_not_editable", "element_not_found"]) assert.match(editFamily.effects, new RegExp(code), code);
+  assert.match(editFamily.effects, /project is not modified/);
+  assert.match(apiReference("revit.get_family_parameters")[0].effects, /without changing the current type/);
 });
 
 test("the server instructions start work on an open model with get_active_document", () => {
