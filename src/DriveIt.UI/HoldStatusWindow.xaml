@@ -1,0 +1,49 @@
+<!--
+    The hold status window (spec #15 "Status Window"): shown over Revit while Drive-It holds it,
+    on its own thread (HoldStatus) so it stays live while Revit's thread is busy. Family theme
+    from Theme.xaml, like the operator window. Topmost and not activated, so it never takes the
+    keyboard from Revit; the person cannot close it, because the hold must stay visible.
+-->
+<Window x:Class="DriveIt.UI.HoldStatusWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Drive-It"
+        Width="400" SizeToContent="Height" ResizeMode="NoResize" WindowStyle="ToolWindow"
+        Topmost="True" ShowActivated="False" ShowInTaskbar="False"
+        WindowStartupLocation="CenterScreen"
+        FontFamily="Segoe UI" FontSize="12" UseLayoutRounding="True"
+        TextOptions.TextFormattingMode="Display"
+        Background="{DynamicResource WindowBrush}" Foreground="{DynamicResource TextBrush}"
+        AutomationProperties.AutomationId="HoldStatusWindow">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/DriveIt.UI;component/Theme.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Border Margin="12" Style="{StaticResource Panel}">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock x:Name="NameText" Grid.ColumnSpan="2" Style="{StaticResource SectionText}"
+                       TextWrapping="Wrap" AutomationProperties.AutomationId="HoldName" />
+            <TextBlock x:Name="PauseText" Grid.Row="1" Grid.ColumnSpan="2" TextWrapping="Wrap"
+                       AutomationProperties.AutomationId="HoldPause" />
+            <TextBlock x:Name="ProgressText" Grid.Row="2" Margin="0,8,0,0" VerticalAlignment="Center"
+                       Style="{StaticResource MutedText}" AutomationProperties.AutomationId="HoldProgress" />
+            <Button x:Name="StopButton" Grid.Row="2" Grid.Column="1" Margin="12,8,0,0" MinWidth="88"
+                    Style="{StaticResource DangerButton}" Click="OnStop"
+                    AutomationProperties.AutomationId="HoldStop"
+                    ToolTip="End this script now. Everything it changed is rolled back." />
+        </Grid>
+    </Border>
+</Window>
