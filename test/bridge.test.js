@@ -449,16 +449,17 @@ except Exception as error:
   assert.match(receipt.result.message, /Name/);
 });
 
-test("values that cannot cross to Revit and keyword arguments fail in the script", async (t) => {
+test("values that cannot cross to Revit fail in the script; keyword arguments cross by name (spec #16)", async (t) => {
   const revit = new StubRevit();
   const { runtime } = await fixture(t, revit);
   const dict = await run(runtime, "DB.XYZ({'x': 1}, 0, 0)");
   assert.equal(dict.status, "failed");
   assert.match(dict.error.message, /cannot cross to Revit/);
-  const keyword = await run(runtime, "DB.XYZ(x=1, y=0, z=0)");
-  assert.equal(keyword.status, "failed");
-  assert.match(keyword.error.message, /positional arguments only/);
   assert.equal(revit.opened.length, 0, "nothing reached Revit, so nothing was held");
+  // Spec #15 refused keyword arguments in the worker; spec #16 "The API in Python" matches them to parameter names.
+  await run(runtime, "DB.XYZ(x=1, y=0, z=0)");
+  const sent = revit.opened.at(-1).sent.at(-1).call;
+  assert.deepEqual(sent.named, { x: 1, y: 0, z: 0 }, "keyword arguments reached the add-in by name");
 });
 
 test("built-in operations join the hold once it starts and are restored with it", async (t) => {

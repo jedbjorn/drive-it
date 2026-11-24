@@ -61,6 +61,38 @@ class RevitError(Exception):
         super().__init__(error.get("message") or "Revit broker execution failed.")
         self.response = response
 
+    @property
+    def Message(self):
+        """The error's text, as .NET exceptions have it under IronPython."""
+        return str(self)
+
+
+_exception_classes = {}
+_raised_classes = {}
+
+
+def _revit_exception(full_name):
+    """The Python class for a Revit or .NET exception class: a RevitError, so `except InvalidOperationException:` works."""
+    exception = _exception_classes.get(full_name)
+    if exception is None:
+        namespace, _, name = full_name.rpartition(".")
+        exception = type(name, (RevitError,), {"__module__": namespace or __name__})
+        _exception_classes[full_name] = exception
+    return exception
+
+
+def _revit_error(response):
+    """A failed bridge call as an exception matching the Revit exception class and each of its bases."""
+    chain = tuple((response.get("error") or {}).get("exception") or ())
+    if not chain:
+        return RevitError(response)
+    exception = _raised_classes.get(chain)
+    if exception is None:
+        bases = tuple(_revit_exception(name) for name in chain)
+        exception = bases[0] if len(bases) == 1 else type(bases[0].__name__, bases, {"__module__": bases[0].__module__})
+        _raised_classes[chain] = exception
+    return exception(response)
+
 
 # --- The API bridge: script-side proxies for Revit objects the add-in holds (spec #15). ---
 # A handle names an object in the add-in's per-run table; every use of it is one bridge call.
@@ -82,8 +114,17 @@ def _bridge(call):
         error.detail = response
         raise error
     if status != "succeeded":
-        raise RevitError(response)
+        raise _revit_error(response)
+    for note in response.get("notes") or ():
+        _add_note(note)
     return response.get("value")
+
+
+def _add_note(text):
+    """A note the add-in raised (an older API spelling it accepted) goes to the receipt's notes."""
+    note = globals().get("_note")
+    if note is not None:
+        note(text)
 
 
 def _encode(value):
@@ -95,6 +136,10 @@ def _encode(value):
         return {"$path": object.__getattribute__(value, "_p_path")}
     if isinstance(value, _Option):
         return dict(value.settings)
+    if isinstance(value, _StrongBox):
+        return {"$ref": _encode(value.Value)}
+    if isinstance(value, _ClrType):
+        return value._encoded()
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_encode(item) for item in value]
     raise TypeError(f"A {type(value).__name__} cannot cross to Revit; pass numbers, strings, booleans, None, lists or Revit handles.")
@@ -106,6 +151,8 @@ def _decode(value):
     if isinstance(value, dict) and "$tuple" in value:
         # A method with out parameters: its return value, then each out value.
         return tuple(_decode(item) for item in value["$tuple"])
+    if isinstance(value, dict) and "$type" in value:
+        return _ClrType(value["$type"])
     return value
 
 
@@ -137,10 +184,149 @@ class _Options:
         return _Option("copy_paste", duplicateTypes=duplicateTypes)
 
 
-def _arguments(args, kwargs):
+def _invoke(call, args, kwargs):
+    """One call through the bridge: named arguments match the method's parameter names; a box gets its value back."""
+    call["args"] = [_encode(arg) for arg in args]
     if kwargs:
-        raise TypeError("Revit API calls take positional arguments only; pass them in the order the method lists them.")
-    return [_encode(arg) for arg in args]
+        call["named"] = {name: _encode(value) for name, value in kwargs.items()}
+    value = _bridge(call)
+    boxes = [arg for arg in (*args, *kwargs.values()) if isinstance(arg, _StrongBox)]
+    if boxes and isinstance(value, dict) and "$boxes" in value:
+        for box, item in zip(boxes, value["$boxes"]):
+            box.Value = _decode(item)
+        value = value.get("value")
+    return _decode(value)
+
+
+class _StrongBox:
+    """clr.Reference[T]() or clr.StrongBox[T](value): an out or ref argument; read .Value after the call."""
+
+    __slots__ = ("Value", "_type")
+
+    def __init__(self, value=None, item=None):
+        self.Value = value
+        self._type = item
+
+    def __repr__(self):
+        return f"<StrongBox[{_type_label(self._type)}] Value={self.Value!r}>"
+
+
+class _BoxType:
+    """clr.Reference and clr.StrongBox: index with the value's type, then call, with an optional starting value."""
+
+    __slots__ = ("_name", "_item")
+
+    def __init__(self, name, item=None):
+        self._name = name
+        self._item = item
+
+    def __getitem__(self, item):
+        return _BoxType(self._name, item)
+
+    def __call__(self, *args):
+        if len(args) > 1:
+            raise TypeError(f"clr.{self._name}[T]() takes at most one starting value.")
+        return _StrongBox(args[0] if args else None, self._item)
+
+    def __instancecheck__(self, value):
+        return isinstance(value, _StrongBox)
+
+    def __repr__(self):
+        return f"<clr.{self._name}[{_type_label(self._item)}]>" if self._item is not None else f"<clr.{self._name}>"
+
+
+def _type_label(item):
+    if isinstance(item, _Path):
+        return object.__getattribute__(item, "_p_path").rpartition(".")[2]
+    if isinstance(item, _ClrType):
+        return item.Name
+    return getattr(item, "__name__", "object") if item is not None else "object"
+
+
+class _ClrType:
+    """What GetType(), typeof(T) and clr.GetClrType(T) give: a Revit type's names as text, never a handle to a System.Type."""
+
+    __slots__ = ("FullName",)
+
+    def __init__(self, full_name):
+        object.__setattr__(self, "FullName", full_name)
+
+    def __setattr__(self, name, value):
+        raise AttributeError(f"A type's {name} cannot be set.")
+
+    @property
+    def Name(self):
+        base, _, arguments = self.FullName.partition("<")
+        name = base.rpartition(".")[2]
+        if not arguments:
+            return name
+        depth, count = 0, 1
+        for character in arguments[:-1]:
+            depth += character == "<"
+            depth -= character == ">"
+            count += character == "," and depth == 0
+        return f"{name}`{count}"
+
+    @property
+    def Namespace(self):
+        return self.FullName.partition("<")[0].rpartition(".")[0]
+
+    def _encoded(self):
+        if self.FullName.startswith("Autodesk.Revit.DB."):
+            return {"$path": self.FullName}
+        raise TypeError(f"{self.FullName} is not a Revit API type under DB, so it cannot be passed to Revit.")
+
+    def __eq__(self, other):
+        if isinstance(other, _ClrType):
+            return self.FullName == other.FullName
+        if isinstance(other, _Path):
+            return self.FullName == object.__getattribute__(other, "_p_path")
+        if isinstance(other, str):
+            return False
+        return NotImplemented
+
+    def __ne__(self, other):
+        equal = self.__eq__(other)
+        return equal if equal is NotImplemented else not equal
+
+    def __hash__(self):
+        return hash(self.FullName)
+
+    def __str__(self):
+        return self.FullName
+
+    def __repr__(self):
+        return f"<System.Type {self.FullName}>"
+
+    def __instancecheck__(self, value):
+        return _Path(self.FullName).__instancecheck__(value)
+
+    def __subclasscheck__(self, cls):
+        return _Path(self.FullName).__subclasscheck__(cls)
+
+
+def _clr_type(value):
+    """typeof(Wall) and clr.GetClrType(Wall): the type, accepted wherever a method takes one."""
+    if isinstance(value, _ClrType):
+        return value
+    if isinstance(value, _Path):
+        return _ClrType(object.__getattribute__(value, "_p_path"))
+    raise TypeError("typeof and clr.GetClrType take a Revit API type, for example typeof(Wall); for an object's type use obj.GetType().")
+
+
+# The parts of IronPython's clr module that belong to calling the API; the clr stand-in takes these.
+_clr_members = {"Reference": _BoxType("Reference"), "StrongBox": _BoxType("StrongBox"), "GetClrType": _clr_type}
+
+
+class _Clr:
+    """clr: Reference and StrongBox for out and ref arguments, GetClrType for a type."""
+
+    Reference = _clr_members["Reference"]
+    StrongBox = _clr_members["StrongBox"]
+    GetClrType = staticmethod(_clr_type)
+
+    def __repr__(self):
+        return "<module 'clr' (Drive-It)>"
 
 
 class _Member:
@@ -155,10 +341,38 @@ class _Member:
     def __call__(self, *args, **kwargs):
         target = object.__getattribute__(self, "_m_target")
         name = object.__getattribute__(self, "_m_name")
-        return _decode(_bridge({"op": "call", "target": target, "member": name, "args": _arguments(args, kwargs)}))
+        return _invoke({"op": "call", "target": target, "member": name}, args, kwargs)
 
     def __repr__(self):
         return f"<Revit method {object.__getattribute__(self, '_m_name')}>"
+
+
+class _Indexed:
+    """An indexed property such as Element.Parameter: el.Parameter[bip] reads, el.Parameter[bip] = v writes."""
+
+    __slots__ = ("_i_target", "_i_name")
+
+    def __init__(self, target, name):
+        object.__setattr__(self, "_i_target", target)
+        object.__setattr__(self, "_i_name", name)
+
+    def _accessor(self, prefix):
+        return _Member(object.__getattribute__(self, "_i_target"), prefix + object.__getattribute__(self, "_i_name"))
+
+    def __getitem__(self, key):
+        return self._accessor("get_")(*(key if isinstance(key, tuple) else (key,)))
+
+    def __setitem__(self, key, value):
+        self._accessor("set_")(*(key if isinstance(key, tuple) else (key,)), value)
+
+    def __call__(self, *args):
+        return self._accessor("get_")(*args)
+
+    def __repr__(self):
+        return f"<Revit indexed property {object.__getattribute__(self, '_i_name')}>"
+
+
+_instance_checks = {}
 
 
 class _Proxy:
@@ -192,6 +406,8 @@ class _Proxy:
             raise
 
     def __eq__(self, other):
+        if isinstance(other, _ClrType):
+            return NotImplemented
         try:
             encoded = _encode(other)
         except TypeError:
@@ -199,7 +415,11 @@ class _Proxy:
         return _bridge({"op": "eq", "target": self._target(), "other": encoded})
 
     def __ne__(self, other):
-        return not self.__eq__(other)
+        equal = self.__eq__(other)
+        return equal if equal is NotImplemented else not equal
+
+    def __int__(self):
+        return _bridge({"op": "int", "target": self._target()})
 
     def __str__(self):
         return _bridge({"op": "str", "target": self._target()})
@@ -224,12 +444,21 @@ class _Handle(_Proxy):
         if name.startswith("__"):
             raise AttributeError(name)
         type_name = object.__getattribute__(self, "_h_type")
-        if _member_kinds.get((type_name, name)) == "method":
+        if name == "GetType":
+            # The type's names as text: no bridge call, and no handle to a System.Type.
+            return lambda: _ClrType(type_name)
+        kind = _member_kinds.get((type_name, name))
+        if kind == "method":
             return _Member(self._target(), name)
+        if kind == "indexed":
+            return _Indexed(self._target(), name)
         value = _bridge({"op": "get", "target": self._target(), "member": name})
         if isinstance(value, dict) and "$method" in value:
             _member_kinds[(type_name, name)] = "method"
             return _Member(self._target(), name)
+        if isinstance(value, dict) and "$indexed" in value:
+            _member_kinds[(type_name, name)] = "indexed"
+            return _Indexed(self._target(), name)
         return _decode(value)
 
     def __hash__(self):
@@ -251,18 +480,70 @@ class _Path(_Proxy):
         return {"$path": object.__getattribute__(self, "_p_path")}
 
     def __getattr__(self, name):
+        # Element.Name.__get__(el) and .__set__(el, value), IronPython's property workarounds, are GetValue and SetValue.
+        name = {"__get__": "GetValue", "__set__": "SetValue"}.get(name, name)
         if name.startswith("__"):
             raise AttributeError(name)
         return _Path(f"{object.__getattribute__(self, '_p_path')}.{name}")
 
     def __call__(self, *args, **kwargs):
-        return _decode(_bridge({"op": "call", "target": self._target(), "args": _arguments(args, kwargs)}))
+        return _invoke({"op": "call", "target": self._target()}, args, kwargs)
+
+    def __instancecheck__(self, value):
+        """isinstance(el, Wall): true for a wall and its subtypes; the answer for a handle's type is kept for the run."""
+        if not isinstance(value, _Proxy):
+            return False
+        path = object.__getattribute__(self, "_p_path")
+        key = (object.__getattribute__(value, "_h_type"), path) if isinstance(value, _Handle) else None
+        if key in _instance_checks:
+            return _instance_checks[key]
+        answer = _bridge({"op": "isinstance", "target": value._target(), "type": self._target()})
+        if key is not None:
+            _instance_checks[key] = answer
+        return answer
+
+    def __subclasscheck__(self, cls):
+        if isinstance(cls, _ClrType):
+            cls = _Path(cls.FullName)
+        if not isinstance(cls, _Path):
+            return False
+        return _bridge({"op": "issubclass", "type": cls._target(), "base": self._target()})
 
     def __hash__(self):
         return hash(object.__getattribute__(self, "_p_path"))
 
     def __repr__(self):
         return f"<DB {object.__getattribute__(self, '_p_path')[len('Autodesk.Revit.'):]}>"
+
+
+def _binary_operator(operator, reflected):
+    def method(self, other):
+        try:
+            encoded = _encode(other)
+        except TypeError:
+            return NotImplemented
+        operands = [encoded, self._target()] if reflected else [self._target(), encoded]
+        return _decode(_bridge({"op": "operator", "operator": operator, "args": operands}))
+    return method
+
+
+def _unary_operator(operator):
+    def method(self):
+        return _decode(_bridge({"op": "operator", "operator": operator, "args": [self._target()]}))
+    return method
+
+
+# Python operators on Revit values call the operator Revit's type defines (XYZ + XYZ, xyz * 2, -xyz, a < b, flags | flags).
+for _name, _operator in (
+    ("add", "op_Addition"), ("sub", "op_Subtraction"), ("mul", "op_Multiply"), ("truediv", "op_Division"),
+    ("or", "op_BitwiseOr"), ("and", "op_BitwiseAnd"), ("xor", "op_ExclusiveOr"),
+):
+    setattr(_Proxy, f"__{_name}__", _binary_operator(_operator, False))
+    setattr(_Proxy, f"__r{_name}__", _binary_operator(_operator, True))
+for _name, _operator in (("lt", "op_LessThan"), ("le", "op_LessThanOrEqual"), ("gt", "op_GreaterThan"), ("ge", "op_GreaterThanOrEqual")):
+    setattr(_Proxy, f"__{_name}__", _binary_operator(_operator, False))
+for _name, _operator in (("neg", "op_UnaryNegation"), ("pos", "op_UnaryPlus"), ("invert", "op_OnesComplement")):
+    setattr(_Proxy, f"__{_name}__", _unary_operator(_operator))
 
 
 class _Transaction:
@@ -784,6 +1065,8 @@ def main():
             "units": Units(),
             "DB": _Path("Autodesk.Revit.DB"),
             "RevitError": RevitError,
+            "clr": _Clr(),
+            "typeof": _clr_type,
             "result": None,
         }
         exec(compile(run["source"], "<drive-it-script>", "exec"), scope)
@@ -806,6 +1089,9 @@ def main():
     except RevitError as error:
         receipt["status"] = error.response.get("status", "failed")
         receipt["error"] = error.response.get("error") or {"code": "REVIT_EXECUTION_FAILED", "message": str(error)}
+        if "exception" in receipt["error"]:
+            # The .NET class chain is for matching except clauses in the script; the message already names the class.
+            receipt["error"] = {key: value for key, value in receipt["error"].items() if key != "exception"}
     except SystemExit as error:
         if error.code is not None and (not isinstance(error.code, int) or error.code != 0):
             receipt["status"] = "failed"

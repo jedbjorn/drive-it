@@ -40,15 +40,22 @@ function isAbsoluteFilePath(value) {
     && path.isAbsolute(value) && /[^\\/]/.test(value);
 }
 
+// A box (clr.Reference / StrongBox, {"$ref": start}) and named arguments are checked like positional ones.
+function isBox(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && "$ref" in value;
+}
+
 function bridgePaths(value, found = []) {
   if (isAbsoluteFilePath(value)) found.push(value);
   else if (Array.isArray(value)) for (const item of value) bridgePaths(item, found);
+  else if (isBox(value)) bridgePaths(value.$ref, found);
   return found;
 }
 
 // Replaces each checked path with its canonical form, so Revit gets the path the policy decided on.
 function withCanonicalPaths(value, canonical) {
   if (isAbsoluteFilePath(value)) return canonical.get(value);
+  if (isBox(value)) return { ...value, $ref: withCanonicalPaths(value.$ref, canonical) };
   return Array.isArray(value) ? value.map(item => withCanonicalPaths(item, canonical)) : value;
 }
 
@@ -324,7 +331,8 @@ export class Runtime {
       };
     }
     // Checked before Revit is held: no decision is awaited while Revit is paused.
-    const paths = [...bridgePaths(call.args), ...bridgePaths(call.value)];
+    const named = call.named && typeof call.named === "object" ? call.named : {};
+    const paths = [...bridgePaths(call.args), ...bridgePaths(call.value), ...bridgePaths(Object.values(named))];
     if (paths.length) {
       const operation = BRIDGE_READS.has(call.member) ? "read_file" : "write_file";
       const decision = await this.policy.authorize(context.runId, [{ operation, paths }], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
@@ -333,6 +341,7 @@ export class Runtime {
       const canonical = new Map(paths.map((original, index) => [original, decision.requests[0].paths[index]]));
       if (call.args) call.args = withCanonicalPaths(call.args, canonical);
       if ("value" in call) call.value = withCanonicalPaths(call.value, canonical);
+      if (call.named) call.named = Object.fromEntries(Object.entries(named).map(([name, value]) => [name, withCanonicalPaths(value, canonical)]));
     }
     let hold;
     try {

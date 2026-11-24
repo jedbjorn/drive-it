@@ -277,6 +277,7 @@ internal sealed class HeldRun : IHeldDocuments
     {
         if (message.Request["call"] is not JsonObject call)
             return Failure(message.Id, "bridge.call", "invalid_call", "A bridge.call request carries a call object.");
+        calls.Notes.Clear();
         try
         {
             var op = call["op"]?.GetValue<string>();
@@ -291,6 +292,10 @@ internal sealed class HeldRun : IHeldDocuments
                 "len" => calls.Length(call),
                 "eq" => calls.Equal(call),
                 "str" => calls.Text(call),
+                "operator" => calls.Operator(call),
+                "isinstance" => calls.IsInstance(call),
+                "issubclass" => calls.IsSubclass(call),
+                "int" => calls.Integer(call),
                 "document" => calls.Handle(ResolveDocument(application, dispatcher, call["document"])),
                 "element" => Element(application, dispatcher, call),
                 "tx.start" => StartTransaction(application, dispatcher, call),
@@ -299,17 +304,24 @@ internal sealed class HeldRun : IHeldDocuments
                 "describe" => BridgeCalls.Describe(call),
                 _ => throw new BridgeException("invalid_call", $"Unknown bridge operation '{op}'."),
             };
-            return new JsonObject
+            var response = new JsonObject
             {
                 ["id"] = message.Id,
                 ["type"] = "bridge.call",
                 ["status"] = "succeeded",
                 ["value"] = value,
-            }.ToJsonString();
+            };
+            // Where Drive-It accepted a call its own way (an older API spelling), the worker adds the note to the receipt.
+            if (calls.Notes.Count > 0)
+                response["notes"] = new JsonArray(calls.Notes.Select(note => (JsonNode?)note).ToArray());
+            return response.ToJsonString();
         }
         catch (BridgeException exception)
         {
-            return Failure(message.Id, "bridge.call", exception.Code, exception.Message);
+            var failure = JsonNode.Parse(Failure(message.Id, "bridge.call", exception.Code, exception.Message))!;
+            if (exception.Exceptions is { Count: > 0 } chain)
+                failure["error"]!["exception"] = new JsonArray(chain.Select(name => (JsonNode?)name).ToArray());
+            return failure.ToJsonString();
         }
         catch (RequestRejectedException exception)
         {
