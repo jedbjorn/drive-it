@@ -27,11 +27,18 @@ public sealed class OperatorHost
     public string LocalApplicationData { get; init; } =
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
-    /// <summary>The installed layout around <paramref name="assemblyDirectory"/> (<c>app\addin</c> or <c>app\operator</c>).</summary>
-    public static OperatorHost ForAssemblyDirectory(string? assemblyDirectory) => new()
+    /// <summary>
+    /// The installed layout around <paramref name="assemblyDirectory"/>: <c>app\operator</c>, or
+    /// <c>app\addin\&lt;year&gt;</c>, one add-in build per supported Revit year.
+    /// </summary>
+    public static OperatorHost ForAssemblyDirectory(string? assemblyDirectory)
     {
-        AppDirectory = string.IsNullOrEmpty(assemblyDirectory) ? null : Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(assemblyDirectory)),
-    };
+        if (string.IsNullOrEmpty(assemblyDirectory)) return new();
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(assemblyDirectory));
+        if (parent is not null && string.Equals(Path.GetFileName(parent), "addin", StringComparison.OrdinalIgnoreCase))
+            parent = Path.GetDirectoryName(parent);
+        return new() { AppDirectory = parent };
+    }
 }
 
 /// <summary>

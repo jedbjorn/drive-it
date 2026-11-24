@@ -2,10 +2,12 @@
 
   <!--
     DriveIt.Operator.exe: the Start Menu host of the operator window (DriveIt.UI). Framework-
-    dependent on the Windows Desktop Runtime 8 (Revit 2026 installs it; Install-DriveIt.ps1
-    checks for it). The package publishes it to app\operator, so the window finds
-    app\runtimes\node and app\server\operator.js one folder up, as the add-in does from app\addin.
-    RollForward=Major lets a newer desktop runtime run it when 8 is absent.
+    dependent on the Windows Desktop Runtime 8 or later (Revit 2026 installs 8, Revit 2027 installs
+    10; Install-DriveIt.ps1 checks for one). RollForward=Major lets 10 run it when 8 is absent, so a
+    computer with Revit 2027 alone needs nothing more (spec #22 R6; CI runs its self-test on .NET 10
+    alone, test/operator-runtime.Tests.ps1). The package publishes it to app\operator, so the window
+    finds app\runtimes\node and app\server\operator.js one folder up, as the add-in does from
+    app\addin\<year>. It ships the window icons beside itself, as the add-in does.
   -->
 
   <PropertyGroup>
@@ -26,6 +28,10 @@
     <IsPackable>false</IsPackable>
     <StartupObject>DriveIt.Operator.Program</StartupObject>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\DriveIt.Revit\Resources\icons\*.png" Link="Resources\icons\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\DriveIt.UI\DriveIt.UI.csproj" />

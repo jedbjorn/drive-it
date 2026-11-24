@@ -1,6 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    One source, one add-in build per supported Revit year (spec #22 "Shared Code"): Revit 2026 runs
+    on .NET 8 and Revit 2027 on .NET 10, so each target compiles against its year's API. REVIT2026 or
+    REVIT2027 is defined per target; use #if only where the two APIs differ.
+    Adding a year: a target framework here, its API packages below, and the year in the installer's
+    supported-years list (installer/Build-DriveItPackage.ps1, Install-/Uninstall-DriveIt.ps1, DriveIt.wxs).
+  -->
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFrameworks>net8.0-windows;net10.0-windows</TargetFrameworks>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWPF>true</UseWPF>
     <PlatformTarget>x64</PlatformTarget>
@@ -8,9 +15,22 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <RevitYear>2026</RevitYear>
+    <RevitApiVersion>2026.0.4</RevitApiVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <RevitYear>2027</RevitYear>
+    <RevitApiVersion>2027.0.0</RevitApiVersion>
+  </PropertyGroup>
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);REVIT$(RevitYear)</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2026.0.4" PrivateAssets="all" ExcludeAssets="runtime" />
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2026.0.4" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(RevitApiVersion)" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(RevitApiVersion)" PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+  <ItemGroup>
     <None Update="DriveIt.addin" CopyToOutputDirectory="PreserveNewest" />
     <!-- Ribbon and window icons, loaded from disk next to the DLL when present (drive_16/32[_dark].png). -->
     <None Include="Resources\icons\*.png" CopyToOutputDirectory="PreserveNewest" />

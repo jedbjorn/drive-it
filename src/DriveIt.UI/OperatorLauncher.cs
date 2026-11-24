@@ -55,45 +55,41 @@ public static class OperatorLauncher
 
     /// <summary>
     /// A new window wired to the installed operator.js (found from this assembly's folder,
-    /// <c>app\addin</c> or <c>app\operator</c>), in <see cref="DriveItTheme.Current"/>.
+    /// <c>app\addin\&lt;year&gt;</c> or <c>app\operator</c>), in <see cref="DriveItTheme.Current"/>.
     /// </summary>
     /// <param name="promptForMissingRoot">False keeps the folder picker closed when no root is selected (self-test).</param>
     public static OperatorWindow Create(bool promptForMissingRoot = true)
     {
         var host = OperatorHost.ForAssemblyDirectory(AssemblyDirectory());
         var client = new OperatorClient(new ProcessOperatorRunner(host));
-        return new OperatorWindow(client, OperatorLocator.McpConfigurationPath(host), InstallMode.Current, LoadIcon(host), promptForMissingRoot);
+        return new OperatorWindow(client, OperatorLocator.McpConfigurationPath(host), InstallMode.Current, LoadIcon(), promptForMissingRoot);
     }
 
     private static string? AssemblyDirectory() => Path.GetDirectoryName(typeof(OperatorLauncher).Assembly.Location);
 
     /// <summary>
-    /// The window icon, <c>Resources\icons\drive_32.png</c> next to this assembly (the add-in folder)
-    /// or in <c>app\addin</c> (for the exe); null while the icon files are not shipped.
+    /// The window icon, <c>Resources\icons\drive_32.png</c> next to this assembly (the add-in and the
+    /// exe both ship it); null while the icon files are not shipped.
     /// </summary>
-    private static ImageSource? LoadIcon(OperatorHost host)
+    private static ImageSource? LoadIcon()
     {
-        var candidates = new List<string>();
-        if (AssemblyDirectory() is { } here) candidates.Add(Path.Combine(here, "Resources", "icons", "drive_32.png"));
-        if (host.AppDirectory is { } app) candidates.Add(Path.Combine(app, "addin", "Resources", "icons", "drive_32.png"));
-        foreach (var path in candidates)
+        if (AssemblyDirectory() is not { } here) return null;
+        var path = Path.Combine(here, "Resources", "icons", "drive_32.png");
+        if (!File.Exists(path)) return null;
+        try
         {
-            if (!File.Exists(path)) continue;
-            try
-            {
-                var image = new BitmapImage();
-                image.BeginInit();
-                image.UriSource = new Uri(path);
-                image.CacheOption = BitmapCacheOption.OnLoad; // don't keep the file locked
-                image.EndInit();
-                image.Freeze();
-                return image;
-            }
-            catch (Exception exception) when (exception is IOException or NotSupportedException or UriFormatException)
-            {
-                // An unreadable icon leaves the default one.
-            }
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.UriSource = new Uri(path);
+            image.CacheOption = BitmapCacheOption.OnLoad; // don't keep the file locked
+            image.EndInit();
+            image.Freeze();
+            return image;
         }
-        return null;
+        catch (Exception exception) when (exception is IOException or NotSupportedException or UriFormatException)
+        {
+            // An unreadable icon leaves the default one.
+            return null;
+        }
     }
 }
