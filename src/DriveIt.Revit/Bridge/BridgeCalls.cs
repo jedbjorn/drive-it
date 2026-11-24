@@ -91,6 +91,8 @@ internal sealed class BridgeCalls
     {
         var arguments = call["args"] as JsonArray ?? [];
         var member = call["member"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(member) && call["target"] is JsonObject reference && reference["$path"] is { } pathNode)
+            return CallPath(pathNode.GetValue<string>(), arguments);
         var target = Target(call);
         if (target is TypeReference type)
         {
@@ -101,6 +103,28 @@ internal sealed class BridgeCalls
         if (string.IsNullOrEmpty(member))
             throw new BridgeException("not_callable", $"A {TypeName(target.GetType())} handle cannot be called; call one of its methods.");
         return Encode(InvokeMethod(target.GetType(), target, member, arguments, BindingFlags.Instance));
+    }
+
+    /// <summary>DB.XYZ(0, 0, 0) constructs; DB.Level.Create(doc, 10.0) calls a static method; a method on a static value calls it.</summary>
+    private JsonNode? CallPath(string path, JsonArray arguments)
+    {
+        object resolved;
+        try
+        {
+            resolved = ResolvePath(path);
+        }
+        catch (BridgeException exception) when (exception.Code is "member_is_method" or "member_not_found" && path.LastIndexOf('.') > RootNamespace.Length)
+        {
+            var dot = path.LastIndexOf('.');
+            var name = path[(dot + 1)..];
+            var owner = ResolvePath(path[..dot]);
+            return owner is TypeReference ownerType
+                ? Encode(InvokeMethod(ownerType.Type, null, name, arguments, BindingFlags.Static))
+                : Encode(InvokeMethod(owner.GetType(), owner, name, arguments, BindingFlags.Instance));
+        }
+        if (resolved is TypeReference type)
+            return Encode(Construct(type.Type, arguments));
+        throw new BridgeException("not_callable", $"{path[(RootNamespace.Length - 2)..]} is a value, not a type or method.");
     }
 
     public JsonNode? Index(JsonObject call)

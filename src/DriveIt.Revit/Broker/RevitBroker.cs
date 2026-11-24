@@ -121,7 +121,13 @@ public sealed class RevitBroker
         var run = new HeldRun(request.Id, request.Hold.DisplayName, request.Hold.TimeLimitMs);
         Remember(run);
         holdHandler.Prepare(run);
-        holdEvent.Raise();
+        var raised = holdEvent.Raise();
+        if (raised != ExternalEventRequest.Accepted)
+        {
+            run.Disconnect();
+            await WriteLineAsync(pipe, InvalidRequest(request.Id, "hold_refused", $"Revit did not accept the hold ({raised}).", "hold.begin"), cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         // The client sends nothing until it is held, so a read that completes first is the client leaving.
         var read = reader.ReadLineAsync(cancellationToken);
