@@ -1,5 +1,6 @@
 import path from "node:path";
 import { realpath, stat } from "node:fs/promises";
+import { DEV, installMode } from "./mode.js";
 import { readJson, writeJsonAtomic } from "./store.js";
 
 export async function canonicalPath(target, pathImpl = path) {
@@ -53,8 +54,9 @@ export class WorkspaceStore {
 const READ_ONLY = new Set(["read_file", "read_directory", "read_document", "open_document", "create_document"]);
 
 export class WorkspacePolicy {
-  constructor(decisions) {
+  constructor(decisions, modeResolver = installMode) {
     this.decisions = decisions;
+    this.modeResolver = modeResolver;
   }
 
   async authorize(runId, requests, root, displayName = null, readableRoots = []) {
@@ -64,6 +66,8 @@ export class WorkspacePolicy {
       for (const target of request.paths) paths.push(await canonicalPath(target));
       canonical.push({ operation: request.operation, paths });
     }
+    // Dev Mode (spec #10): every path is allowed and no decision row is written.
+    if (await this.modeResolver() === DEV) return { status: "allowed", requests: canonical, root };
     const outside = canonical.filter(request => request.paths.some(target =>
       !pathIsInside(root, scopePath(request.operation, target, root, path), path)));
     if (outside.length === 0) return { status: "allowed", requests: canonical, root };

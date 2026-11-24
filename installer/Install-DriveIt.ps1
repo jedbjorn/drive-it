@@ -379,6 +379,21 @@ try {
     } else {
         $configuration = [ordered]@{ mcpServers = [ordered]@{'drive-it' = $serverEntry} }
     }
+    # Dev Mode: a commented example of the entry a host agent registers to reach this machine over
+    # SSH (spec #10 "Visibility"). JSON has no comments, so it sits under a "//" key beside
+    # mcpServers, where no client reads it; a standard install removes it.
+    $sshExampleName = '//drive-it-ssh'
+    $sshExample = [ordered]@{
+        '//' = 'Dev Mode example: on the host, register this as the stdio server drive-it with your SSH login to this machine (README, Dev Mode).'
+        command = 'ssh'
+        args = @('-T', '<user>@<host>', 'drive-it-stdio')
+    }
+    if ($configuration -is [Collections.IDictionary]) {
+        if ($installMode -eq 'dev') { $configuration[$sshExampleName] = $sshExample }
+    } else {
+        $configuration.PSObject.Properties.Remove($sshExampleName)
+        if ($installMode -eq 'dev') { $configuration | Add-Member -NotePropertyName $sshExampleName -NotePropertyValue $sshExample }
+    }
     Write-JsonAtomic -Value $configuration -Path $McpConfigPath
     $env:DRIVE_IT_MCP_CONFIG_PATH = $McpConfigPath
 

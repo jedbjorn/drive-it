@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { DEV, STANDARD } from "./mode.js";
 
 const workerFile = fileURLToPath(new URL("./worker.py", import.meta.url));
 
@@ -9,17 +10,24 @@ export function defaultPythonPath() {
   return process.platform === "win32" ? "python" : "python3";
 }
 
-export function runWorker({ source, args, processId, document, runId, pythonPath, cwd, timeoutMs, onRequest, signal }) {
+// Standard mode starts the worker without site and with only the environment it needs. Dev Mode
+// (spec #10) runs site, so every installed package imports as Python would load it, and passes the
+// user's environment, which pip and the processes a script starts expect (TEMP, APPDATA, proxies).
+function workerLaunch(mode) {
+  const python = { PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" };
+  if (mode === DEV) return { args: ["-I", "-B", "-u", workerFile], env: { ...process.env, ...python } };
+  return {
+    args: ["-I", "-S", "-B", "-u", workerFile],
+    env: { PATH: process.env.PATH || "", SYSTEMROOT: process.env.SYSTEMROOT || "", ...python },
+  };
+}
+
+export function runWorker({ source, args, processId, document, runId, pythonPath, cwd, timeoutMs, onRequest, signal, mode = STANDARD }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonPath || defaultPythonPath(), ["-I", "-S", "-B", "-u", workerFile], {
+    const launch = workerLaunch(mode);
+    const child = spawn(pythonPath || defaultPythonPath(), launch.args, {
       cwd,
-      env: {
-        PATH: process.env.PATH || "",
-        SYSTEMROOT: process.env.SYSTEMROOT || "",
-        PYTHONNOUSERSITE: "1",
-        PYTHONDONTWRITEBYTECODE: "1",
-        PYTHONIOENCODING: "utf-8",
-      },
+      env: launch.env,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -89,6 +97,6 @@ export function runWorker({ source, args, processId, document, runId, pythonPath
     child.stdin.on("error", error => {
       if (!settled && error.code !== "EPIPE") finish(error);
     });
-    child.stdin.write(`${JSON.stringify({ type: "run", source, arguments: args, processId, document, runId })}\n`);
+    child.stdin.write(`${JSON.stringify({ type: "run", source, arguments: args, processId, document, runId, mode })}\n`);
   });
 }

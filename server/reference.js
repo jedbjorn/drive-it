@@ -2,13 +2,17 @@ export const API_VERSION = "revit-2026-alpha.4";
 
 // Spec #15 "Documentation": the same eight statements are in the README's "Safety and ability" section,
 // in get_api_reference, and in the server instructions.
+// The two lines that describe a guardrail; Dev Mode's server instructions leave them out (spec #10 "Visibility").
+export const GUARDRAIL_STATEMENT = "File and system access is limited by rules that are a guardrail, not a guarantee. Run scripts from sources you trust.";
+export const BUILT_IN_DOCUMENTS_GUIDANCE = "Open, create, save and close documents with the built-in operations.";
+
 export const SAFETY_AND_ABILITY = [
   "Scripts run in Drive-It's own process. A script that crashes or hangs does not crash Revit.",
   "Through the bridge a script can call Revit's modeling API in general. Drive-It does not check a bridge call before it runs; built-in primitives do check first, and are preferred where they fit.",
   "Revit is paused while a bridge run is in progress, up to the run's time limit. A window says so and offers Stop.",
   "If a bridge run fails, is stopped or times out, its changes are rolled back. Changes before a save in the same run are kept.",
   "A successful run is one undo entry in Revit.",
-  "File and system access is limited by rules that are a guardrail, not a guarantee. Run scripts from sources you trust.",
+  GUARDRAIL_STATEMENT,
   "Bridge scripts are written against one Revit version's API and may need changes for another.",
   "A long task runs as many scripts. The time limit applies to each one, Revit is free between them, and each is its own undo entry. The limit is set in the Drive-It window.",
 ];
@@ -21,7 +25,7 @@ export const BRIDGE_GUIDANCE = [
   "If a step fails, the earlier steps are still in place. Fix the step and continue; do not start the job again.",
   "Put every change inside revit.transaction, and record checks that answer the user's request.",
   "When a call fails, read the error's list of members or signatures, or call revit.describe, before trying again.",
-  "Open, create, save and close documents with the built-in operations.",
+  BUILT_IN_DOCUMENTS_GUIDANCE,
 ];
 
 function withDocument(args) {
