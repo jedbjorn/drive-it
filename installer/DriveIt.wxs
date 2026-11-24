@@ -24,9 +24,13 @@
            UpgradeCode="6561188A-BD8D-43A9-B116-BA0894F8001B" Scope="perUser" Language="1033">
     <SummaryInformation Description="Drive-It: MCP server and add-in for Autodesk Revit 2026" />
 
-    <!-- Default schedule (afterInstallValidate): the old version is removed before anything
-         new is installed. A newer installed version is never downgraded (C3). -->
-    <MajorUpgrade AllowSameVersionUpgrades="yes"
+    <!-- The old version is removed before anything new is installed, inside this install's
+         transaction (afterInstallInitialize), so a failed upgrade rolls the removal back and the
+         previous install stays whole. The default (afterInstallValidate) commits the removal on
+         its own first: a refused upgrade (RegisterDriveIt's Dev Mode gate, an invalid
+         DRIVEIT_MODE) then left Drive-It uninstalled with its registrations pointing at deleted
+         files. A newer installed version is never downgraded (C3). -->
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <!-- Lay down every file whatever version is on disk. Files are costed while the old version
          is still installed, so a DLL whose file version went down (alpha.1/alpha.2 shipped
@@ -90,8 +94,7 @@
          node.exe an MCP client keeps running, its python.exe worker, DriveIt.Operator.exe)
          before InstallValidate, so neither the removal of the old version
          (RemoveExistingProducts) nor this install's file operations meet a file in use.
-         Immediate, because RemoveExistingProducts runs before InstallInitialize where no
-         deferred action can precede it. The script cannot come from the install folder: on
+         Immediate, because it must run before InstallValidate checks for files in use. The script cannot come from the install folder: on
          an upgrade that folder still holds the previous version, which may not have it. So
          Build-DriveItMsi.ps1 embeds installer/Stop-DriveItProcesses.ps1 as an encoded
          command. It runs after FindRelatedProducts and LaunchConditions, so a blocked
@@ -108,7 +111,8 @@
          msiexec /i DriveIt.msi DRIVEIT_MODE=dev from an elevated administrator prompt. Not set,
          Install-DriveIt.ps1 keeps the recorded mode (upgrade, repair) or installs standard; it
          validates the value and holds the elevated-administrator gate, where the deferred
-         action's token is observable. Secure: a public property reaches the execute sequence.
+         action's token is observable. A refusal on an upgrade rolls back the old version's
+         removal (MajorUpgrade above), so the existing install is unchanged. Secure: a public property reaches the execute sequence.
          -Mode is passed only when the property is set (powershell.exe -File drops an empty "").
          RST's command lines never pass it, so RST installs are standard. -->
     <Property Id="DRIVEIT_MODE" Secure="yes" />
