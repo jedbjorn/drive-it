@@ -211,9 +211,20 @@ public sealed class BrokerResponse
     /// every other operation and for every operation after a failure.
     /// </summary>
     public List<JsonNode?>? Results { get; set; }
-    /// <summary>Held runs only: a save or close in this batch kept the run's changes to that document up to it.</summary>
-    public bool? CommitPoint { get; set; }
+    /// <summary>
+    /// Held runs only: a save in this batch kept the run's changes to that document up to it. The
+    /// counts say how many of this response's effects came up to and including the last such save;
+    /// effects after them stay provisional and are rolled back with the rest of the run.
+    /// </summary>
+    public EffectPosition? CommitPoint { get; set; }
     public ErrorReceipt? Error { get; set; }
+}
+
+public sealed class EffectPosition
+{
+    public int Changes { get; set; }
+    public int AffectedElements { get; set; }
+    public int CreatedViews { get; set; }
 }
 
 public sealed class CaptureReceipt

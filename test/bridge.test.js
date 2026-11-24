@@ -42,7 +42,8 @@ class StubRevit {
       } else if (operation.type === "save_document") {
         if (hold) hold.commitPoint();
         response.changes.push("Saved C:\\model.rvt.");
-        response.commitPoint = hold ? true : undefined;
+        // Like the add-in: how many of this batch's effects the save kept.
+        if (hold) response.commitPoint = { changes: response.changes.length, affectedElements: response.affectedElements.length, createdViews: 0 };
       } else {
         response.status = "failed";
         response.error = { code: "unsupported_operation", message: operation.type };
@@ -447,6 +448,26 @@ raise RuntimeError("fail after the save")`;
   const receipt = await run(runtime, source);
   assert.equal(receipt.status, "partially_applied");
   assert.deepEqual(revit.levels.map(level => level.name), ["Level 1", "Kept"]);
+  assert.deepEqual(receipt.changes, ["Created level 'Kept' (100).", "Saved C:\\model.rvt."]);
+  assert.deepEqual(receipt.affectedElements, [100]);
+});
+
+test("a save inside one batch keeps only the effects before it when the held run later fails", async (t) => {
+  const revit = new StubRevit();
+  const { runtime } = await fixture(t, revit);
+  const source = `
+doc = revit.document()
+revit.execute([
+    {"type": "create_level", "arguments": {"name": "Kept", "elevation": 15}},
+    {"type": "save_document", "arguments": {}},
+    {"type": "create_level", "arguments": {"name": "Rolled back", "elevation": 25}},
+])
+raise RuntimeError("fail after the batch")`;
+  const receipt = await run(runtime, source);
+  const batches = revit.opened[0].sent.filter(message => message.type === "model.execute");
+  assert.deepEqual(batches.map(batch => batch.operations.map(operation => operation.type)), [["create_level", "save_document", "create_level"]]);
+  assert.deepEqual(revit.levels.map(level => level.name), ["Level 1", "Kept"]);
+  assert.equal(receipt.status, "partially_applied");
   assert.deepEqual(receipt.changes, ["Created level 'Kept' (100).", "Saved C:\\model.rvt."]);
   assert.deepEqual(receipt.affectedElements, [100]);
 });

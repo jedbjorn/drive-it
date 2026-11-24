@@ -210,13 +210,11 @@ public sealed partial class DocumentDispatcher
                 case "save_document":
                     current = RequireDocument(current);
                     RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
-                    MarkCommitPoint(current, response);
-                    Save(current, response);
+                    KeepThrough(current, response, state => Save(state, response));
                     break;
                 case "save_as_document":
                     current = RequireDocument(current);
-                    MarkCommitPoint(current, response);
-                    SaveAs(current, arguments, response);
+                    KeepThrough(current, response, state => SaveAs(state, arguments, response));
                     break;
                 case "close_document":
                     current = RequireDocument(current);
@@ -235,11 +233,32 @@ public sealed partial class DocumentDispatcher
         }
     }
 
-    /// <summary>In a hold, a save keeps what the run did to the document before it (spec #15, a save is a commit point).</summary>
-    private void MarkCommitPoint(DocumentState state, BrokerResponse response)
+    /// <summary>
+    /// In a hold, a save keeps what the run did to the document before it (spec #15, a save is a
+    /// commit point). The response records where in this batch that was, so effects of later
+    /// operations in the same batch stay provisional.
+    /// </summary>
+    private void KeepThrough(DocumentState state, BrokerResponse response, Action<DocumentState> save)
     {
-        if (Held?.CommitPoint(state.Document) == true)
-            response.CommitPoint = true;
+        if (Held?.CommitPoint(state.Document) != true)
+        {
+            save(state);
+            return;
+        }
+        try
+        {
+            save(state);
+        }
+        finally
+        {
+            // The group is already kept, so the position is reported even if the save then fails.
+            response.CommitPoint = new EffectPosition
+            {
+                Changes = response.Changes.Count,
+                AffectedElements = response.AffectedElements.Count,
+                CreatedViews = response.CreatedViews?.Count ?? 0,
+            };
+        }
     }
 
     private DocumentState Open(UIApplication application, DocumentOperationArguments arguments, BrokerResponse response)

@@ -389,11 +389,15 @@ export class Runtime {
 
   observeBroker(response, context) {
     // In a hold, Revit effects stay provisional until a save keeps them; a rollback removes them again.
-    if (response.commitPoint) context.uncommitted = provisional();
-    else if (context.uncommitted) {
+    // A save keeps everything before it, and this response's effects up to its position in the batch.
+    const kept = response.commitPoint;
+    if (kept) context.uncommitted = provisional();
+    if (context.uncommitted) {
       for (const key of PROVISIONAL) {
         const values = Array.isArray(response[key]) ? response[key] : [];
-        values.forEach((_, index) => context.uncommitted[key].push(context[key].length + index));
+        for (let index = kept?.[key] ?? 0; index < values.length; index += 1) {
+          context.uncommitted[key].push(context[key].length + index);
+        }
       }
     }
     append(context.changes, response.changes);
