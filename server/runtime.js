@@ -7,6 +7,7 @@ import { HistoryStore } from "./history.js";
 import { ScriptCatalog, validateArguments } from "./library.js";
 import { revitContentFolders } from "./content.js";
 import { executeBroker, openHold, readSession } from "./session.js";
+import { SettingsStore } from "./settings.js";
 import { defaultDataDir } from "./store.js";
 import { runWorker } from "./worker.js";
 import { canonicalPath, WorkspacePolicy, WorkspaceStore } from "./workspace.js";
@@ -37,6 +38,7 @@ export class Runtime {
     this.workspace = new WorkspaceStore(dataDir);
     this.decisions = new DecisionStore(dataDir);
     this.history = new HistoryStore(dataDir);
+    this.settings = new SettingsStore(dataDir);
     this.policy = new WorkspacePolicy(this.decisions);
     this.pythonPath = pythonPath;
     this.brokerExecutor = brokerExecutor;
@@ -83,6 +85,7 @@ export class Runtime {
       throw error;
     }
     if (previous && previous.status !== "pending") return previous;
+    const timeoutMs = await this.settings.runTimeoutMs(input.timeoutMs);
 
     let source = input.source;
     let savedScript = null;
