@@ -6,6 +6,7 @@ import { revitContent } from "./content.js";
 import { executeBroker, readSession, resolveProcessId, sessionError } from "./session.js";
 import { launchRootFrom, MAX_MARK_CATEGORIES, NOT_MARKED_REASONS, PIXEL_SIZE, ReferenceImages, retentionFrom } from "./capture.js";
 import { defaultDataDir } from "./store.js";
+import { DEV, installMode, STANDARD } from "./mode.js";
 import { SCRIPT_ID, summarize as summarizeRow } from "./library.js";
 
 function toolResult(value, isError) {
@@ -87,6 +88,7 @@ export function createDriveItServer(options = {}) {
   const sessionReader = options.sessionReader || readSession;
   const processResolver = options.processResolver || resolveProcessId;
   const contentReader = options.contentReader || revitContent;
+  const modeResolver = options.modeResolver || installMode;
   const server = new McpServer({ name: "drive-it", version: "0.1.0" }, { instructions: SERVER_INSTRUCTIONS });
   // Captured once at startup: later changes to the working directory or the modeling workspace
   // never move reference images.
@@ -97,7 +99,7 @@ export function createDriveItServer(options = {}) {
   });
 
   server.registerTool("get_revit_session", {
-    description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user (null until the user picks one in the Drive-It window; ask them to), and Revit's installed project templates, family template folders, and library folders. Use these real paths instead of guessing file names.",
+    description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user (null until the user picks one in the Drive-It window; ask them to), Revit's installed project templates, family template folders, and library folders, and the install mode (standard, or dev: an administrator installed Drive-It with no guardrails). Use these real paths instead of guessing file names.",
     inputSchema: { processId: processId.optional().describe("Windows process ID of Revit.exe; omit it to use the only running Revit") },
     outputSchema: {
       processId,
@@ -105,6 +107,7 @@ export function createDriveItServer(options = {}) {
       build: z.string(),
       connectionIdentity: z.string(),
       workspaceRoot: z.string().nullable(),
+      mode: z.enum([STANDARD, DEV]),
       content: z.object({
         projectTemplates: stringList,
         familyTemplateFolders: stringList,
@@ -119,7 +122,7 @@ export function createDriveItServer(options = {}) {
         if (error.code === "WORKSPACE_NOT_SELECTED") return null;
         throw error;
       });
-      const value = { ...info, workspaceRoot, content: await contentReader(info.version) };
+      const value = { ...info, workspaceRoot, mode: await modeResolver(), content: await contentReader(info.version) };
       return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: sessionError(error) }] };

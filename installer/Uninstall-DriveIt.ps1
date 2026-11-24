@@ -70,6 +70,39 @@ if ([IO.File]::Exists($mcpPath)) {
     }
 }
 
+# The install mode (spec #10): drop the launcher folder from the user's PATH and the user mode file,
+# so a later fresh install starts standard; an elevated uninstall also deletes this user's admin
+# marker. An unelevated one leaves the marker, which does nothing without the user file.
+try {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if ($null -ne $key) {
+        try {
+            $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $entries = @($current -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $app.TrimEnd('\') })
+            $next = $entries -join ';'
+            if ($next -cne $current) {
+                $key.SetValue('Path', $next, $key.GetValueKind('Path'))
+            }
+        } finally {
+            $key.Dispose()
+        }
+    }
+    $userModeFile = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DriveIt\install-mode.json'
+    if ([IO.File]::Exists($userModeFile)) {
+        Remove-Item -LiteralPath $userModeFile -Force
+    }
+    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $marker = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) "DriveIt\dev-mode\$sid.json"
+        if ([IO.File]::Exists($marker)) {
+            Remove-Item -LiteralPath $marker -Force
+        }
+    }
+} catch {
+    Write-Warning "Drive-It could not clear its install mode: $($_.Exception.Message)"
+}
+
 # The installer provisions .NET into the app directory only when no machine runtime exists.
 $privateDotnet = Join-Path $app 'runtimes\dotnet'
 if ([IO.Directory]::Exists($privateDotnet)) {

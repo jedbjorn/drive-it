@@ -255,8 +255,9 @@ jobs:
           & ./installer/verify-signatures.ps1 -Msi artifacts/DriveIt-alpha.msi -Folders stage/DriveIt @extra
           exit $LASTEXITCODE
 
-      # The same package at a lower ProductVersion: the "previous release" msi.Tests.ps1 upgrades
-      # from and the downgrade it must block. Test-only, never uploaded.
+      # The same package at a lower ProductVersion: the "previous release" msi.Tests.ps1 and
+      # msi-mode.Tests.ps1 upgrade from, and the downgrade msi.Tests.ps1 must block. Test-only,
+      # never uploaded.
       - name: Build the lower-version MSI for the upgrade test
         shell: pwsh
         run: installer/Build-DriveItMsi.ps1 -Version 0.0.0 -OutputPath "$env:RUNNER_TEMP/DriveIt-lower.msi"
@@ -264,6 +265,10 @@ jobs:
       - name: Verify MSI install, upgrade, downgrade and uninstall
         shell: pwsh
         run: test/msi.Tests.ps1 -MsiPath artifacts/DriveIt-alpha.msi -LowerMsiPath "$env:RUNNER_TEMP/DriveIt-lower.msi" -LogDirectory "$env:RUNNER_TEMP/msi-logs"
+
+      - name: Verify the install mode across an upgrade (a refused upgrade changes nothing)
+        shell: pwsh
+        run: test/msi-mode.Tests.ps1 -MsiPath artifacts/DriveIt-alpha.msi -LowerMsiPath "$env:RUNNER_TEMP/DriveIt-lower.msi" -LogDirectory "$env:RUNNER_TEMP/msi-logs"
 
       - name: Publish MSI logs
         if: failure()
