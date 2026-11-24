@@ -9,7 +9,7 @@ using DriveIt.Core.Bridge;
 namespace DriveIt.Revit.Bridge;
 
 /// <summary>A bridge call the script made wrongly or Revit refused; the script receives RevitError with it.</summary>
-public sealed class BridgeException(string code, string message) : Exception(message)
+public sealed class BridgeException(string code, string message, Exception? cause = null) : Exception(message, cause)
 {
     public string Code { get; } = code;
 }
@@ -27,7 +27,7 @@ internal sealed record OutValues(IReadOnlyList<object?> Values);
 /// Resolves a script's bridge calls by reflection, on Revit's thread, against the run's handle table.
 /// Numbers, strings, booleans and null cross by value; everything else is a handle that lasts for the run.
 /// </summary>
-internal sealed class BridgeCalls
+internal sealed class BridgeCalls(Func<bool> transactionOpen)
 {
     public const string RootNamespace = "Autodesk.Revit.DB";
     private const int DefaultChunk = 256;
@@ -35,6 +35,12 @@ internal sealed class BridgeCalls
     private static readonly Assembly RevitApi = typeof(Document).Assembly;
     private static readonly HashSet<Type> OwnedByDriveIt = [typeof(Transaction), typeof(TransactionGroup), typeof(SubTransaction)];
     private static readonly Dictionary<string, Type?> TypeCache = new(StringComparer.Ordinal);
+
+    /// <summary>The Python operators the bridge runs, by the .NET operator method Revit defines for each.</summary>
+    private static readonly Dictionary<string, string> Operators = new(StringComparer.Ordinal)
+    {
+        ["op_Addition"] = "+", ["op_Subtraction"] = "-", ["op_Multiply"] = "*", ["op_Division"] = "/", ["op_UnaryNegation"] = "-",
+    };
 
     private readonly Dictionary<long, object> objects = new();
     private readonly Dictionary<object, long> ids = new(ReferenceEqualityComparer.Instance);
@@ -74,7 +80,7 @@ internal sealed class BridgeCalls
             if (!TryConvert(call["value"], property.PropertyType, out var value, out _))
                 throw new BridgeException("invalid_argument",
                     $"{TypeName(type)}.{member} takes {TypeName(property.PropertyType)}; the value given does not convert to it.");
-            Invoke(() => property.SetValue(instance, value));
+            Invoke(type, member, () => property.SetValue(instance, value), instance, [value]);
             return null;
         }
         var field = type.GetField(member, BindingFlags.Public | flags);
@@ -83,7 +89,7 @@ internal sealed class BridgeCalls
         if (!TryConvert(call["value"], field.FieldType, out var fieldValue, out _))
             throw new BridgeException("invalid_argument",
                 $"{TypeName(type)}.{member} takes {TypeName(field.FieldType)}; the value given does not convert to it.");
-        Invoke(() => field.SetValue(instance, fieldValue));
+        Invoke(type, member, () => field.SetValue(instance, fieldValue), instance, [fieldValue]);
         return null;
     }
 
@@ -139,7 +145,7 @@ internal sealed class BridgeCalls
         {
             if (!TryConvert(key, typeof(int), out var position, out _))
                 throw new BridgeException("invalid_argument", "An array index must be an integer.");
-            return Encode(Invoke(() => array.GetValue((int)position!)));
+            return Encode(Invoke(array.GetType(), "GetValue", () => array.GetValue((int)position!)));
         }
         if (!HasMethod(target.GetType(), "get_Item", BindingFlags.Instance))
             throw new BridgeException("not_indexable", $"A {TypeName(target.GetType())} cannot be indexed.");
@@ -152,7 +158,7 @@ internal sealed class BridgeCalls
         var target = Instance(call);
         if (target is string || target is not IEnumerable enumerable)
             throw new BridgeException("not_iterable", $"A {TypeName(target.GetType())} is not a collection.");
-        var enumerator = Invoke(() => enumerable.GetEnumerator())!;
+        var enumerator = Invoke(target.GetType(), "GetEnumerator", () => enumerable.GetEnumerator())!;
         return Chunk((IEnumerator)enumerator, Count(call));
     }
 
@@ -171,7 +177,7 @@ internal sealed class BridgeCalls
         {
             Array array => array.Length,
             ICollection collection => collection.Count,
-            _ => Invoke(() => (FindProperty(target.GetType(), "Count", BindingFlags.Instance)
+            _ => Invoke(target.GetType(), "Count", () => (FindProperty(target.GetType(), "Count", BindingFlags.Instance)
                     ?? FindProperty(target.GetType(), "Size", BindingFlags.Instance)
                     ?? throw new BridgeException("no_length", $"A {TypeName(target.GetType())} has no length."))
                 .GetValue(target)) is { } count
@@ -187,13 +193,47 @@ internal sealed class BridgeCalls
             return false;
         if (target is TypeReference reference)
             return other is TypeReference otherReference && reference.Type == otherReference.Type;
-        return Invoke(() => target.Equals(other)) is true;
+        return Invoke(target.GetType(), "Equals", () => target.Equals(other)) is true;
     }
 
     public JsonNode? Text(JsonObject call) => Target(call) switch
     {
         TypeReference reference => reference.ToString(),
-        var target => (string?)Invoke(() => target.ToString()),
+        var target => (string?)Invoke(target.GetType(), "ToString", () => target.ToString()),
+    };
+
+    /// <summary>
+    /// A Python operator on Revit values (p2 - p1, p * 2, -p): Revit's own operator method that either operand's type
+    /// defines for these operands. The worker does no arithmetic of its own.
+    /// </summary>
+    public JsonNode? Operator(JsonObject call)
+    {
+        var name = call["operator"]?.GetValue<string>();
+        if (name is null || !Operators.TryGetValue(name, out var symbol))
+            throw new BridgeException("invalid_call", $"'{name}' is not an operator the bridge runs.");
+        var arguments = call["args"] as JsonArray ?? [];
+        var operands = arguments.Select(node => TryConvert(node, typeof(object), out var value, out _)
+            ? value
+            : throw new BridgeException("invalid_argument", "An operand is not a value that crosses to Revit.")).ToList();
+        var candidates = operands.Where(operand => operand is not null and not TypeReference).Select(operand => operand!.GetType()).Distinct()
+            .SelectMany(type => type.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            .Where(method => method.Name == name && method.GetParameters().Length == arguments.Count)
+            .Distinct()
+            .ToList();
+        if (SelectOverload(candidates, arguments, out var converted) is { } method)
+            return Encode(Invoke(method.DeclaringType!, name, () => method.Invoke(null, converted), null, converted));
+        throw new BridgeException("operator_not_supported",
+            $"Revit defines no {symbol} for {string.Join(" and ", operands.Select(Operand))}.");
+    }
+
+    private static string Operand(object? operand) => operand switch
+    {
+        null => "None",
+        TypeReference reference => $"the type {reference}",
+        string => "a string",
+        bool => "a boolean",
+        long or double => "a number",
+        _ => TypeName(operand.GetType()),
     };
 
     /// <summary>revit.describe inside a hold; outside one the broker answers it without Revit's thread.</summary>
@@ -211,7 +251,7 @@ internal sealed class BridgeCalls
     {
         var items = new JsonArray();
         var done = false;
-        Invoke(() =>
+        Invoke(enumerator.GetType(), "MoveNext", () =>
         {
             while (items.Count < count)
             {
@@ -300,6 +340,12 @@ internal sealed class BridgeCalls
                 return guid.ToString();
             case OutValues tuple:
                 return new JsonObject { ["$tuple"] = new JsonArray(tuple.Values.Select(Encode).ToArray()) };
+            case Type type:
+                // el.GetType(), or any member that returns a type: its names as text, never a handle to a System.Type.
+                return new JsonObject
+                {
+                    ["$type"] = new JsonObject { ["Name"] = type.Name, ["FullName"] = TypeName(type), ["Namespace"] = type.Namespace },
+                };
         }
         if (value is not TypeReference)
             Guardrails.RequireAllowed(value.GetType());
@@ -352,26 +398,50 @@ internal sealed class BridgeCalls
         }
     }
 
-    private static object? StaticMember(Type type, string member)
+    private object? StaticMember(Type type, string member)
     {
-        if (FindProperty(type, member, BindingFlags.Static) is { } property)
-            return Invoke(() => property.GetValue(null));
+        if (FindReadable(type, member, BindingFlags.Static) is { } property)
+            return Invoke(type, member, () => property.GetValue(null));
+        if (FindProperty(type, member, BindingFlags.Static) is not null)
+            throw WriteOnly(type, member);
         if (type.GetField(member, BindingFlags.Public | BindingFlags.Static) is { } field)
-            return Invoke(() => field.GetValue(null));
+            return Invoke(type, member, () => field.GetValue(null));
         if (HasMethod(type, member, BindingFlags.Static))
             throw new BridgeException("member_is_method", $"{TypeName(type)}.{member} is a method; call it.");
         throw MemberNotFound(type, member, BindingFlags.Static);
     }
 
-    private static object? InstanceMember(object target, string member)
+    private object? InstanceMember(object target, string member)
     {
         var type = target.GetType();
-        if (FindProperty(type, member, BindingFlags.Instance) is { } property)
-            return Invoke(() => property.GetValue(target));
+        if (FindReadable(type, member, BindingFlags.Instance) is { } property)
+            return Invoke(type, member, () => property.GetValue(target), target);
+        if (FindProperty(type, member, BindingFlags.Instance) is not null)
+            throw WriteOnly(type, member);
         if (type.GetField(member, BindingFlags.Public | BindingFlags.Instance) is { } field)
-            return Invoke(() => field.GetValue(target));
+            return Invoke(type, member, () => field.GetValue(target), target);
         throw MemberNotFound(type, member, BindingFlags.Instance);
     }
+
+    /// <summary>
+    /// The property a read goes through: the most derived declaration of that name with a public getter, as C# reads
+    /// wallType.Name. Revit declares some properties on a subtype only to set them (ElementType.Name,
+    /// SpatialElement.Name), and reading through that declaration threw "Property Get method was not found".
+    /// </summary>
+    private static PropertyInfo? FindReadable(Type type, string name, BindingFlags flags)
+    {
+        for (var current = type; current is not null; current = current.BaseType)
+        {
+            var declared = current.GetProperties(BindingFlags.Public | BindingFlags.DeclaredOnly | flags)
+                .FirstOrDefault(property => property.Name == name && property.GetIndexParameters().Length == 0 && property.GetMethod is { IsPublic: true });
+            if (declared is not null)
+                return declared;
+        }
+        return null;
+    }
+
+    private static BridgeException WriteOnly(Type type, string member) => new("member_write_only",
+        $"{type.Name}.{member} cannot be read: Revit's API only sets it. Read the value another way, for example a parameter with get_Parameter(...).");
 
     /// <summary>The most derived public, non-indexed property of that name (a derived type may hide a base one).</summary>
     private static PropertyInfo? FindProperty(Type type, string name, BindingFlags flags) =>
@@ -392,7 +462,7 @@ internal sealed class BridgeCalls
             throw new BridgeException("not_constructible", $"{TypeName(type)} is abstract and cannot be constructed.");
         var constructor = SelectOverload(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments, out var converted)
             ?? throw NoMatch(type, ".ctor", type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments);
-        return Invoke(() => ((ConstructorInfo)constructor).Invoke(converted))!;
+        return Invoke(type, "constructor", () => ((ConstructorInfo)constructor).Invoke(converted), null, converted)!;
     }
 
     private object? InvokeMethod(Type type, object? target, string name, JsonArray arguments, BindingFlags flags)
@@ -406,7 +476,7 @@ internal sealed class BridgeCalls
         var method = SelectOverload(candidates, arguments, out var converted)
             ?? throw NoMatch(type, name, candidates, arguments);
         Overloads.SupplyOutputs(method, converted, Output);
-        var result = Invoke(() => method.Invoke(target, converted));
+        var result = Invoke(type, name, () => method.Invoke(target, converted), target, converted);
         // Out parameters come back after the return value, as a Python tuple; a single value comes back as itself.
         return Overloads.Outputs(method, result, converted) switch
         {
@@ -421,10 +491,10 @@ internal sealed class BridgeCalls
     /// arguments (Revit fills NewFootPrintRoof's ModelCurveArray in place and refuses null), otherwise null.
     /// Nothing the script gives goes in; ref parameters stay unsupported.
     /// </summary>
-    private static object? Output(Type type) =>
+    private object? Output(Type type) =>
         type.Assembly == RevitApi && type is { IsClass: true, IsAbstract: false } && !OwnedByDriveIt.Contains(type)
             && type.GetConstructor(Type.EmptyTypes) is { } constructor
-            ? Invoke(() => constructor.Invoke(null))
+            ? Invoke(type, "constructor", () => constructor.Invoke(null))
             : null;
 
     private static bool IsOut(ParameterInfo parameter) => Overloads.IsOut(parameter);
@@ -633,8 +703,11 @@ internal sealed class BridgeCalls
         return true;
     }
 
-    /// <summary>Runs a reflected member and surfaces what Revit threw, by its own message.</summary>
-    private static object? Invoke(Func<object?> action)
+    /// <summary>
+    /// Runs a reflected member of owner and surfaces what Revit threw, by its own message, after the type and member
+    /// called (spec #16 "An API error names the member"). The target and arguments say which documents the call changes.
+    /// </summary>
+    private object? Invoke(Type owner, string member, Func<object?> action, object? target = null, object?[]? arguments = null)
     {
         try
         {
@@ -642,29 +715,54 @@ internal sealed class BridgeCalls
         }
         catch (TargetInvocationException exception) when (exception.InnerException is not null)
         {
-            throw Translate(exception.InnerException);
+            throw Translate(exception.InnerException, owner, member, target, arguments);
         }
         catch (Exception exception) when (exception is not BridgeException)
         {
-            throw Translate(exception);
+            throw Translate(exception, owner, member, target, arguments);
         }
     }
 
-    private static void Invoke(Action action) => Invoke(() =>
-    {
-        action();
-        return null;
-    });
+    private void Invoke(Type owner, string member, Action action, object? target = null, object?[]? arguments = null) =>
+        Invoke(owner, member, () =>
+        {
+            action();
+            return null;
+        }, target, arguments);
 
-    private static BridgeException Translate(Exception exception)
+    private BridgeException Translate(Exception exception, Type owner, string member, object? target, object?[]? arguments)
     {
         if (exception is BridgeException bridge)
             return bridge;
-        if (exception is Autodesk.Revit.Exceptions.ModificationOutsideTransactionException)
+        var called = $"{owner.Name}.{member}";
+        if (exception is Autodesk.Revit.Exceptions.ModificationOutsideTransactionException || ForbiddenOutsideTransaction(exception, target, arguments))
             return new BridgeException("modification_outside_transaction",
-                $"{exception.Message} Put Revit changes inside `with revit.transaction(\"name\"):`.");
-        return new BridgeException("revit_api_error", $"{exception.GetType().Name}: {exception.Message}");
+                $"{called}: {exception.Message} Put Revit changes inside `with revit.transaction(\"name\"):`.", exception);
+        return new BridgeException("revit_api_error", ApiErrors.Message(owner.Name, member, exception), exception);
     }
+
+    /// <summary>
+    /// Revit's other refusal of a change with no transaction open: an InvalidOperationException, "Modification of the
+    /// document is forbidden". It counts only when no transaction is open on the document the call changes (the
+    /// target's or an argument's); when the call names no document, when the run has no transaction open at all.
+    /// With one open, Revit forbade the change for another reason and the error stays revit_api_error.
+    /// </summary>
+    private bool ForbiddenOutsideTransaction(Exception exception, object? target, object?[]? arguments)
+    {
+        if (exception is not (InvalidOperationException or Autodesk.Revit.Exceptions.InvalidOperationException)
+            || !exception.Message.Contains("Modification of the document is forbidden", StringComparison.Ordinal))
+            return false;
+        var documents = (arguments ?? []).Prepend(target).Select(DocumentOf).OfType<Document>().ToList();
+        return documents.Count > 0 ? documents.Any(document => !document.IsModifiable) : !transactionOpen();
+    }
+
+    private static Document? DocumentOf(object? value) => value switch
+    {
+        Document document => document,
+        Element element => element.Document,
+        Parameter { Element: { } element } => element.Document,
+        _ => null,
+    };
 
     private static BridgeException MemberNotFound(Type type, string member, BindingFlags flags)
     {

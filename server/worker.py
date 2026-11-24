@@ -95,6 +95,10 @@ def _encode(value):
         return {"$path": object.__getattribute__(value, "_p_path")}
     if isinstance(value, _Option):
         return dict(value.settings)
+    if isinstance(value, _TypeName):
+        raise RevitError({"status": "failed", "error": {"code": "type_not_allowed", "message": (
+            f"{value.FullName} from GetType() is text, not a handle: Drive-It gives a script no handle to a System.Type. "
+            "Where Revit takes a type, pass the DB type, for example DB.Wall.")}})
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_encode(item) for item in value]
     raise TypeError(f"A {type(value).__name__} cannot cross to Revit; pass numbers, strings, booleans, None, lists or Revit handles.")
@@ -106,7 +110,37 @@ def _decode(value):
     if isinstance(value, dict) and "$tuple" in value:
         # A method with out parameters: its return value, then each out value.
         return tuple(_decode(item) for item in value["$tuple"])
+    if isinstance(value, dict) and "$type" in value:
+        return _TypeName(value["$type"])
     return value
+
+
+class _TypeName:
+    """What GetType() answers: a .NET type's Name, FullName and Namespace as text. Not a handle; it never reaches Revit."""
+
+    __slots__ = ("Name", "FullName", "Namespace")
+
+    def __init__(self, names):
+        self.Name = names.get("Name")
+        self.FullName = names.get("FullName")
+        self.Namespace = names.get("Namespace")
+
+    def __eq__(self, other):
+        return isinstance(other, _TypeName) and self.FullName == other.FullName
+
+    def __hash__(self):
+        return hash(self.FullName)
+
+    def __str__(self):
+        return self.FullName
+
+    def __repr__(self):
+        return f"<type {self.FullName}>"
+
+
+def _operator(name, *operands):
+    """Arithmetic on Revit values runs Revit's own operator in the add-in; the worker does none of its own."""
+    return _decode(_bridge({"op": "operator", "operator": name, "args": [_encode(operand) for operand in operands]}))
 
 
 class _Option:
@@ -194,7 +228,7 @@ class _Proxy:
     def __eq__(self, other):
         try:
             encoded = _encode(other)
-        except TypeError:
+        except (TypeError, RevitError):
             return False
         return _bridge({"op": "eq", "target": self._target(), "other": encoded})
 
@@ -206,6 +240,33 @@ class _Proxy:
 
     def __bool__(self):
         return True
+
+    def __add__(self, other):
+        return _operator("op_Addition", self, other)
+
+    def __radd__(self, other):
+        return _operator("op_Addition", other, self)
+
+    def __sub__(self, other):
+        return _operator("op_Subtraction", self, other)
+
+    def __rsub__(self, other):
+        return _operator("op_Subtraction", other, self)
+
+    def __mul__(self, other):
+        return _operator("op_Multiply", self, other)
+
+    def __rmul__(self, other):
+        return _operator("op_Multiply", other, self)
+
+    def __truediv__(self, other):
+        return _operator("op_Division", self, other)
+
+    def __rtruediv__(self, other):
+        return _operator("op_Division", other, self)
+
+    def __neg__(self):
+        return _operator("op_UnaryNegation", self)
 
 
 class _Handle(_Proxy):
