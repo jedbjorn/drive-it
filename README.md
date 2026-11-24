@@ -225,7 +225,7 @@ Revit is required to use the add-in, but not to run the Node.js tests or compile
 
 ### Windows (MSI)
 
-1. Download `DriveIt-<version>.msi` from the [latest release](https://github.com/jedbjorn/drive-it/releases/latest) and run it. It is a per-user install and needs no administrator account, and it needs Autodesk Revit 2026 on the computer. Until releases are code-signed, Windows SmartScreen may warn you first: choose **More info**, then **Run anyway**.
+1. Download `DriveIt-<version>.msi` from the [latest release](https://github.com/jedbjorn/drive-it/releases/latest) and run it. It is a per-user install and needs no administrator account, and it needs Autodesk Revit 2026 on the computer. Releases are digitally signed by **AnJ Arch-Tech LLC**, the company behind Designs/OS. To check, right-click the MSI and choose **Properties › Digital Signatures**.
 2. Start Revit 2026. Revit asks about the Drive-It add-in the first time; choose **Always Load**.
 3. Open **Drive-It** from the Start Menu, or click **Drive-It** in the **Drive-It** panel on Revit's **Add-Ins** tab, and select your workspace folder.
 4. Restart Claude, ChatGPT or Codex so it picks up the new `drive-it` MCP server. In the ChatGPT desktop app, Drive-It's tools are available in Codex and Work mode, not in plain Chat.
