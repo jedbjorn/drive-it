@@ -64,6 +64,22 @@
                 <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
                 <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+                <!--
+                    Aero2's template with its disabled trigger left out: that trigger paints a fixed white
+                    background, which shows in the dark theme while the settings drawer disables the window.
+                -->
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ListBox">
+                            <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}" Padding="1" SnapsToDevicePixels="True">
+                                <ScrollViewer Focusable="False" Padding="{TemplateBinding Padding}">
+                                    <ItemsPresenter SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                                </ScrollViewer>
+                            </Border>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
                 <Setter Property="ItemTemplate">
                     <Setter.Value>
                         <DataTemplate>
