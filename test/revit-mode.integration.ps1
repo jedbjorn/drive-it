@@ -262,6 +262,51 @@ try {
         Assert-True (@($summary.documents | Where-Object { $_.commitPoint }).Count -eq 1) "dev: the direct save was not a commit point: $($summary | ConvertTo-Json -Depth 6 -Compress)"
         Assert-True ((Level-Names $documentId) -contains $kept) "dev: the direct save did not keep the level made before it."
         $checks.Add("dev_direct_save_is_a_commit_point")
+
+        # A direct save while a script transaction is open is refused, and the run's group stays the hold's:
+        # the failed run still rolls back the level committed before the refused save.
+        $before = "Mode before refused save $runId"
+        $during = "Mode during refused save $runId"
+        Begin-Hold "save-while-open"
+        $document = (Invoke-Bridge @{ op = "document"; document = @{ uniqueId = $documentId } }).value
+        $transaction = Invoke-Bridge @{ op = "call"; target = @{ '$path' = "Autodesk.Revit.DB.Transaction" }; args = @((Handle $document), "Mode before") }
+        Assert-Status $transaction "succeeded" "dev: construct a Transaction before the refused save"
+        New-Level $transaction.value $before
+        Assert-Status (Invoke-Bridge @{ op = "call"; target = (Handle $transaction.value); member = "Commit"; args = @() }) "succeeded" "dev: Transaction.Commit before the refused save"
+        $open = Invoke-Bridge @{ op = "call"; target = @{ '$path' = "Autodesk.Revit.DB.Transaction" }; args = @((Handle $document), "Mode during") }
+        Assert-Status $open "succeeded" "dev: construct a Transaction left open over the save"
+        New-Level $open.value $during
+        $save = Invoke-Bridge @{ op = "call"; target = (Handle $document); member = "Save"; args = @() }
+        Assert-Status $save "failed" "dev: Document.Save while a script transaction is open"
+        Assert-True ((Get-ErrorCode $save) -eq "transaction_open") "dev: the save over an open script transaction was not refused as transaction_open: $(Get-ErrorCode $save)."
+        $summary = End-Hold "rollback"
+        Assert-True ($summary.outcome -eq "rolled_back") "dev: the hold ended $($summary.outcome)."
+        Assert-True (@($summary.documents | Where-Object { $_.commitPoint }).Count -eq 0) "dev: the refused save was marked a commit point: $($summary | ConvertTo-Json -Depth 6 -Compress)"
+        Assert-True (@($summary.documents | Where-Object { $_.state -eq "rolled_back" }).Count -eq 1) "dev: the document was not rolled back: $($summary | ConvertTo-Json -Depth 6 -Compress)"
+        $names = Level-Names $documentId
+        Assert-True (-not ($names -contains $before) -and -not ($names -contains $during)) "dev: the failed run kept a level across the refused save: $($names -join ', ')."
+        $checks.Add("dev_save_refused_while_a_script_transaction_is_open")
+
+        # A transaction started again after a direct save runs inside a fresh run group: kept before the save,
+        # rolled back after it.
+        $keptAgain = "Mode kept before reuse $runId"
+        $reused = "Mode reused after save $runId"
+        Begin-Hold "reuse-after-save"
+        $document = (Invoke-Bridge @{ op = "document"; document = @{ uniqueId = $documentId } }).value
+        $transaction = Invoke-Bridge @{ op = "call"; target = @{ '$path' = "Autodesk.Revit.DB.Transaction" }; args = @((Handle $document), "Mode reused") }
+        Assert-Status $transaction "succeeded" "dev: construct a Transaction to reuse"
+        New-Level $transaction.value $keptAgain
+        Assert-Status (Invoke-Bridge @{ op = "call"; target = (Handle $transaction.value); member = "Commit"; args = @() }) "succeeded" "dev: Transaction.Commit before the save"
+        Assert-Status (Invoke-Bridge @{ op = "call"; target = (Handle $document); member = "Save"; args = @() }) "succeeded" "dev: Document.Save between the two uses"
+        New-Level $transaction.value $reused
+        Assert-Status (Invoke-Bridge @{ op = "call"; target = (Handle $transaction.value); member = "Commit"; args = @() }) "succeeded" "dev: Transaction.Commit after the save"
+        $summary = End-Hold "rollback"
+        Assert-True ($summary.outcome -eq "rolled_back") "dev: the hold ended $($summary.outcome)."
+        Assert-True (@($summary.documents | Where-Object { $_.state -eq "rolled_back" -and $_.commitPoint }).Count -eq 1) "dev: the reused transaction did not run inside a rolled-back run group: $($summary | ConvertTo-Json -Depth 6 -Compress)"
+        $names = Level-Names $documentId
+        Assert-True ($names -contains $keptAgain) "dev: the direct save did not keep the level made before it."
+        Assert-True (-not ($names -contains $reused)) "dev: the failed run kept the level from the transaction reused after the save."
+        $checks.Add("dev_reused_transaction_after_save_rolls_back")
     }
 
     [ordered]@{ status = "succeeded"; mode = $mode; processId = $ProcessId; checks = @($checks) } | ConvertTo-Json -Depth 4

@@ -47,18 +47,22 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
 
     private readonly Dictionary<long, object> objects = new();
     private readonly Dictionary<object, long> ids = new(ReferenceEqualityComparer.Instance);
-    /// <summary>The Transaction, SubTransaction and TransactionGroup objects a Dev Mode script made, in the order it made them.</summary>
-    private readonly List<object> scriptTransactions = [];
+    /// <summary>The Transaction, SubTransaction and TransactionGroup objects a Dev Mode script made, and their documents, in the order it made them.</summary>
+    private readonly List<(object Owned, Document Document)> scriptTransactions = [];
     private long nextId;
 
     public int HandleCount => objects.Count;
 
     /// <summary>True while a transaction or group a Dev Mode script made is still started.</summary>
-    public bool ScriptTransactionOpen => scriptTransactions.Any(owned => Status(owned) == TransactionStatus.Started);
+    public bool ScriptTransactionOpen => scriptTransactions.Any(script => Status(script.Owned) == TransactionStatus.Started);
+
+    /// <summary>The documents on which a transaction or group a Dev Mode script made is still started.</summary>
+    public IEnumerable<Document> ScriptTransactionDocuments =>
+        scriptTransactions.Where(script => Status(script.Owned) == TransactionStatus.Started).Select(script => script.Document);
 
     public void Clear()
     {
-        foreach (var owned in scriptTransactions)
+        foreach (var (owned, _) in scriptTransactions)
             (owned as IDisposable)?.Dispose();
         scriptTransactions.Clear();
         objects.Clear();
@@ -73,7 +77,7 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
     {
         for (var index = scriptTransactions.Count - 1; index >= 0; index--)
         {
-            var owned = scriptTransactions[index];
+            var owned = scriptTransactions[index].Owned;
             try
             {
                 if (Status(owned) != TransactionStatus.Started)
@@ -92,6 +96,9 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
             }
         }
     }
+
+    private Document? ScriptTransactionDocument(object target) =>
+        scriptTransactions.FirstOrDefault(script => ReferenceEquals(script.Owned, target)).Document;
 
     private static TransactionStatus Status(object owned)
     {
@@ -527,12 +534,9 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
             throw new BridgeException("not_constructible", $"{TypeName(type)} is abstract and cannot be constructed.");
         var constructor = SelectOverload(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments, out var converted)
             ?? throw NoMatch(type, ".ctor", type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments);
-        // A Dev Mode script's transaction runs inside the run's group on its document, so a failed run still rolls it back.
-        if (owned)
-            held.BeforeTransaction(converted.OfType<Document>().First());
         var made = Invoke(type, "constructor", () => ((ConstructorInfo)constructor).Invoke(converted), null, converted)!;
         if (owned)
-            scriptTransactions.Add(made);
+            scriptTransactions.Add((made, converted.OfType<Document>().First()));
         return made;
     }
 
@@ -549,6 +553,10 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
         // Reached only in Dev Mode (standard refuses these calls): keep the run's changes before a direct save or close, as the built-in does.
         if (target is Document document && Guardrails.IsCommitPoint(type, name))
             held.CommitPoint(document);
+        // A Dev Mode script's transaction or group starts inside the run's group on its document, every time it starts
+        // (Revit lets one start again after a commit point closed that group), so a failed run still rolls it back.
+        if (name == "Start" && target is not null && ScriptTransactionDocument(target) is { } owner)
+            held.BeforeTransaction(owner);
         Overloads.SupplyOutputs(method, converted, Output);
         var result = Invoke(type, name, () => method.Invoke(target, converted), target, converted);
         // Out parameters come back after the return value, as a Python tuple; a single value comes back as itself.

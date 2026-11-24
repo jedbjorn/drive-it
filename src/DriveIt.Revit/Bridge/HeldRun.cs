@@ -519,15 +519,29 @@ internal sealed class HeldRun : IHeldDocuments
         if (transactions.Values.Any(open => SameDocument(open.Document, document)))
             throw new RequestRejectedException("transaction_open",
                 $"Leave the revit.transaction on {document.Title} before saving or closing it.");
+        // Revit can close the run's group only once every transaction inside it is finished, the script's own included.
+        if (calls.ScriptTransactionDocuments.Any(open => SameDocument(open, document)))
+            throw new RequestRejectedException("transaction_open",
+                $"Commit or roll back the script's transaction or group on {document.Title} before saving or closing it.");
         var entry = groups.FirstOrDefault(candidate => candidate.Group is not null && SameDocument(candidate.Document, document));
         if (entry is null)
             return false;
         var group = entry.Group!;
-        entry.Group = null;
+        // The group stays the hold's until Revit has kept it: a throw here leaves it for End to roll back.
         var status = group.Assimilate();
-        group.Dispose();
         if (status != TransactionStatus.Committed)
+        {
+            if (group.GetStatus() != TransactionStatus.Started)
+            {
+                entry.Group = null;
+                group.Dispose();
+                entry.State = status == TransactionStatus.RolledBack ? "rolled_back" : "commit_failed";
+                entry.Message = $"Revit returned {status} at the commit point.";
+            }
             throw new RequestRejectedException("commit_failed", $"Revit did not keep the run's changes to {document.Title} before the save ({status}).");
+        }
+        entry.Group = null;
+        group.Dispose();
         entry.CommitPoint = true;
         entry.State = "committed";
         return true;
