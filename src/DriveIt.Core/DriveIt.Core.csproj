@@ -5,7 +5,8 @@
     test/DriveIt.Core.Tests runs it on any OS. Holds the family palette data
     (Theming/UiPalette.cs, copied from splash-it) and the operator.js client: locating
     the private Node.js runtime and server/operator.js, running the CLI, and turning
-    its JSON into list labels and detail text. DriveIt.UI and both hosts (the Revit
+    its JSON into list labels and detail text. Also the API bridge's Revit-free overload
+    matching and out values (Bridge/Overloads.cs). DriveIt.UI and both hosts (the Revit
     add-in and DriveIt.Operator.exe) reference it.
   -->
 
