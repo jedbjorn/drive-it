@@ -60,10 +60,13 @@ public static class OperatorLauncher
     /// <param name="promptForMissingRoot">False keeps the folder picker closed when no root is selected (self-test).</param>
     public static OperatorWindow Create(bool promptForMissingRoot = true)
     {
-        var host = OperatorHost.ForAssemblyDirectory(AssemblyDirectory());
+        var host = InstalledHost();
         var client = new OperatorClient(new ProcessOperatorRunner(host));
         return new OperatorWindow(client, OperatorLocator.McpConfigurationPath(host), InstallMode.Current, LoadIcon(), promptForMissingRoot);
     }
+
+    /// <summary>The installed Drive-It around this assembly's folder: its operator.js, Node.js and data directory.</summary>
+    public static OperatorHost InstalledHost() => OperatorHost.ForAssemblyDirectory(AssemblyDirectory());
 
     private static string? AssemblyDirectory() => Path.GetDirectoryName(typeof(OperatorLauncher).Assembly.Location);
 

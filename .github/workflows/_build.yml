@@ -287,6 +287,16 @@ jobs:
         shell: pwsh
         run: test/msi-mode.Tests.ps1 -MsiPath artifacts/DriveIt-alpha.msi -LowerMsiPath "$env:RUNNER_TEMP/DriveIt-lower.msi" -LogDirectory "$env:RUNNER_TEMP/msi-logs"
 
+      # The Drive-It window and its settings drawer in light and dark, standard and Dev Mode (spec #23 AC-3, AC-7).
+      - name: Publish the Drive-It window screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drive-it-window-screens
+          path: ${{ runner.temp }}/msi-logs/window-screens
+          if-no-files-found: ignore
+          retention-days: 30
+
       - name: Publish MSI logs
         if: failure()
         uses: actions/upload-artifact@v4

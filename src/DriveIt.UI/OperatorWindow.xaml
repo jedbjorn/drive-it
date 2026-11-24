@@ -1,7 +1,9 @@
 <!--
-    The Drive-It operator window: the workspace root, the Script time limit, pending outside-root
-    requests (approve or deny each once), and run history. In Dev Mode (spec #10) a caution banner
-    says no guardrails apply and the outside-root requests pane is hidden: nothing waits for one.
+    The Drive-It operator window: the workspace root, pending outside-root requests (approve or deny
+    each once), and run history. In Dev Mode (spec #10) a caution banner says no guardrails apply and
+    the outside-root requests pane is hidden: nothing waits for one. The Settings button opens the
+    settings drawer (spec #23) over the window's right edge: one row per setting, today the Script
+    time limit.
     Window conventions follow splash-it src/SplashIt.UI/Settings/SettingsWindow.xaml (splash-it
     commit ad7796d): Segoe UI 12, the palette's WindowBrush/TextBrush, Theme.xaml merged per window, Panel sections, banners, and
     the Primary/Danger buttons. The behavior is the former PowerShell window's
@@ -24,6 +26,9 @@
             </ResourceDictionary.MergedDictionaries>
 
             <FontFamily x:Key="DetailsFont">Consolas, Courier New</FontFamily>
+
+            <!-- Dims the window under the settings drawer, in both themes. -->
+            <SolidColorBrush x:Key="ScrimBrush" Color="#000000" Opacity="0.4" />
 
             <!--
                 List rows: a flat template in palette colors. The Windows (Aero2) row paints a fixed
@@ -59,6 +64,22 @@
                 <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
                 <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+                <!--
+                    Aero2's template with its disabled trigger left out: that trigger paints a fixed white
+                    background, which shows in the dark theme while the settings drawer disables the window.
+                -->
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ListBox">
+                            <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}" Padding="1" SnapsToDevicePixels="True">
+                                <ScrollViewer Focusable="False" Padding="{TemplateBinding Padding}">
+                                    <ItemsPresenter SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                                </ScrollViewer>
+                            </Border>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
                 <Setter Property="ItemTemplate">
                     <Setter.Value>
                         <DataTemplate>
@@ -81,150 +102,202 @@
         </ResourceDictionary>
     </Window.Resources>
 
-    <Grid Margin="16">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition x:Name="RequestsRow" Height="*" MinHeight="170" />
-            <RowDefinition Height="1.3*" MinHeight="170" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+    <Grid>
+        <!-- The window's content; inert under the drawer while it is open. -->
+        <Grid x:Name="MainContent" Margin="16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition x:Name="RequestsRow" Height="*" MinHeight="170" />
+                <RowDefinition Height="1.3*" MinHeight="170" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
 
-        <!-- Dev Mode: shown for the whole life of the window; the mode changes only by reinstalling. -->
-        <Border x:Name="DevModePanel" Grid.Row="0" Margin="0,0,0,12" Style="{StaticResource WarningBanner}"
-                Visibility="Collapsed" AutomationProperties.Name="Dev Mode: no guardrails">
-            <StackPanel>
-                <TextBlock FontWeight="SemiBold" Text="Dev Mode: no guardrails" />
-                <TextBlock Margin="0,2,0,0" TextWrapping="Wrap"
-                           Text="Scripts run with your full Windows rights. Nothing is refused and nothing waits for your approval, so there are no outside-root requests. Use this install only on a machine you can restore." />
-            </StackPanel>
-        </Border>
+            <!-- Settings: opens the drawer. Disabled while the window is busy. -->
+            <Button x:Name="SettingsButton" Grid.Row="0" HorizontalAlignment="Right" Margin="0,0,0,8"
+                    Style="{StaticResource IconButton}" Click="OnOpenSettings"
+                    AutomationProperties.Name="Settings" AutomationProperties.AutomationId="SettingsButton"
+                    ToolTip="Settings">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock FontFamily="{StaticResource IconFont}" FontSize="14" VerticalAlignment="Center" Text="&#xE713;" />
+                    <TextBlock Margin="6,0,0,0" VerticalAlignment="Center" Text="Settings" />
+                </StackPanel>
+            </Button>
 
-        <!-- Workspace root -->
-        <Border Grid.Row="1" Style="{StaticResource Panel}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <TextBlock Grid.ColumnSpan="3" Style="{StaticResource SectionText}" Text="Workspace root" />
-                <TextBox x:Name="RootText" Grid.Row="1" AutomationProperties.Name="Workspace root" />
-                <Button x:Name="BrowseButton" Grid.Row="1" Grid.Column="1" Margin="8,0,0,0" MinWidth="96"
-                        Content="Browse…" Click="OnBrowse" />
-                <Button x:Name="SaveRootButton" Grid.Row="1" Grid.Column="2" Margin="8,0,0,0"
-                        Style="{StaticResource PrimaryButton}" Content="Save root" Click="OnSaveRoot" />
-                <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Margin="0,6,0,0" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap"
-                           Text="Scripts read and change files inside this folder without asking. A new root applies to future runs; history is kept." />
-            </Grid>
-        </Border>
+            <!-- Dev Mode: shown for the whole life of the window; the mode changes only by reinstalling. -->
+            <Border x:Name="DevModePanel" Grid.Row="1" Margin="0,0,0,12" Style="{StaticResource WarningBanner}"
+                    Visibility="Collapsed" AutomationProperties.Name="Dev Mode: no guardrails">
+                <StackPanel>
+                    <TextBlock FontWeight="SemiBold" Text="Dev Mode: no guardrails" />
+                    <TextBlock Margin="0,2,0,0" TextWrapping="Wrap"
+                               Text="Scripts run with your full Windows rights. Nothing is refused and nothing waits for your approval, so there are no outside-root requests. Use this install only on a machine you can restore." />
+                </StackPanel>
+            </Border>
 
-        <!-- Script time limit (spec #15 "Time Limit and Long Jobs"); the add-in and the server both enforce it. -->
-        <Border Grid.Row="2" Margin="0,12,0,0" Style="{StaticResource Panel}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <TextBlock Grid.ColumnSpan="4" Style="{StaticResource SectionText}" Text="Script time limit" />
-                <TextBox x:Name="TimeLimitText" Grid.Row="1" Width="72" HorizontalContentAlignment="Right"
-                         AutomationProperties.Name="Script time limit in seconds" />
-                <TextBlock Grid.Row="1" Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center" Text="seconds" />
-                <Button x:Name="SaveTimeLimitButton" Grid.Row="1" Grid.Column="3" Margin="8,0,0,0"
-                        Style="{StaticResource PrimaryButton}" Content="Save limit" Click="OnSaveTimeLimit" />
-                <TextBlock x:Name="TimeLimitHelp" Grid.Row="2" Grid.ColumnSpan="4" Margin="0,6,0,0"
-                           Style="{StaticResource MutedText}" TextWrapping="Wrap" />
-            </Grid>
-        </Border>
+            <!-- Workspace root -->
+            <Border Grid.Row="2" Style="{StaticResource Panel}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.ColumnSpan="3" Style="{StaticResource SectionText}" Text="Workspace root" />
+                    <TextBox x:Name="RootText" Grid.Row="1" AutomationProperties.Name="Workspace root" />
+                    <Button x:Name="BrowseButton" Grid.Row="1" Grid.Column="1" Margin="8,0,0,0" MinWidth="96"
+                            Content="Browse…" Click="OnBrowse" />
+                    <Button x:Name="SaveRootButton" Grid.Row="1" Grid.Column="2" Margin="8,0,0,0"
+                            Style="{StaticResource PrimaryButton}" Content="Save root" Click="OnSaveRoot" />
+                    <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Margin="0,6,0,0" Style="{StaticResource MutedText}"
+                               TextWrapping="Wrap"
+                               Text="Scripts read and change files inside this folder without asking. A new root applies to future runs; history is kept." />
+                </Grid>
+            </Border>
 
-        <!-- Errors from the last action; cleared by the next one that succeeds. -->
-        <Border x:Name="ErrorPanel" Grid.Row="3" Margin="0,10,0,0" Style="{StaticResource ErrorBanner}"
-                Visibility="Collapsed">
-            <TextBlock x:Name="ErrorText" Style="{StaticResource ErrorText}" />
-        </Border>
+            <!-- Errors from the last action; cleared by the next one that succeeds. Drawer actions show theirs in the drawer. -->
+            <Border x:Name="ErrorPanel" Grid.Row="3" Margin="0,10,0,0" Style="{StaticResource ErrorBanner}"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="ErrorText" Style="{StaticResource ErrorText}" />
+            </Border>
 
-        <!-- Outside-root requests -->
-        <Border x:Name="RequestsPanel" Grid.Row="4" Margin="0,12,0,0" Style="{StaticResource Panel}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="320" />
-                    <ColumnDefinition Width="12" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
+            <!-- Outside-root requests -->
+            <Border x:Name="RequestsPanel" Grid.Row="4" Margin="0,12,0,0" Style="{StaticResource Panel}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="320" />
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.ColumnSpan="3" Style="{StaticResource SectionText}" Text="Outside-root requests" />
+                    <ListBox x:Name="RequestList" Grid.Row="1" Style="{StaticResource OperatorList}"
+                             AutomationProperties.Name="Outside-root requests"
+                             SelectionChanged="OnRequestSelected" />
+                    <TextBlock x:Name="NoRequestsText" Grid.Row="1" Margin="10,8" Style="{StaticResource MutedText}"
+                               TextWrapping="Wrap" IsHitTestVisible="False"
+                               Text="No requests are waiting. When a script asks to work outside the root, it appears here." />
+                    <TextBox x:Name="RequestDetails" Grid.Row="1" Grid.Column="2" Style="{StaticResource DetailsBox}"
+                             AutomationProperties.Name="Request details" />
+                    <DockPanel Grid.Row="2" Grid.Column="2" Margin="0,10,0,0" LastChildFill="False">
+                        <Button x:Name="ApproveButton" DockPanel.Dock="Left" Style="{StaticResource PrimaryButton}"
+                                Content="Approve this request" Click="OnApprove"
+                                ToolTip="Allow this request once. The script retries it with the same idempotency key." />
+                        <Button x:Name="DenyButton" DockPanel.Dock="Left" Margin="8,0,0,0" Style="{StaticResource DangerButton}"
+                                Content="Deny this request" Click="OnDeny" />
+                        <Button x:Name="RefreshButton" DockPanel.Dock="Right" MinWidth="96"
+                                Content="Refresh" Click="OnRefresh" />
+                    </DockPanel>
+                </Grid>
+            </Border>
+
+            <!-- Run history -->
+            <Border Grid.Row="5" Margin="0,12,0,0" Style="{StaticResource Panel}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="320" />
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.ColumnSpan="3" Style="{StaticResource SectionText}" Text="Run history" />
+                    <ListBox x:Name="HistoryList" Grid.Row="1" Style="{StaticResource OperatorList}"
+                             AutomationProperties.Name="Run history"
+                             SelectionChanged="OnHistorySelected">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel AutomationProperties.Name="{Binding Label}">
+                                    <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" />
+                                    <TextBlock Text="{Binding Meta}" Style="{StaticResource MutedText}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock x:Name="NoHistoryText" Grid.Row="1" Margin="10,8" Style="{StaticResource MutedText}"
+                               TextWrapping="Wrap" IsHitTestVisible="False"
+                               Text="No runs yet." />
+                    <TextBox x:Name="HistoryDetails" Grid.Row="1" Grid.Column="2" Style="{StaticResource DetailsBox}"
+                             AutomationProperties.Name="Run details" />
+                </Grid>
+            </Border>
+
+            <TextBlock x:Name="McpText" Grid.Row="6" Margin="2,10,0,0" Style="{StaticResource MutedText}" />
+        </Grid>
+
+        <!-- The dimmed rest of the window while the drawer is open; a click here closes the drawer. -->
+        <Border x:Name="DrawerScrim" Background="{StaticResource ScrimBrush}" Visibility="Collapsed"
+                MouseLeftButtonDown="OnScrimClicked" AutomationProperties.AutomationId="SettingsScrim" />
+
+        <!-- The settings drawer (spec #23): the window's right edge, full height, over the content. -->
+        <Border x:Name="Drawer" HorizontalAlignment="Right" Width="380" Visibility="Collapsed"
+                Background="{StaticResource WindowBrush}" BorderBrush="{StaticResource StrongBorderBrush}"
+                BorderThickness="1,0,0,0" Focusable="True" FocusVisualStyle="{x:Null}"
+                KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.ControlTabNavigation="Cycle"
+                KeyboardNavigation.DirectionalNavigation="Cycle"
+                AutomationProperties.Name="Settings" AutomationProperties.AutomationId="SettingsDrawer">
+            <Grid Margin="16">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
-                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
-                <TextBlock Grid.ColumnSpan="3" Style="{StaticResource SectionText}" Text="Outside-root requests" />
-                <ListBox x:Name="RequestList" Grid.Row="1" Style="{StaticResource OperatorList}"
-                         AutomationProperties.Name="Outside-root requests"
-                         SelectionChanged="OnRequestSelected" />
-                <TextBlock x:Name="NoRequestsText" Grid.Row="1" Margin="10,8" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap" IsHitTestVisible="False"
-                           Text="No requests are waiting. When a script asks to work outside the root, it appears here." />
-                <TextBox x:Name="RequestDetails" Grid.Row="1" Grid.Column="2" Style="{StaticResource DetailsBox}"
-                         AutomationProperties.Name="Request details" />
-                <DockPanel Grid.Row="2" Grid.Column="2" Margin="0,10,0,0" LastChildFill="False">
-                    <Button x:Name="ApproveButton" DockPanel.Dock="Left" Style="{StaticResource PrimaryButton}"
-                            Content="Approve this request" Click="OnApprove"
-                            ToolTip="Allow this request once. The script retries it with the same idempotency key." />
-                    <Button x:Name="DenyButton" DockPanel.Dock="Left" Margin="8,0,0,0" Style="{StaticResource DangerButton}"
-                            Content="Deny this request" Click="OnDeny" />
-                    <Button x:Name="RefreshButton" DockPanel.Dock="Right" MinWidth="96"
-                            Content="Refresh" Click="OnRefresh" />
+                <DockPanel Margin="0,0,0,12" LastChildFill="True">
+                    <Button x:Name="CloseSettingsButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                            Click="OnCloseSettings" AutomationProperties.Name="Close settings" ToolTip="Close">
+                        <TextBlock FontFamily="{StaticResource IconFont}" FontSize="12" Text="&#xE711;" />
+                    </Button>
+                    <TextBlock Style="{StaticResource HeadingText}" VerticalAlignment="Center" Text="Settings" />
                 </DockPanel>
+
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                              Focusable="False">
+                    <!-- One panel per setting: a further setting is one more panel here, with its own error line. -->
+                    <StackPanel x:Name="SettingsRows">
+
+                        <!-- Script time limit (spec #15 "Time Limit and Long Jobs"); the add-in and the server both enforce it. -->
+                        <Border x:Name="TimeLimitRow" Style="{StaticResource Panel}" Margin="0,0,0,12">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.ColumnSpan="4" Style="{StaticResource SectionText}" Text="Script time limit" />
+                                <TextBox x:Name="TimeLimitText" Grid.Row="1" Width="72" HorizontalContentAlignment="Right"
+                                         AutomationProperties.Name="Script time limit in seconds" />
+                                <TextBlock Grid.Row="1" Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center" Text="seconds" />
+                                <Button x:Name="SaveTimeLimitButton" Grid.Row="1" Grid.Column="3" Margin="8,0,0,0"
+                                        Style="{StaticResource PrimaryButton}" Content="Save limit" Click="OnSaveTimeLimit" />
+                                <TextBlock x:Name="TimeLimitError" Grid.Row="2" Grid.ColumnSpan="4" Margin="0,6,0,0"
+                                           Style="{StaticResource ErrorText}" Visibility="Collapsed"
+                                           AutomationProperties.Name="Script time limit error" />
+                                <TextBlock x:Name="TimeLimitHelp" Grid.Row="3" Grid.ColumnSpan="4" Margin="0,6,0,0"
+                                           Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+                            </Grid>
+                        </Border>
+
+                    </StackPanel>
+                </ScrollViewer>
             </Grid>
         </Border>
-
-        <!-- Run history -->
-        <Border Grid.Row="5" Margin="0,12,0,0" Style="{StaticResource Panel}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="320" />
-                    <ColumnDefinition Width="12" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
-                <TextBlock Grid.ColumnSpan="3" Style="{StaticResource SectionText}" Text="Run history" />
-                <ListBox x:Name="HistoryList" Grid.Row="1" Style="{StaticResource OperatorList}"
-                         AutomationProperties.Name="Run history"
-                         SelectionChanged="OnHistorySelected">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <StackPanel AutomationProperties.Name="{Binding Label}">
-                                <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" />
-                                <TextBlock Text="{Binding Meta}" Style="{StaticResource MutedText}" />
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
-                <TextBlock x:Name="NoHistoryText" Grid.Row="1" Margin="10,8" Style="{StaticResource MutedText}"
-                           TextWrapping="Wrap" IsHitTestVisible="False"
-                           Text="No runs yet." />
-                <TextBox x:Name="HistoryDetails" Grid.Row="1" Grid.Column="2" Style="{StaticResource DetailsBox}"
-                         AutomationProperties.Name="Run details" />
-            </Grid>
-        </Border>
-
-        <TextBlock x:Name="McpText" Grid.Row="6" Margin="2,10,0,0" Style="{StaticResource MutedText}" />
     </Grid>
 </Window>

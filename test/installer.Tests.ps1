@@ -96,6 +96,20 @@ foreach ($window in @($selfTest.windows)) {
     Assert-InstallerTest ($window.scriptTimeLimitSeconds -eq 120) "The operator window did not show the default script time limit: [$($window.scriptTimeLimitSeconds)]."
 }
 
+# Spec #23 AC-2 and AC-6: the settings drawer saves and re-reads the limit, against a throwaway data
+# directory so the install's own settings are untouched.
+$drawerData = Join-Path $FixtureDirectory 'drawer-data'
+[IO.Directory]::CreateDirectory($drawerData) | Out-Null
+$env:DRIVE_IT_DATA_DIR = $drawerData
+try {
+    Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $FixtureDirectory 'operator-self-test-drawer.json') -DrawerWrites | Out-Null
+} finally {
+    $env:DRIVE_IT_DATA_DIR = $InstallRoot
+}
+$drawerSettings = Get-Content -LiteralPath (Join-Path $drawerData 'settings.json') -Raw | ConvertFrom-Json
+Assert-InstallerTest ($drawerSettings.scriptTimeLimitSeconds -eq 90) "The drawer self-test left settings.json at [$($drawerSettings.scriptTimeLimitSeconds)], not the 90 operator.js set last."
+Assert-InstallerTest ((Get-DriveItWorkspace).root -eq $workspace) 'The drawer self-test changed the install''s selected root.'
+
 & $installer -SourcePath $package -InstallRoot $InstallRoot -McpConfigPath $mcpPath -NoLaunch | Out-Null
 Assert-InstallerTest ((Get-DriveItWorkspace).root -eq $workspace) 'An idempotent retry changed the selected root.'
 Assert-InstallerTest ((Get-AddinHash) -eq $addinHash) 'An idempotent retry changed the add-in registration.'
