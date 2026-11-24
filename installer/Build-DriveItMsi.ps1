@@ -39,13 +39,19 @@ if (-not $match.Success -or [int64]$match.Groups[1].Value -gt 255 -or [int64]$ma
     throw "MSI ProductVersion '$Version' is not a numeric major.minor.patch within 255.255.65535."
 }
 
-# The MSI runs Stop-DriveItProcesses.ps1 before InstallValidate, when the install folder may still
-# hold an older version without it, so the script travels inside the MSI as an encoded command.
-$stopLines = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Stop-DriveItProcesses.ps1') |
-    Where-Object { $_.Trim() -and -not $_.TrimStart().StartsWith('#') }
-$stopCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($stopLines -join "`n")))
+# The MSI runs Stop-DriveItProcesses.ps1 and Test-DriveItModeGate.ps1 before InstallValidate, when
+# the install folder may still hold an older version without them, so they travel inside the MSI
+# as encoded commands.
+function ConvertTo-EncodedScript([string]$Name) {
+    $lines = Get-Content -LiteralPath (Join-Path $PSScriptRoot $Name) |
+        Where-Object { $_.Trim() -and -not $_.TrimStart().StartsWith('#') }
+    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($lines -join "`n")))
+}
+$stopCommand = ConvertTo-EncodedScript 'Stop-DriveItProcesses.ps1'
+$modeCheckCommand = ConvertTo-EncodedScript 'Test-DriveItModeGate.ps1'
 
 & $wix build (Join-Path $PSScriptRoot 'DriveIt.wxs') -arch x64 -ext WixToolset.Util.wixext `
-    -bindpath "pkg=$package" -d "Version=$Version" -d "StopCommand=$stopCommand" -o $OutputPath
+    -bindpath "pkg=$package" -d "Version=$Version" -d "StopCommand=$stopCommand" `
+    -d "ModeCheckCommand=$modeCheckCommand" -o $OutputPath
 
 [ordered]@{ msi = [IO.Path]::GetFullPath($OutputPath); version = $Version; wix = $wixVersion } | ConvertTo-Json

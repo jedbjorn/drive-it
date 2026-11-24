@@ -9,15 +9,16 @@ param(
 )
 
 # Install mode across a version upgrade (spec #10 "Mode Selection", AC-3): a refused upgrade
-# leaves the existing install unchanged. RegisterDriveIt refuses after RemoveExistingProducts has
-# removed the old version, so only MajorUpgrade's afterInstallInitialize schedule, which rolls
-# that removal back, keeps it. Run elevated (the CI runner), on a clean user:
+# leaves the existing install unchanged. The removal of an older version (RemoveExistingProducts)
+# commits on its own, so the refusal must come first: CheckDriveItMode, before InstallValidate.
+# Run elevated (the CI runner), on a clean user:
 #   - the lower version installs in Dev Mode;
-#   - this MSI over it with an invalid DRIVEIT_MODE fails, and the lower version, its app files,
-#     add-in, mcp.json, user mode file and admin marker are exactly as before;
+#   - this MSI over it with an invalid DRIVEIT_MODE fails in CheckDriveItMode, never reaches
+#     RemoveExistingProducts, and the lower version, its app files, add-in, mcp.json, user mode
+#     file and admin marker are exactly as before;
 #   - this MSI over it with no mode upgrades and keeps Dev Mode; /x removes it.
 # The unelevated refusals (recorded dev, DRIVEIT_MODE=dev) need a limited token, which the
-# runner cannot give msiexec; they fail through the same RegisterDriveIt path and are proven live.
+# runner cannot give msiexec; the same action refuses them, proven live on W10C.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -108,13 +109,13 @@ try {
     Assert-ModeTest ((Get-ResolvedMode) -eq 'dev') 'The lower version did not resolve Dev Mode.'
     $before = Get-InstallState
 
-    # Refused upgrade: case-sensitive, so 'Dev' is invalid. It fails inside RegisterDriveIt,
-    # after RemoveExistingProducts.
+    # Refused upgrade: case-sensitive, so 'Dev' is invalid.
     $code = Invoke-Msiexec -Operation '/i' -Package $msi -Log 'mode-upgrade-invalid.log' -Property @('DRIVEIT_MODE=Dev')
     Assert-ModeTest ($code -ne 0 -and $code -ne 3010 -and $code -ne 1641) "The upgrade with DRIVEIT_MODE=Dev was expected to fail, but exited $code."
     $log = Get-Content -LiteralPath (Join-Path $LogDirectory 'mode-upgrade-invalid.log') -Raw
     Assert-ModeTest ($log.Contains("must be 'standard' or 'dev', not 'Dev'")) 'The refused upgrade did not fail on the invalid mode.'
-    Assert-ModeTest ($log -match 'Action start [^\r\n]*: RemoveExistingProducts\.') 'The refused upgrade did not run RemoveExistingProducts, so it proves nothing about the old version.'
+    Assert-ModeTest ($log -match 'Action start [^\r\n]*: CheckDriveItMode\.') 'The refused upgrade did not run CheckDriveItMode.'
+    Assert-ModeTest ($log -notmatch 'Action start [^\r\n]*: (RemoveExistingProducts|InstallValidate)\.') 'The refused upgrade reached InstallValidate or RemoveExistingProducts.'
     $after = Get-InstallState
     $changed = @(Compare-Object -ReferenceObject $before -DifferenceObject $after | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" })
     Assert-ModeTest ($changed.Count -eq 0) ("The refused upgrade changed the existing install:`n" + (($changed | Select-Object -First 20) -join "`n"))
@@ -122,6 +123,8 @@ try {
 
     # Elevated upgrade with no mode keeps the recorded Dev Mode.
     Assert-ModeTest ((Invoke-Msiexec -Operation '/i' -Package $msi -Log 'mode-upgrade-dev.log') -eq 0) 'The elevated upgrade of a Dev Mode install failed.'
+    $log = Get-Content -LiteralPath (Join-Path $LogDirectory 'mode-upgrade-dev.log') -Raw
+    Assert-ModeTest ($log -match 'Drive-It mode check: dev \(recorded\),[^\r\n]*elevated administrator True') 'CheckDriveItMode did not read the recorded Dev Mode from the installed version.'
     $upgraded = Get-RelatedProduct
     Assert-ModeTest ($upgraded.Count -eq 1 -and $upgraded[0] -ne $lower[0]) "The upgrade did not replace the lower version: $($upgraded -join '; ')."
     Assert-ModeTest ((Get-ResolvedMode) -eq 'dev' -and [IO.File]::Exists($marker)) 'The elevated upgrade did not keep Dev Mode.'

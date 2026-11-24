@@ -14,8 +14,7 @@
     - C2: UpgradeCode is 6561188A-BD8D-43A9-B116-BA0894F8001B; Manufacturer is Designs/OS;
     - C3: the Upgrade table holds exactly the two MajorUpgrade rows: WIX_UPGRADE_DETECTED removes
       every version up to and including this one, WIX_DOWNGRADE_DETECTED only detects newer ones;
-      RemoveExistingProducts runs after InstallInitialize and before InstallFiles (inside the
-      install transaction, as RST.msi: a failed upgrade rolls the removal back), and
+      RemoveExistingProducts runs between InstallValidate and InstallInitialize, and
       REINSTALLMODE is 'amus' so a file whose version went down is still installed;
     - ProductName is exactly 'Drive-It' (= ARP DisplayName = RST registry name);
     - ProductVersion is 3-part numeric and equals the numeric a.b.c of -Version (for a full
@@ -172,12 +171,12 @@ $execSeq = @{}
 foreach ($r in (Query 'SELECT `Action`, `Sequence` FROM `InstallExecuteSequence`' 2)) { $execSeq[$r[0]] = [int]$r[1] }
 $rep = $execSeq['RemoveExistingProducts']
 $stop = $execSeq['StopDriveItProcesses']
-Write-Host ("InstallExecuteSequence: StopDriveItProcesses {0}, InstallValidate {1}, InstallInitialize {2}, RemoveExistingProducts {3}, InstallFiles {4}" -f `
-  $stop, $execSeq['InstallValidate'], $execSeq['InstallInitialize'], $rep, $execSeq['InstallFiles'])
+Write-Host ("InstallExecuteSequence: StopDriveItProcesses {0}, InstallValidate {1}, RemoveExistingProducts {2}, InstallInitialize {3}" -f `
+  $stop, $execSeq['InstallValidate'], $rep, $execSeq['InstallInitialize'])
 if ($null -eq $rep) {
   $problems += 'RemoveExistingProducts is not in InstallExecuteSequence'
-} elseif (-not ($execSeq['InstallInitialize'] -lt $rep -and $rep -lt $execSeq['InstallFiles'])) {
-  $problems += "RemoveExistingProducts ($rep) is not between InstallInitialize and InstallFiles, where a failed upgrade rolls it back"
+} elseif (-not ($execSeq['InstallValidate'] -lt $rep -and $rep -lt $execSeq['InstallInitialize'])) {
+  $problems += "RemoveExistingProducts ($rep) is not between InstallValidate and InstallInitialize"
 }
 if ($props['REINSTALLMODE'] -ne 'amus') {
   $problems += "REINSTALLMODE is '$($props['REINSTALLMODE'])', expected 'amus' (an upgrade over a higher file version would drop that file)"

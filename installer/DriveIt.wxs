@@ -24,13 +24,9 @@
            UpgradeCode="6561188A-BD8D-43A9-B116-BA0894F8001B" Scope="perUser" Language="1033">
     <SummaryInformation Description="Drive-It: MCP server and add-in for Autodesk Revit 2026" />
 
-    <!-- The old version is removed before anything new is installed, inside this install's
-         transaction (afterInstallInitialize), so a failed upgrade rolls the removal back and the
-         previous install stays whole. The default (afterInstallValidate) commits the removal on
-         its own first: a refused upgrade (RegisterDriveIt's Dev Mode gate, an invalid
-         DRIVEIT_MODE) then left Drive-It uninstalled with its registrations pointing at deleted
-         files. A newer installed version is never downgraded (C3). -->
-    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes"
+    <!-- Default schedule (afterInstallValidate): the old version is removed before anything
+         new is installed. A newer installed version is never downgraded (C3). -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <!-- Lay down every file whatever version is on disk. Files are costed while the old version
          is still installed, so a DLL whose file version went down (alpha.1/alpha.2 shipped
@@ -94,7 +90,8 @@
          node.exe an MCP client keeps running, its python.exe worker, DriveIt.Operator.exe)
          before InstallValidate, so neither the removal of the old version
          (RemoveExistingProducts) nor this install's file operations meet a file in use.
-         Immediate, because it must run before InstallValidate checks for files in use. The script cannot come from the install folder: on
+         Immediate, because RemoveExistingProducts runs before InstallInitialize where no
+         deferred action can precede it. The script cannot come from the install folder: on
          an upgrade that folder still holds the previous version, which may not have it. So
          Build-DriveItMsi.ps1 embeds installer/Stop-DriveItProcesses.ps1 as an encoded
          command. It runs after FindRelatedProducts and LaunchConditions, so a blocked
@@ -109,13 +106,26 @@
 
     <!-- The install mode (spec #10 "Mode Selection"), on the command line only, never in a UI:
          msiexec /i DriveIt.msi DRIVEIT_MODE=dev from an elevated administrator prompt. Not set,
-         Install-DriveIt.ps1 keeps the recorded mode (upgrade, repair) or installs standard; it
-         validates the value and holds the elevated-administrator gate, where the deferred
-         action's token is observable. A refusal on an upgrade rolls back the old version's
-         removal (MajorUpgrade above), so the existing install is unchanged. Secure: a public property reaches the execute sequence.
-         -Mode is passed only when the property is set (powershell.exe -File drops an empty "").
-         RST's command lines never pass it, so RST installs are standard. -->
+         the recorded mode is kept (upgrade, repair), else the install is standard. Secure: a
+         public property reaches the execute sequence. RST's command lines never pass it, so RST
+         installs are standard.
+         CheckDriveItMode refuses an invalid value, and dev (named, or recorded by the installed
+         version) without an elevated administrator token. It runs before InstallValidate, so a
+         refusal comes before RemoveExistingProducts and an existing install stays unchanged: the
+         removal of an older version is committed on its own (afterInstallValidate), and a
+         rollback after it cannot restore a per-user product's registration from a standard
+         token. Immediate, so it sees the caller's token; embedded, as StopDriveItProcesses, from
+         installer/Test-DriveItModeGate.ps1, given DRIVEIT_MODE as $Mode. WixQuietExec64 has its
+         own command property, so the two never share one. The formatter resolves [DRIVEIT_MODE]
+         and the [\[] [\]] escapes when the action runs; base64 holds no brackets. Return="check":
+         a refusal fails the install (1603) with the message in the log.
+         Install-DriveIt.ps1 (RegisterDriveIt) makes the same checks again; -Mode is passed only
+         when the property is set (powershell.exe -File drops an empty ""). -->
     <Property Id="DRIVEIT_MODE" Secure="yes" />
+    <Property Id="WixQuietExec64CmdLine"
+              Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command &quot;$Mode = '[DRIVEIT_MODE]'; Invoke-Expression ([\[]Text.Encoding[\]]::Unicode.GetString([\[]Convert[\]]::FromBase64String('$(ModeCheckCommand)')))&quot;" />
+    <CustomAction Id="CheckDriveItMode" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec64"
+                  Execute="immediate" Return="check" />
     <SetProperty Id="DriveItModeArgument" Sequence="execute" After="CostFinalize" Condition="DRIVEIT_MODE"
                  Value=" -Mode &quot;[DRIVEIT_MODE]&quot;" />
 
@@ -131,6 +141,7 @@
                   Execute="deferred" Impersonate="yes" Return="ignore" />
 
     <InstallExecuteSequence>
+      <Custom Action="CheckDriveItMode" Before="StopDriveItProcesses" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom Action="StopDriveItProcesses" Before="InstallValidate" />
       <Custom Action="RegisterDriveIt" After="InstallFiles" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom Action="UnregisterDriveIt" Before="RemoveFiles"
