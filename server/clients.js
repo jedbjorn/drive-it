@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { parse as parseToml } from "smol-toml";
 
 export const SERVER_NAME = "drive-it";
@@ -49,12 +50,13 @@ export async function clientTargets({ userProfile, appData, codexHome }) {
   // A fresh ChatGPT desktop (Store) install may not have created ~/.codex yet; its package
   // is enough to create the file it will read.
   const chatgpt = await packages(appData, /^OpenAI\.(Codex|ChatGPT)/i);
-  const desktop = directory => ({ client: "claude-desktop", detect: directory, file: path.join(directory, "claude_desktop_config.json"), format: "json" });
+  // name: what the person reads in the Detect agents results; app: the one to restart.
+  const desktop = (directory, name) => ({ client: "claude-desktop", name, app: "Claude Desktop", detect: directory, file: path.join(directory, "claude_desktop_config.json"), format: "json" });
   return [
-    desktop(path.join(appData, "Claude")),
-    ...(await storeClaudeDirectories(appData)).map(desktop),
-    { client: "claude-code", detect: path.join(userProfile, ".claude.json"), file: path.join(userProfile, ".claude.json"), format: "json", stdioType: true, cli: path.join(userProfile, ".local", "bin", "claude.exe") },
-    { client: "codex", detect: codex, alsoDetect: chatgpt, file: path.join(codex, "config.toml"), format: "toml" },
+    desktop(path.join(appData, "Claude"), "Claude Desktop"),
+    ...(await storeClaudeDirectories(appData)).map(directory => desktop(directory, "Claude Desktop (Microsoft Store)")),
+    { client: "claude-code", name: "Claude Code", app: "Claude Code", detect: path.join(userProfile, ".claude.json"), file: path.join(userProfile, ".claude.json"), format: "json", stdioType: true, cli: path.join(userProfile, ".local", "bin", "claude.exe") },
+    { client: "codex", name: "ChatGPT and Codex", app: "ChatGPT or Codex", detect: codex, alsoDetect: chatgpt, file: path.join(codex, "config.toml"), format: "toml" },
   ];
 }
 
@@ -149,8 +151,30 @@ export function removeFromCodexConfig(text) {
   return stripped.found ? stripped.text : null;
 }
 
+function jsonEntry(entry, stdioType) {
+  return stdioType ? { type: "stdio", ...entry } : { ...entry };
+}
+
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("the configuration is not valid JSON; leaving it unchanged");
+  }
+}
+
+// True when the file already holds exactly this entry, so registering again writes nothing.
+function hasJsonEntry(text, entry, stdioType) {
+  if (!text || !text.trim()) return false;
+  try {
+    return isDeepStrictEqual(JSON.parse(text)?.mcpServers?.[SERVER_NAME], jsonEntry(entry, stdioType));
+  } catch {
+    return false;
+  }
+}
+
 export function addToJsonConfig(text, entry, { stdioType = false } = {}) {
-  const configuration = text && text.trim() ? JSON.parse(text) : {};
+  const configuration = text && text.trim() ? parseJson(text) : {};
   if (configuration === null || typeof configuration !== "object" || Array.isArray(configuration)) {
     throw new Error("the configuration is not a JSON object; leaving it unchanged");
   }
@@ -159,7 +183,7 @@ export function addToJsonConfig(text, entry, { stdioType = false } = {}) {
   }
   configuration.mcpServers = {
     ...configuration.mcpServers,
-    [SERVER_NAME]: stdioType ? { type: "stdio", ...entry } : { ...entry },
+    [SERVER_NAME]: jsonEntry(entry, stdioType),
   };
   return `${JSON.stringify(configuration, null, 2)}\n`;
 }
@@ -191,31 +215,77 @@ async function detected(target) {
   return (target.alsoDetect || []).length > 0;
 }
 
+// Each row: registered (changed says whether the file was written), not_found, or skipped with
+// the reason. A client that already holds exactly this entry is registered with changed false and
+// its file is not touched.
 export async function registerClients(entry, locations, { runner = run } = {}) {
   const results = [];
   for (const target of await clientTargets(locations)) {
+    const row = { client: target.client, name: target.name, app: target.app };
     if (!(await detected(target))) {
-      results.push({ client: target.client, status: "not_found" });
+      results.push({ ...row, status: "not_found" });
       continue;
     }
     try {
+      const original = await readText(target.file);
+      if (target.format === "json" && hasJsonEntry(original, entry, target.stdioType)) {
+        results.push({ ...row, status: "registered", changed: false, file: target.file });
+        continue;
+      }
       const viaCli = await registerWithClaudeCli(target, entry, runner);
       if (viaCli) {
-        results.push(viaCli);
+        results.push({ ...row, ...viaCli, changed: true });
         continue;
       }
       await mkdir(path.dirname(target.file), { recursive: true });
-      const original = await readText(target.file);
       const next = target.format === "toml"
         ? addToCodexConfig(original, entry)
         : addToJsonConfig(original, entry, target);
-      if (next !== original) await writeAtomic(target.file, next, original);
-      results.push({ client: target.client, status: "registered", file: target.file });
+      const changed = next !== original;
+      if (changed) await writeAtomic(target.file, next, original);
+      results.push({ ...row, status: "registered", changed, file: target.file });
     } catch (error) {
-      results.push({ client: target.client, status: "skipped", file: target.file, reason: error.message });
+      results.push({ ...row, status: "skipped", file: target.file, reason: error.message });
     }
   }
   return results;
+}
+
+// The installer's mcp.json drive-it entry: Detect agents registers exactly what install did,
+// Dev Mode included (the mode only adds a commented example beside mcpServers).
+export async function readServerEntry(mcpConfigPath) {
+  let text;
+  try {
+    text = await readFile(mcpConfigPath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") throw new Error(`${mcpConfigPath} does not exist; reinstall Drive-It`);
+    throw error;
+  }
+  let entry;
+  try {
+    entry = JSON.parse(text).mcpServers?.[SERVER_NAME];
+  } catch {
+    throw new Error(`${mcpConfigPath} is not valid JSON; reinstall Drive-It`);
+  }
+  if (!entry) throw new Error(`${mcpConfigPath} has no ${SERVER_NAME} server entry`);
+  return entry;
+}
+
+// Detect agents (spec #23): the installer's registration on demand, one plain line per client.
+export async function detectClients(mcpConfigPath, locations, options) {
+  const rows = await registerClients(await readServerEntry(mcpConfigPath), locations, options);
+  return rows.map(row => {
+    const status = row.status === "not_found" ? "not_installed"
+      : row.status === "skipped" ? "failed"
+        : row.changed ? "added" : "already";
+    const message = {
+      added: `${row.name}: Added. Restart ${row.app} to use Drive-It.`,
+      already: `${row.name}: Already set up.`,
+      not_installed: `${row.name}: Not installed.`,
+      failed: `${row.name}: Could not add. ${row.reason}`,
+    }[status];
+    return { client: row.client, name: row.name, status, message, ...(row.file ? { file: row.file } : {}), ...(row.reason ? { reason: row.reason } : {}) };
+  });
 }
 
 export async function unregisterClients(locations, { runner = run } = {}) {
@@ -249,9 +319,7 @@ async function main(argv) {
   const [action, ...rest] = argv;
   if (action === "register" && rest.length >= 3) {
     const [mcpConfigPath, userProfile, appData, codexHome] = rest;
-    const entry = JSON.parse(await readFile(mcpConfigPath, "utf8")).mcpServers?.[SERVER_NAME];
-    if (!entry) throw new Error(`${mcpConfigPath} has no ${SERVER_NAME} server entry`);
-    return registerClients(entry, { userProfile, appData, codexHome });
+    return registerClients(await readServerEntry(mcpConfigPath), { userProfile, appData, codexHome });
   }
   if (action === "unregister" && rest.length >= 2) {
     const [userProfile, appData, codexHome] = rest;

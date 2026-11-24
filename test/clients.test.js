@@ -10,6 +10,7 @@ import { addToCodexConfig, registerClients, unregisterClients } from "../server/
 
 const execute = promisify(execFile);
 const cli = fileURLToPath(new URL("../server/clients.js", import.meta.url));
+const operator = fileURLToPath(new URL("../server/operator.js", import.meta.url));
 const entry = {
   command: String.raw`C:\Users\a b\AppData\Local\DriveIt\app\runtimes\node\node.exe`,
   args: [String.raw`C:\Users\a b\AppData\Local\DriveIt\app\server\index.js`],
@@ -61,8 +62,9 @@ test("only detected clients are registered and their other settings survive inst
   assert.ok(codexText.includes("startup_timeout_sec = 30"));
   assert.ok(!/[^\r]\n/.test(codexText), "the file's CRLF line endings are kept");
 
+  assert.ok(registered.every(r => r.changed === true), "a first registration writes each file");
   const again = await registerClients(entry, locations);
-  assert.ok(again.every(r => r.status === "registered"));
+  assert.ok(again.every(r => r.status === "registered" && r.changed === false), "a second registration writes nothing");
   assert.equal(await readFile(codex, "utf8"), codexText, "re-registration is idempotent");
 
   const removed = await unregisterClients(locations);
@@ -179,4 +181,177 @@ test("the Microsoft Store Claude Desktop is registered in its Claude-Data config
   const removed = await unregisterClients(locations);
   assert.deepEqual(removed.filter(row => row.status === "removed").map(row => row.file), [config]);
   assert.equal("drive-it" in JSON.parse(await readFile(config, "utf8")).mcpServers, false);
+});
+
+// Detect agents (spec #23 AC-9): node server/operator.js clients detect, against temporary profiles.
+
+async function detectProfile(t) {
+  const locations = await profile(t);
+  const mcp = path.join(locations.base, "mcp.json");
+  await writeFile(mcp, JSON.stringify({ mcpServers: { "drive-it": entry }, "//drive-it-ssh": { command: "ssh" } }));
+  const data = path.join(locations.base, "data");
+  await mkdir(data);
+  const detect = async (...args) => {
+    const env = { ...process.env, USERPROFILE: locations.userProfile, APPDATA: locations.appData, DRIVE_IT_DATA_DIR: data };
+    delete env.CODEX_HOME;
+    delete env.DRIVE_IT_MCP_CONFIG_PATH;
+    const { stdout } = await execute(process.execPath, [operator, "clients", "detect", ...args], { env });
+    return JSON.parse(stdout);
+  };
+  return { ...locations, mcp, data, detect: () => detect(mcp), detectWith: detect };
+}
+
+const statuses = rows => rows.map(row => [row.name, row.status]);
+const nothing = [["Claude Desktop", "not_installed"], ["Claude Code", "not_installed"], ["ChatGPT and Codex", "not_installed"]];
+
+test("Detect agents with no client installed reports each Not installed and writes nothing", async (t) => {
+  const p = await detectProfile(t);
+  const rows = await p.detect();
+  assert.deepEqual(statuses(rows), nothing);
+  assert.deepEqual(rows.map(row => row.message), ["Claude Desktop: Not installed.", "Claude Code: Not installed.", "ChatGPT and Codex: Not installed."]);
+  assert.equal(await exists(path.join(p.appData, "Claude")), false);
+  assert.equal(await exists(path.join(p.userProfile, ".claude.json")), false);
+  assert.equal(await exists(path.join(p.userProfile, ".codex")), false);
+});
+
+test("Detect agents adds each client installed alone, says to restart it, and changes nothing the second time", async (t) => {
+  const cases = [
+    {
+      name: "Claude Desktop",
+      setup: async p => { await mkdir(path.join(p.appData, "Claude")); },
+      file: p => path.join(p.appData, "Claude", "claude_desktop_config.json"),
+      restart: "Restart Claude Desktop",
+    },
+    {
+      name: "Claude Desktop (Microsoft Store)",
+      setup: async p => { await mkdir(path.join(p.base, "Local", "Claude-Data", "claude_pzs8sxrjxfjjc"), { recursive: true }); },
+      file: p => path.join(p.base, "Local", "Claude-Data", "claude_pzs8sxrjxfjjc", "claude_desktop_config.json"),
+      restart: "Restart Claude Desktop",
+    },
+    {
+      name: "Claude Code",
+      setup: async p => { await writeFile(path.join(p.userProfile, ".claude.json"), '{"numStartups":2}'); },
+      file: p => path.join(p.userProfile, ".claude.json"),
+      restart: "Restart Claude Code",
+    },
+    {
+      name: "ChatGPT and Codex",
+      setup: async p => { await mkdir(path.join(p.userProfile, ".codex")); },
+      file: p => path.join(p.userProfile, ".codex", "config.toml"),
+      restart: "Restart ChatGPT or Codex",
+    },
+    {
+      name: "ChatGPT and Codex",
+      label: "ChatGPT desktop (Store package only)",
+      setup: async p => { await mkdir(path.join(p.base, "Local", "Packages", "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0"), { recursive: true }); },
+      file: p => path.join(p.userProfile, ".codex", "config.toml"),
+      restart: "Restart ChatGPT or Codex",
+    },
+  ];
+  for (const item of cases) {
+    await t.test(item.label ?? item.name, async (t) => {
+      const p = await detectProfile(t);
+      await item.setup(p);
+      const first = await p.detect();
+      const added = first.filter(row => row.status === "added");
+      assert.deepEqual(added.map(row => row.name), [item.name]);
+      assert.ok(added[0].message.startsWith(`${item.name}: Added. ${item.restart}`), added[0].message);
+      assert.ok(first.filter(row => row.status !== "added").every(row => row.status === "not_installed"));
+      const file = item.file(p);
+      const written = await readFile(file, "utf8");
+      assert.match(written, /drive-it/);
+
+      const second = await p.detect();
+      assert.equal(second.find(row => row.name === item.name).status, "already");
+      assert.equal(second.find(row => row.name === item.name).message, `${item.name}: Already set up.`);
+      assert.equal(await readFile(file, "utf8"), written, "the second run changes nothing");
+    });
+  }
+});
+
+test("Detect agents leaves an entry already present byte for byte, with no backup", async (t) => {
+  const p = await detectProfile(t);
+  const desktop = path.join(p.appData, "Claude", "claude_desktop_config.json");
+  await mkdir(path.dirname(desktop));
+  // Not in Drive-It's own formatting: an unchanged entry must not reformat the file.
+  const original = JSON.stringify({ preferences: { a: 1 }, mcpServers: { "drive-it": entry, other: { command: "x" } } });
+  await writeFile(desktop, original);
+  const rows = await p.detect();
+  assert.equal(rows.find(row => row.client === "claude-desktop").status, "already");
+  assert.equal(await readFile(desktop, "utf8"), original);
+  assert.equal(await exists(`${desktop}.drive-it.bak`), false);
+});
+
+test("Detect agents keeps every other setting, backs the file up, and adds only the entry", async (t) => {
+  const p = await detectProfile(t);
+  const desktop = path.join(p.appData, "Claude", "claude_desktop_config.json");
+  await mkdir(path.dirname(desktop));
+  const desktopOriginal = { preferences: { sidebarMode: "a" }, mcpServers: { other: { command: "x", args: ["y"] } } };
+  await writeFile(desktop, JSON.stringify(desktopOriginal));
+  const codex = path.join(p.userProfile, ".codex", "config.toml");
+  await mkdir(path.dirname(codex));
+  const codexOriginal = 'model = "gpt-5"\r\n\r\n[mcp_servers.other]\r\ncommand = "other.exe"\r\n';
+  await writeFile(codex, codexOriginal);
+
+  const rows = await p.detect();
+  assert.deepEqual(statuses(rows), [["Claude Desktop", "added"], ["Claude Code", "not_installed"], ["ChatGPT and Codex", "added"]]);
+
+  const written = JSON.parse(await readFile(desktop, "utf8"));
+  assert.deepEqual(written.mcpServers["drive-it"], entry);
+  delete written.mcpServers["drive-it"];
+  assert.deepEqual(written, desktopOriginal);
+  assert.equal(await readFile(`${desktop}.drive-it.bak`, "utf8"), JSON.stringify(desktopOriginal));
+
+  const codexText = await readFile(codex, "utf8");
+  assert.ok(codexText.startsWith(codexOriginal), "Codex settings before the entry are kept byte for byte");
+  assert.equal(await readFile(`${codex}.drive-it.bak`, "utf8"), codexOriginal);
+});
+
+test("Detect agents reports a malformed config.toml as Could not add and leaves it untouched", async (t) => {
+  const p = await detectProfile(t);
+  const codex = path.join(p.userProfile, ".codex", "config.toml");
+  await mkdir(path.dirname(codex));
+  const broken = 'model = "gpt-5\n[mcp_servers.other\n';
+  await writeFile(codex, broken);
+  const row = (await p.detect()).find(r => r.client === "codex");
+  assert.equal(row.status, "failed");
+  assert.match(row.message, /^ChatGPT and Codex: Could not add\. config\.toml is not valid TOML .*leaving it unchanged$/);
+  assert.equal(await readFile(codex, "utf8"), broken);
+  assert.equal(await exists(`${codex}.drive-it.bak`), false);
+});
+
+test("Detect agents reports a hand-written drive-it entry as Could not add and leaves it untouched", async (t) => {
+  const p = await detectProfile(t);
+  const codex = path.join(p.userProfile, ".codex", "config.toml");
+  await mkdir(path.dirname(codex));
+  const mine = '[mcp_servers.drive-it]\ncommand = "mine.exe"\n';
+  await writeFile(codex, mine);
+  const rows = await p.detect();
+  const row = rows.find(r => r.client === "codex");
+  assert.equal(row.status, "failed");
+  assert.match(row.message, /outside the Drive It block; leaving it unchanged$/);
+  assert.equal(await readFile(codex, "utf8"), mine);
+  assert.equal(await exists(`${codex}.drive-it.bak`), false);
+  assert.deepEqual(statuses(await p.detect()), statuses(rows), "a second run reports the same and still changes nothing");
+  assert.equal(await readFile(codex, "utf8"), mine);
+});
+
+test("Detect agents reads mcp.json from DRIVE_IT_MCP_CONFIG_PATH or the data directory, and fails without one", async (t) => {
+  const p = await detectProfile(t);
+  await mkdir(path.join(p.appData, "Claude"));
+  const env = { ...process.env, USERPROFILE: p.userProfile, APPDATA: p.appData, DRIVE_IT_DATA_DIR: p.data };
+  delete env.CODEX_HOME;
+  delete env.DRIVE_IT_MCP_CONFIG_PATH;
+  const run = extra => execute(process.execPath, [operator, "clients", "detect"], { env: { ...env, ...extra } });
+
+  await assert.rejects(run({}), error => error.code === 1 && /mcp\.json does not exist; reinstall Drive-It/.test(error.stderr));
+  assert.equal(await exists(path.join(p.appData, "Claude", "claude_desktop_config.json")), false);
+
+  const { stdout } = await run({ DRIVE_IT_MCP_CONFIG_PATH: p.mcp });
+  assert.equal(JSON.parse(stdout)[0].status, "added");
+  const written = JSON.parse(await readFile(path.join(p.appData, "Claude", "claude_desktop_config.json"), "utf8"));
+  assert.deepEqual(written, { mcpServers: { "drive-it": entry } }, "the entry is mcp.json's, without the Dev Mode example");
+
+  await writeFile(path.join(p.data, "mcp.json"), JSON.stringify({ mcpServers: {} }));
+  await assert.rejects(run({}), error => error.code === 1 && /has no drive-it server entry/.test(error.stderr));
 });
