@@ -373,6 +373,9 @@ public sealed partial class DocumentDispatcher
                         var familyType = state.Document.FamilyManager.NewType(change.Name!);
                         response.Changes.Add($"Created family type '{familyType.Name}'.");
                         break;
+                    case "set_parameters":
+                        ApplyParameterChanges(state.Document, change, response);
+                        break;
                     case "delete_element":
                         var deleted = state.Document.Delete(new ElementId(change.ElementId!.Value));
                         foreach (var id in deleted)
@@ -530,6 +533,9 @@ public sealed partial class DocumentDispatcher
                         throw new RequestRejectedException("invalid_model_change", "create_family_type requires a name.");
                     if (document.FamilyManager.Types.Cast<FamilyType>().Any(type => type.Name == change.Name))
                         throw new RequestRejectedException("duplicate_family_type", $"Family type '{change.Name}' already exists.");
+                    break;
+                case "set_parameters":
+                    ValidateParameterChanges(document, change);
                     break;
                 case "delete_element":
                     if (change.ElementId is null or <= 0 || document.GetElement(new ElementId(change.ElementId.Value)) is null)
@@ -696,7 +702,8 @@ public sealed partial class DocumentDispatcher
         response.Changes.Count > 0 || response.AffectedFiles.Count > 0 || response.AffectedElements.Count > 0;
 
     private static bool IsModelChange(string type) =>
-        type is "create_level" or "create_wall" or "create_3d_view" or "create_family_type" or "delete_element";
+        type is "create_level" or "create_wall" or "create_3d_view" or "create_family_type" or "delete_element"
+            or "set_parameters";
 
     private static T Deserialize<T>(System.Text.Json.Nodes.JsonObject? arguments)
     {

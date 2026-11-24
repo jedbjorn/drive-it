@@ -66,6 +66,23 @@ public sealed class ModelChangeRequest
     public double? Height { get; set; }
     public PointRequest? Start { get; set; }
     public PointRequest? End { get; set; }
+    /// <summary>set_parameters entries, validated together before the model transaction.</summary>
+    public List<ParameterChange>? Changes { get; set; }
+}
+
+/// <summary>
+/// One set_parameters entry: exactly one of Parameter (name), BuiltIn, or Guid, and exactly one of
+/// Value (raw, in Revit internal units) or ValueString (document display units).
+/// </summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class ParameterChange
+{
+    public long? ElementId { get; set; }
+    public string? Parameter { get; set; }
+    public string? BuiltIn { get; set; }
+    public string? Guid { get; set; }
+    public JsonNode? Value { get; set; }
+    public string? ValueString { get; set; }
 }
 
 /// <summary>Arguments of get_active_document and get_selection, which take none.</summary>
