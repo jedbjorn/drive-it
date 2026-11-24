@@ -26,6 +26,11 @@ function scopePath(operation, target, root, pathImpl) {
   return actsOnParent && pathImpl.relative(root, target) === "" ? pathImpl.dirname(target) : target;
 }
 
+/** True when an operation on a canonical path needs an outside-root decision (deleting the root itself does). */
+export function isOutsideRoot(operation, target, root, pathImpl = path) {
+  return !pathIsInside(root, scopePath(operation, target, root, pathImpl), pathImpl);
+}
+
 export class WorkspaceStore {
   constructor(dataDir) {
     this.file = path.join(dataDir, "workspace.json");
@@ -68,8 +73,7 @@ export class WorkspacePolicy {
     }
     // Dev Mode (spec #10): every path is allowed and no decision row is written.
     if (await this.modeResolver() === DEV) return { status: "allowed", requests: canonical, root };
-    const outside = canonical.filter(request => request.paths.some(target =>
-      !pathIsInside(root, scopePath(request.operation, target, root, path), path)));
+    const outside = canonical.filter(request => request.paths.some(target => isOutsideRoot(request.operation, target, root)));
     if (outside.length === 0) return { status: "allowed", requests: canonical, root };
 
     // Reading Revit's own installed content needs no decision; it rides along as a grant.

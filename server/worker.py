@@ -37,6 +37,8 @@ _checks = []
 # Dev Mode (spec #10): set from Node's run message, which carries the mode Node's one resolver
 # (server/mode.js) decided. A script cannot set it. In dev every worker guardrail is off.
 _dev_mode = False
+# A dry run (spec #13): set from Node's run message. Workspace file writes are skipped and reported to Node.
+_dry_run = False
 
 # Modules generated scripts may import; everything else is denied. Pure-Python
 # modules are low risk to add. A native module must first be checked for file,
@@ -67,6 +69,20 @@ SCRIPT_FILENAME = "<drive-it-script>"
 
 PolicyPending = RuntimeError
 PolicyDenied = PermissionError
+
+
+class DryRunRefused(RuntimeError):
+    """An operation with a lasting effect that a dry run cannot skip or roll back (spec #13)."""
+
+    code = "not_allowed_in_dry_run"
+
+
+class _SkippedText(io.StringIO):
+    """What open() returns for a write a dry run skips: the script writes into it, and nothing reaches the disk."""
+
+
+class _SkippedBinary(io.BytesIO):
+    """The binary form of _SkippedText."""
 
 
 class RevitError(Exception):
@@ -397,7 +413,7 @@ def _request(method, params):
     return response["result"]
 
 
-def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied, enforce=True):
+def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied, enforce=True, dry_run=False):
     original_open = builtins.open
     original_import = builtins.__import__
     original_os_open = os.open
@@ -420,6 +436,10 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
     getframe = sys._getframe
     abspath = os.path.abspath
     fspath = os.fspath
+    fsdecode = os.fsdecode
+    skipped_text = _SkippedText
+    skipped_binary = _SkippedBinary
+    refused = DryRunRefused
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
     is_instance = builtins.isinstance
     string_type = str
@@ -468,6 +488,50 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
 
     def record(operation, paths):
         return request("effect.record", {"operation": operation, "paths": paths})
+
+    # A dry run's workspace writes (spec #13 D4): reported to Node and skipped, with no outside-root decision.
+    def skip(operation, paths):
+        absolute = [fsdecode(abspath(fspath(item))) for item in paths]
+        request("file.skip", {"operation": operation, "paths": absolute})
+        return absolute
+
+    def writes(mode):
+        return is_instance(mode, string_type) and any(flag in string_value(mode) for flag in "wax+")
+
+    def dry_open(file, mode="r", buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
+        if is_instance(file, int) or not writes(mode):
+            return original_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+        (target,) = skip("write_file", [file])
+        sink = skipped_binary() if "b" in string_value(mode) else skipped_text()
+        sink.name = target
+        sink.mode = string_value(mode)
+        return sink
+
+    def dry_os_open(path, flags, mode=0o777, *args, **kwargs):
+        if integer_and(flags, write_flags):
+            raise refused("os.open for writing cannot be skipped in a dry run; write with open() or files.write, which a dry run skips and lists.")
+        return original_os_open(path, flags, mode, *args, **kwargs)
+
+    def dry_rename(source, destination):
+        return skip("rename_file", [source, destination])[1]
+
+    def dry_move(source, destination):
+        return skip("move_file", [source, destination])[1]
+
+    def dry_delete(path):
+        return skip("delete_file", [path])[0]
+
+    def dry_remove(path, *args, **kwargs):
+        skip("delete_file", [path])
+
+    def dry_rmdir(path, *args, **kwargs):
+        skip("delete_directory", [path])
+
+    def dry_mkdir(path, mode=0o777, *args, **kwargs):
+        skip("write_directory", [path])
+
+    def dry_makedirs(name, mode=0o777, exist_ok=False):
+        skip("write_directory", [name])
 
     def profile(frame, event, arg):
         if event == "c_call":
@@ -594,6 +658,9 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
                 paths = [arguments[0]]
         if not operation:
             return
+        # A write that reached the hook in a dry run came by a route the dry run cannot skip: refuse it.
+        if dry_run and not operation.startswith("read_"):
+            raise refused(f"This {operation} cannot be skipped in a dry run; write with open(), os or files.*, which a dry run skips and lists.")
         result = authorize(operation, paths)
         if call_stack:
             call_stack[-1][1] = (operation, result["requests"][0]["paths"])
@@ -607,7 +674,7 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
         sys.settrace(trace)
         sys.settrace = protected_trace
         sys.gettrace = protected_gettrace
-    return {
+    policy = {
         "open": original_open,
         "os_open": original_os_open,
         "import": importing,
@@ -618,6 +685,23 @@ def _create_file_policy(protocol_in, protocol_out, policy_pending, policy_denied
         "rename_os": original_functions["rename"],
         "replace": file_replace,
     }
+    if dry_run:
+        # files.* use these in both modes; standard mode also installs them over open() and os (Dev Mode does not).
+        policy.update({
+            "open": dry_open,
+            "os_open": dry_os_open,
+            "rename": dry_rename,
+            "move": dry_move,
+            "delete": dry_delete,
+            "rename_os": lambda source, destination, *args, **kwargs: skip("rename_file", [source, destination]) and None,
+            "replace": lambda source, destination, *args, **kwargs: skip("move_file", [source, destination]) and None,
+            "remove": dry_remove,
+            "unlink": dry_remove,
+            "rmdir": dry_rmdir,
+            "mkdir": dry_mkdir,
+            "makedirs": dry_makedirs,
+        })
+    return policy
 
 
 def _disabled(*args, **kwargs):
@@ -867,9 +951,10 @@ def _restrict(policy):
 
 
 def main():
-    global _dev_mode
+    global _dev_mode, _dry_run
     run = json.loads(_protocol_in.readline())
     _dev_mode = run.get("mode") == "dev"
+    _dry_run = run.get("dryRun") is True
     policy_pending = RuntimeError
     policy_denied = PermissionError
     if _dev_mode:
@@ -882,7 +967,7 @@ def main():
             except ImportError:
                 pass
         sys.meta_path.insert(0, RuntimeRestriction())
-    policy = _create_file_policy(_protocol_in, _protocol_out, policy_pending, policy_denied, enforce=not _dev_mode)
+    policy = _create_file_policy(_protocol_in, _protocol_out, policy_pending, policy_denied, enforce=not _dev_mode, dry_run=_dry_run)
     if not _dev_mode:
         _restrict(policy)
 
@@ -905,6 +990,10 @@ def main():
         }
         exec(compile(run["source"], "<drive-it-script>", "exec"), scope)
         receipt["result"] = _serializable(scope.get("result"))
+    # Before policy_pending: a DryRunRefused is a RuntimeError too.
+    except DryRunRefused as error:
+        receipt["status"] = "failed"
+        receipt["error"] = {"code": DryRunRefused.code, "message": str(error)}
     except policy_pending as error:
         if hasattr(error, "detail"):
             receipt["status"] = "pending"

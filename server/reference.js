@@ -36,6 +36,19 @@ export const BRIDGE_GUIDANCE = [
   BUILT_IN_DOCUMENTS_GUIDANCE,
 ];
 
+// Spec #13 "Model Guidance": when and how to use a dry run, in the server instructions and get_api_reference.
+export const DRY_RUN_GUIDANCE = [
+  "execute_script takes dryRun: true, or {views, createdViews, pixelSize}. Revit applies the script's changes for real, Drive-It returns the receipt, checks, warnings, actions and images of up to 4 views (the ids in views, then with createdViews the views the script created), then rolls every change back. Nothing is kept or saved.",
+  "Use a dry run when the change deletes or overwrites existing work, touches many elements, or the request could reasonably be read more than one way. Skip it for small additive changes; end-of-round checks and captures still cover those.",
+  "Name the views that show the affected area. Put the user's stated intent into checks so the result answers it directly.",
+  "Read actions: per document, what would be created, modified (each changed value before and after, and moved) and deleted. Compare them, the checks and the images with the request before running for real. If they do not match, revise and dry-run again.",
+  "Run for real with the same source and arguments, without dryRun. Ids from the dry run do not exist afterwards; read them again.",
+  "In a dry run, save, save-as, close and delete-file fail with not_allowed_in_dry_run, and so does any direct save, close, synchronize, reload latest or print call through the bridge. Opening and creating documents and edit_family work. File writes are skipped and listed in skippedFileWrites.",
+  "Report a dry run to the person in a sentence or two, not the full list.",
+  "On a workshared model, tell the person that Drive-It released their borrowed elements after the dry run, including unmodified ones they had borrowed before, or, if the release failed, that they should Relinquish All Mine in Revit.",
+  "A dry run does not replace end-of-round QA after the real run.",
+];
+
 function withDocument(args) {
   return { ...args, document: "Optional: {path, uniqueId} target; defaults to the selected document" };
 }
