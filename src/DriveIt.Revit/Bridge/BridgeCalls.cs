@@ -545,6 +545,8 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
         // First, so a dry run names the same refusal in both install modes.
         if (held.DryRun)
             Guardrails.RequireNotLasting(type, name);
+        if (held.RequireDryRun is not null)
+            Guardrails.RequireNotLastingWhileRequired(type, name, target);
         Guardrails.RequireCallable(type, name);
         var candidates = type.GetMethods(BindingFlags.Public | flags)
             .Where(method => method.Name == name && !method.ContainsGenericParameters)

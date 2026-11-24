@@ -95,6 +95,23 @@ internal static class Guardrails
                 $"{BridgeCalls.TypeName(type)}.{member} has a lasting effect a rollback cannot undo, so it is not allowed in a dry run. Leave it out of the dry run; the real run, or the person in Revit, can do it.");
     }
 
+    /// <summary>
+    /// While Require dry run is on, in both modes and every run, the same members are refused (spec #13 D13), except
+    /// closing a document with no unsaved changes, which loses nothing (D10).
+    /// </summary>
+    public static void RequireNotLastingWhileRequired(Type type, string member, object? target)
+    {
+        var lasting = IsCommitPoint(type, member)
+            || LeaveTheSession.Any(entry => entry.Member == member && entry.Owner.IsAssignableFrom(type));
+        if (!lasting || (member == "Close" && target is Document { IsModified: false }))
+            return;
+        var reason = member == "Close" && target is Document document
+            ? $"{document.Title} has unsaved changes and closing it would discard them"
+            : "it has a lasting effect a rollback cannot undo";
+        throw new BridgeException(RequireDryRunRules.NotAllowed,
+            RequireDryRunRules.NotAllowedMessage($"{BridgeCalls.TypeName(type)}.{member}", reason));
+    }
+
     /// <summary>True for a Document call that needs the run's group on that document closed first (Dev Mode only).</summary>
     public static bool IsCommitPoint(Type type, string member) => typeof(Document).IsAssignableFrom(type) && CommitPoints.Contains(member);
 

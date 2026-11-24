@@ -131,6 +131,9 @@ public sealed partial class DocumentDispatcher
             if (Held?.DryRun == true && DryRunRefusals.TryGetValue(operation.Type, out var lasting))
                 throw new RequestRejectedException("not_allowed_in_dry_run",
                     $"{operation.Type} is not allowed in a dry run: {lasting}, which a rollback cannot undo. Leave it out of the dry run; the real run, or the person in Revit, can do it.");
+            // Refused before anything in the batch runs, in every run while Require dry run is on (spec #13 D3, D9).
+            if (request.RequireDryRun is not null && RequireDryRunRules.Lasting.TryGetValue(operation.Type, out var reason))
+                throw new RequestRejectedException(RequireDryRunRules.NotAllowed, RequireDryRunRules.NotAllowedMessage(operation.Type, reason));
             item.DocumentArguments = Deserialize<DocumentOperationArguments>(operation.Arguments);
             switch (operation.Type)
             {
@@ -201,7 +204,7 @@ public sealed partial class DocumentDispatcher
                     index++;
                 }
                 index--;
-                var applied = ApplyModelBatch(current, changes, response);
+                var applied = ApplyModelBatch(current, changes, response, request.RequireDryRun);
                 MarkEffects(response, current);
                 if (!applied)
                     return;
@@ -235,6 +238,9 @@ public sealed partial class DocumentDispatcher
                     break;
                 case "close_document":
                     current = RequireDocument(current);
+                    // D10: with Require dry run on, only a document with no unsaved changes may be closed.
+                    if (request.RequireDryRun is not null && current.Document.IsModified)
+                        throw RequireDryRunRules.CloseChanged(operation.Type, current.Document);
                     KeepThrough(current, response, state => Close(state, response));
                     current = null;
                     break;
@@ -407,7 +413,8 @@ public sealed partial class DocumentDispatcher
         response.AffectedFiles.Add(path);
     }
 
-    private bool ApplyModelBatch(DocumentState state, List<ModelChangeRequest> changes, BrokerResponse response)
+    private bool ApplyModelBatch(DocumentState state, List<ModelChangeRequest> changes, BrokerResponse response,
+        RequireDryRunGuard? requireDryRun)
     {
         ValidateChanges(state.Document, changes);
         response.Document = Snapshot(state);
@@ -415,7 +422,11 @@ public sealed partial class DocumentDispatcher
         var initialElementCount = response.AffectedElements.Count;
         var initialViewCount = response.CreatedViews?.Count ?? 0;
 
-        Held?.BeforeTransaction(state.Document);
+        // Outside a hold each batch is its own transaction, so an unrehearsed run is refused before every one (spec #13).
+        if (Held is not null)
+            Held.BeforeTransaction(state.Document);
+        else if (requireDryRun is { Rehearsed: false })
+            throw RequireDryRunRules.Unrehearsed(state.Document);
         using var transaction = new Transaction(state.Document, "Drive It model batch");
         transaction.Start();
         try
