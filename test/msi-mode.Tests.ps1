@@ -14,7 +14,7 @@ param(
 # Run elevated (the CI runner), on a clean user:
 #   - the lower version installs in Dev Mode;
 #   - this MSI over it with an invalid DRIVEIT_MODE fails in CheckDriveItMode, never reaches
-#     RemoveExistingProducts, and the lower version, its app files, add-in, mcp.json, user mode
+#     RemoveExistingProducts, and the lower version, its app files, add-ins, mcp.json, user mode
 #     file and admin marker are exactly as before;
 #   - this MSI over it with no mode upgrades and keeps Dev Mode, and the Drive-It window shows the
 #     Dev Mode banner with no outside-root requests pane (msi.Tests.ps1 holds the standard case);
@@ -30,7 +30,8 @@ $upgradeCode = '{6561188A-BD8D-43A9-B116-BA0894F8001B}'
 [IO.Directory]::CreateDirectory($LogDirectory) | Out-Null
 $install = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DriveIt'
 $app = Join-Path $install 'app'
-$addinPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026\DriveIt.addin'
+# Every supported year's add-in manifest (spec #22; installer/Build-DriveItPackage.ps1).
+$addinPaths = @('2026', '2027' | ForEach-Object { Join-Path ([Environment]::GetFolderPath('ApplicationData')) "Autodesk\Revit\Addins\$_\DriveIt.addin" })
 $userModeFile = Join-Path $install 'install-mode.json'
 $operatorExe = Join-Path $app 'operator\DriveIt.Operator.exe'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -82,7 +83,7 @@ function Get-InstallState {
     foreach ($file in @(Get-ChildItem -LiteralPath $app -Recurse -File -Force | Sort-Object FullName)) {
         $lines += "app $($file.FullName.Substring($app.Length)) $((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash)"
     }
-    foreach ($file in @($addinPath, (Join-Path $install 'mcp.json'), $userModeFile, $marker)) {
+    foreach ($file in @($addinPaths + @((Join-Path $install 'mcp.json'), $userModeFile, $marker))) {
         $hash = if ([IO.File]::Exists($file)) { (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash } else { 'missing' }
         $lines += "file $file $hash"
     }
@@ -98,7 +99,8 @@ function Get-ResolvedMode {
 
 Assert-ModeTest ((Get-RelatedProduct).Count -eq 0) 'Drive-It is already installed on this computer; the test needs a clean user.'
 
-# A first install needs Revit 2026: the same stub as msi.Tests.ps1 when it is absent.
+# A first install needs a supported Revit; Revit 2026 is enough: the same stub as msi.Tests.ps1
+# when it is absent.
 $revitDirectory = Join-Path $env:ProgramW6432 'Autodesk\Revit 2026'
 $revitExe = Join-Path $revitDirectory 'Revit.exe'
 $stubRevit = -not [IO.File]::Exists($revitExe)

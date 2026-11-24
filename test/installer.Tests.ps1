@@ -58,22 +58,34 @@ Assert-InstallerTest ($configuration.mcpServers.'drive-it'.args[0] -eq $server) 
 Assert-InstallerTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_DATA_DIR -eq $InstallRoot) 'MCP configuration has the wrong data directory.'
 Assert-InstallerTest ($configuration.mcpServers.'drive-it'.env.DRIVE_IT_PYTHON -eq $python) 'MCP configuration does not use private Python.'
 
-$addinPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026\DriveIt.addin'
-Assert-InstallerTest ([IO.File]::Exists($addinPath)) 'The current-user Revit add-in was not registered.'
+# Every supported year's add-in is registered whatever Revit is installed (spec #22 "Install Rule").
+$revitYears = @('2026', '2027')
+function Get-AddinPath([string]$Year) {
+    return Join-Path ([Environment]::GetFolderPath('ApplicationData')) "Autodesk\Revit\Addins\$Year\DriveIt.addin"
+}
+function Get-AddinHash {
+    return (@($revitYears | ForEach-Object { (Get-FileHash -LiteralPath (Get-AddinPath $_) -Algorithm SHA256).Hash }) -join ',')
+}
+foreach ($year in $revitYears) {
+    Assert-InstallerTest ([IO.File]::Exists((Get-AddinPath $year))) "The current-user Revit $year add-in was not registered."
+}
 $shortcutPath = Join-Path $programs 'Drive-It.lnk'
 $operatorExe = Join-Path $InstallRoot 'app\operator\DriveIt.Operator.exe'
 Assert-InstallerTest ([IO.File]::Exists($shortcutPath)) 'The Drive-It operator shortcut was not installed.'
 Assert-InstallerTest (-not [IO.File]::Exists($previousShortcut)) 'The earlier Drive It shortcut was left in the Start Menu.'
 Assert-InstallerTest ([IO.File]::Exists($operatorExe)) 'The operator window was not installed.'
 Assert-InstallerTest (-not [IO.File]::Exists((Join-Path $InstallRoot 'app\operator\DriveIt.Operator.ps1'))) 'The PowerShell operator window is still installed.'
-Assert-InstallerTest ([IO.File]::Exists((Join-Path $InstallRoot 'app\addin\DriveIt.UI.dll'))) 'The add-in folder is missing the operator window library.'
 $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
 Assert-InstallerTest ($shortcut.TargetPath -eq $operatorExe) "The shortcut does not open the operator window: [$($shortcut.TargetPath) $($shortcut.Arguments)]."
-$addin = [xml](Get-Content -LiteralPath $addinPath -Raw)
-Assert-InstallerTest ($addin.RevitAddIns.AddIn.Assembly -eq (Join-Path $InstallRoot 'app\addin\DriveIt.Revit.dll')) 'The add-in manifest points to the wrong assembly.'
-$addinName = $addin.RevitAddIns.AddIn.SelectSingleNode('Name').InnerText
-Assert-InstallerTest ($addinName -ceq 'Drive-It') "The add-in manifest is named '$addinName', not 'Drive-It'."
-$addinHash = (Get-FileHash -LiteralPath $addinPath -Algorithm SHA256).Hash
+foreach ($year in $revitYears) {
+    $build = Join-Path $InstallRoot "app\addin\$year"
+    Assert-InstallerTest ([IO.File]::Exists((Join-Path $build 'DriveIt.UI.dll'))) "The Revit $year add-in folder is missing the operator window library."
+    $addin = [xml](Get-Content -LiteralPath (Get-AddinPath $year) -Raw)
+    Assert-InstallerTest ($addin.RevitAddIns.AddIn.Assembly -eq (Join-Path $build 'DriveIt.Revit.dll')) "The Revit $year add-in manifest points to the wrong assembly: [$($addin.RevitAddIns.AddIn.Assembly)]."
+    $addinName = $addin.RevitAddIns.AddIn.SelectSingleNode('Name').InnerText
+    Assert-InstallerTest ($addinName -ceq 'Drive-It') "The Revit $year add-in manifest is named '$addinName', not 'Drive-It'."
+}
+$addinHash = Get-AddinHash
 
 $env:DRIVE_IT_DATA_DIR = $InstallRoot
 Import-Module (Join-Path $InstallRoot 'app\operator\DriveIt.Operator.psm1') -Force -DisableNameChecking
@@ -86,7 +98,7 @@ foreach ($window in @($selfTest.windows)) {
 
 & $installer -SourcePath $package -InstallRoot $InstallRoot -McpConfigPath $mcpPath -NoLaunch | Out-Null
 Assert-InstallerTest ((Get-DriveItWorkspace).root -eq $workspace) 'An idempotent retry changed the selected root.'
-Assert-InstallerTest ((Get-FileHash -LiteralPath $addinPath -Algorithm SHA256).Hash -eq $addinHash) 'An idempotent retry changed the add-in registration.'
+Assert-InstallerTest ((Get-AddinHash) -eq $addinHash) 'An idempotent retry changed the add-in registration.'
 
 $currentNode = Get-Command node.exe -ErrorAction SilentlyContinue
 $currentNodePath = if ($null -eq $currentNode) { $null } else { $currentNode.Source }
@@ -109,7 +121,7 @@ try {
     }
     Assert-InstallerTest $failed 'An incomplete package reported success.'
     Assert-InstallerTest (-not [IO.File]::Exists($failedMcp)) 'A failed prerequisite emitted MCP configuration.'
-    Assert-InstallerTest ((Get-FileHash -LiteralPath $addinPath -Algorithm SHA256).Hash -eq $addinHash) 'A failed prerequisite changed add-in registration.'
+    Assert-InstallerTest ((Get-AddinHash) -eq $addinHash) 'A failed prerequisite changed add-in registration.'
 } finally {
     Move-Item -LiteralPath "$missingNode.missing" -Destination $missingNode
 }
@@ -199,6 +211,18 @@ Assert-InstallerTest (-not [IO.File]::Exists($marker)) 'An elevated standard ins
 Assert-InstallerTest (-not (Test-OnUserPath $modeApp)) 'Leaving Dev Mode left drive-it-stdio.cmd on PATH.'
 Assert-InstallerTest ((Get-ResolvedMode) -eq 'standard') 'The resolver did not say standard after leaving Dev Mode.'
 Assert-InstallerTest ($null -eq (Get-SshExample)) 'Leaving Dev Mode left the drive-it-ssh example in mcp.json.'
+
+# Uninstall-DriveIt.ps1 removes every year's manifest that names its own install, and no other: the
+# manifests now name the mode install, so uninstalling the first install leaves them.
+$uninstaller = Join-Path $package 'Uninstall-DriveIt.ps1'
+& $uninstaller -InstallRoot $InstallRoot | Out-Null
+foreach ($year in $revitYears) {
+    Assert-InstallerTest ([IO.File]::Exists((Get-AddinPath $year))) "Uninstalling another install removed the Revit $year add-in."
+}
+& $uninstaller -InstallRoot $modeRoot | Out-Null
+foreach ($year in $revitYears) {
+    Assert-InstallerTest (-not [IO.File]::Exists((Get-AddinPath $year))) "Uninstall left the Revit $year add-in registered."
+}
 
 Write-Output 'installer tests passed'
 

@@ -9,6 +9,15 @@ $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 
 $nodeVersion = '22.16.0'
+# The supported Revit years and the add-in build each one loads (spec #22 "Shared Code"): Revit 2026
+# runs on .NET 8 and Revit 2027 on .NET 10, so src/DriveIt.Revit is published once per year, to
+# app\addin\<year>. The package manifest's revitYears carries this list to Install-DriveIt.ps1 (which
+# registers every year), Build-DriveItMsi.ps1 (detection and launch condition) and the tests.
+# Adding a year: add it here and its target framework and API packages in DriveIt.Revit.csproj.
+$revitTargets = [ordered]@{
+    '2026' = 'net8.0-windows'
+    '2027' = 'net10.0-windows'
+}
 $pythonVersion = '3.12.9'
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '..')).ProviderPath
 $package = [IO.Path]::GetFullPath($OutputPath)
@@ -52,9 +61,11 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'dotnet could not restore the Drive It Revit add-in.'
     }
-    & dotnet publish $projectPath -c Release --no-self-contained --no-restore "-p:Version=$($project.version)" -o (Join-Path $app 'addin')
-    if ($LASTEXITCODE -ne 0) {
-        throw 'dotnet could not build the Drive It Revit add-in.'
+    foreach ($year in $revitTargets.Keys) {
+        & dotnet publish $projectPath -c Release -f $revitTargets[$year] --no-self-contained --no-restore "-p:Version=$($project.version)" -o (Join-Path $app "addin\$year")
+        if ($LASTEXITCODE -ne 0) {
+            throw "dotnet could not build the Drive It Revit $year add-in."
+        }
     }
 
     # The Start Menu window, beside the PowerShell operator module the installer uses.
@@ -102,6 +113,7 @@ try {
         version = $project.version
         nodeVersion = $nodeVersion
         pythonVersion = $pythonVersion
+        revitYears = @($revitTargets.Keys)
     }
     [IO.File]::WriteAllText((Join-Path $package 'drive-it-package.json'), ($manifest | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
 } finally {

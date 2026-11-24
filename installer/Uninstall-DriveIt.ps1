@@ -40,11 +40,19 @@ if ([IO.File]::Exists($node) -and [IO.File]::Exists($clientScript)) {
     & $node @clientArguments
 }
 
-$addinPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins\2026\DriveIt.addin'
-if ([IO.File]::Exists($addinPath)) {
-    $addin = [xml](Get-Content -LiteralPath $addinPath -Raw)
-    if ([string]$addin.RevitAddIns.AddIn.Assembly -ieq (Join-Path $app 'addin\DriveIt.Revit.dll')) {
-        Remove-Item -LiteralPath $addinPath -Force
+# Every Revit year's DriveIt.addin that names this install's add-in (app\addin\<year>, or app\addin
+# from builds before Revit 2027 support); a manifest pointing elsewhere is not ours to remove.
+$addinPrefix = (Join-Path $app 'addin').TrimEnd('\') + '\'
+$addins = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Autodesk\Revit\Addins'
+if ([IO.Directory]::Exists($addins)) {
+    foreach ($addinPath in @(Get-ChildItem -LiteralPath $addins -Directory | ForEach-Object { Join-Path $_.FullName 'DriveIt.addin' })) {
+        if (-not [IO.File]::Exists($addinPath)) {
+            continue
+        }
+        $assembly = [string]([xml](Get-Content -LiteralPath $addinPath -Raw)).RevitAddIns.AddIn.Assembly
+        if ($assembly.StartsWith($addinPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $addinPath -Force
+        }
     }
 }
 

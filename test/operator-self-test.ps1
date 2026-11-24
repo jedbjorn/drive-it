@@ -1,13 +1,20 @@
-# Invoke-OperatorSelfTest, dot-sourced by the installer and MSI tests: opens and closes the
+# Invoke-OperatorSelfTest, dot-sourced by the installer, MSI and runtime tests: opens and closes the
 # installed WPF window (DriveIt.Operator.exe --self-test) and returns what it reported.
 
 function Invoke-OperatorSelfTest {
     # Opens and closes the installed WPF window in both themes against the installed operator.js.
-    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Report)
+    # With -Dotnet, $Exe is the window's DLL, run through that dotnet.exe.
+    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Report, [string]$Dotnet)
     if ([IO.File]::Exists($Report)) {
         Remove-Item -LiteralPath $Report -Force
     }
-    $process = Start-Process -FilePath $Exe -ArgumentList @('--self-test', ('"' + $Report + '"')) -PassThru
+    $file = $Exe
+    $arguments = @('--self-test', ('"' + $Report + '"'))
+    if ($Dotnet) {
+        $file = $Dotnet
+        $arguments = @(('"' + $Exe + '"')) + $arguments
+    }
+    $process = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
     if (-not $process.WaitForExit(180000)) {
         $process.Kill()
         throw 'The operator window self-test did not finish.'
