@@ -592,7 +592,8 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
     }
 
     /// <summary>
-    /// A Python datetime as a System.DateTime: an aware one arrives in UTC and is marked Utc, a naive one Unspecified,
+    /// A Python datetime as a System.DateTime: an aware one arrives in UTC and is marked Utc, a naive one Local
+    /// (Python's own reading of a naive datetime; Revit refuses Unspecified, W10C 2026-11-24),
     /// so whether a value Revit returned was UTC survives the trip. Microseconds, Python's precision.
     /// </summary>
     private static bool TryDateTime(string text, bool utc, Type target, out object? value, out int score)
@@ -603,7 +604,7 @@ internal sealed class BridgeCalls(Func<bool> transactionOpen)
             return false;
         if (!DateTime.TryParseExact(text, DateTimeWire, CultureInfo.InvariantCulture, DateTimeStyles.None, out var moment))
             return false;
-        value = DateTime.SpecifyKind(moment, utc ? DateTimeKind.Utc : DateTimeKind.Unspecified);
+        value = DateTime.SpecifyKind(moment, utc ? DateTimeKind.Utc : DateTimeKind.Local);
         score = target == typeof(DateTime) ? 100 : 10;
         return true;
     }

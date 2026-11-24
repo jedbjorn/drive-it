@@ -101,7 +101,7 @@ def _encode(value):
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, datetime.datetime):
-        # A System.DateTime: an aware datetime crosses as the same instant in UTC; a naive one as it reads.
+        # A System.DateTime: an aware datetime crosses as the same instant in UTC; a naive one as local time, as Python reads it.
         if value.utcoffset() is not None:
             return {"$datetime": value.astimezone(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="microseconds"), "utc": True}
         return {"$datetime": value.isoformat(timespec="microseconds"), "utc": False}
