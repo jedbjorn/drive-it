@@ -26,10 +26,37 @@ function append(target, values) {
 }
 
 // Receipt lists that hold Revit effects; inside a hold they are provisional until a save or a commit.
-const PROVISIONAL = ["changes", "affectedElements", "createdViews"];
+const PROVISIONAL = ["changes", "affectedElements", "createdViews", "transactions"];
 
 function provisional() {
-  return { changes: [], affectedElements: [], createdViews: [] };
+  return { changes: [], affectedElements: [], createdViews: [], transactions: [] };
+}
+
+// Bridge members that only read the file a path names, so Revit's installed content passes (decision #23).
+// A path given to any other member is checked as a write.
+const BRIDGE_READS = new Set(["LoadFamily", "LoadFamilySymbol"]);
+
+// A string argument that is an absolute file path goes through the outside-root policy (spec #15 "Guardrails").
+function isAbsoluteFilePath(value) {
+  return typeof value === "string" && !/[\r\n]/.test(value)
+    && path.isAbsolute(value) && /[^\\/]/.test(value);
+}
+
+function bridgePaths(value, found = []) {
+  if (isAbsoluteFilePath(value)) found.push(value);
+  else if (Array.isArray(value)) for (const item of value) bridgePaths(item, found);
+  return found;
+}
+
+// Replaces each checked path with its canonical form, so Revit gets the path the policy decided on.
+function withCanonicalPaths(value, canonical) {
+  if (isAbsoluteFilePath(value)) return canonical.get(value);
+  return Array.isArray(value) ? value.map(item => withCanonicalPaths(item, canonical)) : value;
+}
+
+function transactionLine(transaction) {
+  const { added, changed, deleted } = transaction.totals;
+  return `${transaction.name} in ${transaction.document}: ${added} added, ${changed} changed, ${deleted} deleted.`;
 }
 
 export class Runtime {
@@ -284,12 +311,24 @@ export class Runtime {
   }
 
   async bridgeCall(params, context) {
+    if (params.op === "describe") return this.describe(params, context);
     const call = { ...params };
     if (call.document && typeof call.document === "object" && !("$h" in call.document)) {
       call.document = {
         path: call.document.path ? await canonicalPath(call.document.path) : null,
         uniqueId: call.document.uniqueId || null,
       };
+    }
+    // Checked before Revit is held: no decision is awaited while Revit is paused.
+    const paths = [...bridgePaths(call.args), ...bridgePaths(call.value)];
+    if (paths.length) {
+      const operation = BRIDGE_READS.has(call.member) ? "read_file" : "write_file";
+      const decision = await this.policy.authorize(context.runId, [{ operation, paths }], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
+      this.recordPolicy(context.receipt, context, decision);
+      if (decision.status === "pending" || decision.status === "denied") return decision;
+      const canonical = new Map(paths.map((original, index) => [original, decision.requests[0].paths[index]]));
+      if (call.args) call.args = withCanonicalPaths(call.args, canonical);
+      if ("value" in call) call.value = withCanonicalPaths(call.value, canonical);
     }
     let hold;
     try {
@@ -298,7 +337,27 @@ export class Runtime {
       return { status: "failed", error: { code: error.code || "HOLD_FAILED", message: `Revit could not be held for this run: ${error.message}` } };
     }
     context.heldCalls += 1;
-    return hold.send({ type: "bridge.call", call });
+    const response = await hold.send({ type: "bridge.call", call });
+    if (call.op !== "tx.commit" || response.status !== "succeeded" || !response.value) return response;
+    // A committed revit.transaction: one changes line, its added and changed ids, and the transaction itself.
+    const transaction = response.value;
+    this.observeBroker({
+      changes: [transactionLine(transaction)],
+      affectedElements: [...transaction.added, ...transaction.changed],
+      transactions: [transaction],
+    }, context);
+    return { ...response, value: null };
+  }
+
+  // revit.describe reads the running Revit's API without holding it: through the run's hold if it has one,
+  // otherwise as its own request, which the add-in answers without Revit's thread.
+  async describe(params, context) {
+    const call = { op: "describe", type: params.type };
+    if (context.hold) return context.hold.send({ type: "bridge.call", call });
+    return this.brokerExecutor(context.processId, { id: context.runId, type: "api.describe", describe: { type: params.type } }, {
+      timeoutMs: context.timeoutMs,
+      connectWaitMs: Math.max(0, context.deadline - Date.now()),
+    });
   }
 
   // The hold starts at the run's first bridge call and is bounded by the time the run has left.
@@ -313,6 +372,7 @@ export class Runtime {
       context.hold = hold;
       context.heldAt = Date.now();
       context.uncommitted = provisional();
+      context.transactions = context.receipt.transactions = [];
       hold.onLost(() => this.holdLost(context));
       return hold;
     })();
@@ -351,7 +411,7 @@ export class Runtime {
       // Revit is gone; what it kept is unknown.
     }
     receipt.held = { ms: summary?.ms ?? Date.now() - context.heldAt, calls: summary?.calls ?? context.heldCalls };
-    if (summary?.warnings?.length) receipt.warnings = summary.warnings;
+    receipt.warnings = summary?.warnings ?? [];
 
     const failedDocuments = (summary?.documents || []).filter(document => document.state.endsWith("_failed"));
     if (summary?.outcome !== "committed") {
@@ -404,6 +464,7 @@ export class Runtime {
     append(context.affectedFiles, response.affectedFiles);
     append(context.affectedElements, response.affectedElements);
     append(context.createdViews, response.createdViews);
+    if (context.transactions) append(context.transactions, response.transactions);
     append(context.checks, response.checks);
     if (response.document) context.receipt.document = documentWithKind(response.document);
   }

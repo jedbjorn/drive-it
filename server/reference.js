@@ -1,4 +1,28 @@
-export const API_VERSION = "revit-2026-alpha.2";
+export const API_VERSION = "revit-2026-alpha.3";
+
+// Spec #15 "Documentation": the same eight statements are in the README's "Safety and ability" section,
+// in get_api_reference, and in the server instructions.
+export const SAFETY_AND_ABILITY = [
+  "Scripts run in Drive-It's own process. A script that crashes or hangs does not crash Revit.",
+  "Through the bridge a script can call Revit's modeling API in general. Drive-It does not check a bridge call before it runs; built-in primitives do check first, and are preferred where they fit.",
+  "Revit is paused while a bridge run is in progress, up to the run's time limit. A window says so and offers Stop.",
+  "If a bridge run fails, is stopped or times out, its changes are rolled back. Changes before a save in the same run are kept.",
+  "A successful run is one undo entry in Revit.",
+  "File and system access is limited by rules that are a guardrail, not a guarantee. Run scripts from sources you trust.",
+  "Bridge scripts are written against one Revit version's API and may need changes for another.",
+  "A long task runs as many scripts. The time limit applies to each one, Revit is free between them, and each is its own undo entry. The limit is set in the Drive-It window.",
+];
+
+// Spec #15 "Agent Guidance": in the server instructions and get_api_reference.
+export const BRIDGE_GUIDANCE = [
+  "Use built-in primitives where they cover the task; use the bridge for anything else.",
+  "Do non-Revit work (reading files, computing) before the first bridge call, and keep bridge runs short: Revit is paused for the person until the run ends.",
+  "Run a long task as a chain of scripts, one coherent step each (for example: create the sheets; create the views; apply view templates; place views on sheets). Read each receipt before the next step, carry ids forward, and tell the user where the job stands.",
+  "If a step fails, the earlier steps are still in place. Fix the step and continue; do not start the job again.",
+  "Put every change inside revit.transaction, and record checks that answer the user's request.",
+  "When a call fails, read the error's list of members or signatures, or call revit.describe, before trying again.",
+  "Open, create, save and close documents with the built-in operations.",
+];
 
 function withDocument(args) {
   return { ...args, document: "Optional: {path, uniqueId} target; defaults to the selected document" };
@@ -96,6 +120,43 @@ const revitPrimitives = {
     "family = revit.edit_family(familyId=123)"],
 };
 
+const holds = "The first use of DB, revit.document, revit.element or revit.transaction holds Revit for the rest of the run: Revit is paused for the person, a window says so and offers Stop, and the run's time limit bounds it. revit.describe and built-in operations alone never hold Revit";
+
+// The Revit API bridge (spec #15): [arguments, results, effects, example].
+const bridgeEntries = {
+  DB: [{},
+    "The Autodesk.Revit.DB namespace. Calling a type constructs it (DB.XYZ(0, 0, 0)); static methods, properties and enum values resolve where they are used (DB.Level.Create(doc, 10.0), DB.BuiltInCategory.OST_Walls, DB.Structure.StructuralType.NonStructural); a type passed where Revit takes a System.Type is that type (collector.OfClass(DB.Wall))",
+    `${holds}. Numbers, strings, booleans and None cross by value, and a Guid crosses as its string; everything else is a handle that supports attribute get and set, method calls, indexing, iteration, len, == and str, valid for this run only (carry an element to the next run by its integer id, element.Id.Value). Python lists become the array, list or set the method takes. Arguments are positional. A method whose matching overload has out parameters returns its return value followed by the out values as a tuple (one value comes back as itself). Guardrails: handles only for Revit model API objects and the collections they come in (type_not_allowed); opening, creating, saving and closing documents, and creating transactions, stay with the built-in operations (member_not_allowed names the one to use); an absolute file path in an argument goes through the outside-root policy, so outside the workspace root the run ends pending with an outside-root request, as a built-in operation does (Revit's installed content may be read with LoadFamily and LoadFamilySymbol); at most 100000 handles per run (limit_exceeded); events and callbacks other than revit.options fail with callback_not_supported naming the interface. A failed call raises RevitError (in script scope, so except RevitError works); error.response["error"] holds its code and message: member_not_found lists the members that exist, no_matching_overload lists the signatures, revit_api_error carries Revit's own message`,
+    "walls = [wall.Id.Value for wall in DB.FilteredElementCollector(revit.document()).OfClass(DB.Wall)]"],
+  "revit.document": [{ document: "Optional: a document from a receipt ({path, uniqueId}) or a Document handle; defaults to the script's current document, which get_active_document and edit_family set" },
+    "Document handle",
+    `${holds}. The handle is the same document the built-in operations use`,
+    "doc = revit.document()"],
+  "revit.element": [{ id: "Required: Integer element id", document: "Optional: as in revit.document" },
+    "Element handle; element_not_found when the document has no element with that id",
+    `${holds}. Look elements up again by id in each run; a handle never carries to the next run`,
+    "level = revit.element(level_id)"],
+  "revit.transaction": [{ name: "Required: Transaction name, shown in the receipt", document: "Optional: as in revit.document" },
+    "A with block. Each committed one adds a receipt transactions entry {name, document, added, changed, deleted, totals, truncated} (id lists capped at 1000 and marked truncated), a changes line such as \"Place desks in Tower.rvt: 5 added, 0 changed, 0 deleted.\", and its added and changed ids in affectedElements",
+    `${holds}. Leaving the block commits; an exception inside rolls it back and keeps raising. Every bridge change goes inside one; a change outside fails with modification_outside_transaction. One may be open per document at a time. Revit warnings go to the receipt's warnings without a dialog; an error rolls that transaction back and raises RevitError transaction_failed with Revit's message. The run's transactions on a document become one undo entry, Drive-It: <displayName>. A run that fails, is stopped (stopped_by_user) or times out is rolled back whole, except what came before a save_document or save_as_document in it`,
+    "with revit.transaction(\"Place desks\"):\n    desk = doc.Create.NewFamilyInstance(DB.XYZ(0, 0, 0), symbol, level, DB.Structure.StructuralType.NonStructural)"],
+  "revit.describe": [{ name: "Required: Revit API type name, short (\"FamilyItemFactory\") or qualified (\"DB.Structure.StructuralType\")" },
+    "{name, kind, baseType, constructors, properties, methods, fields} as signature strings (out parameters marked out, obsolete members marked [obsolete]), or {name, kind, values} for an enum; type_not_found lists similar names and ambiguous_type lists the matches",
+    "Reads the running Revit's own API; does not hold Revit and does not change the model",
+    "factory = revit.describe(\"FamilyItemFactory\")"],
+  "revit.options.family_load": [{
+    overwrite: "Optional: Boolean; replace a family that is already loaded (default False)",
+    overwriteParameterValues: "Optional: Boolean; also replace its parameter values (default False)",
+  },
+  "An option to pass where Revit takes an IFamilyLoadOptions, such as Document.LoadFamily",
+  "Answers Revit's question \"this family is already loaded; replace it?\" as configured; the defaults keep what is loaded",
+  "loaded, family = doc.LoadFamily(args[\"familyPath\"], revit.options.family_load(overwrite=True))"],
+  "revit.options.copy_paste": [{ duplicateTypes: "Optional: \"abort\" (default) or \"use_destination\"" },
+    "A CopyPasteOptions to pass to ElementTransformUtils.CopyElements",
+    "Answers Revit's question \"a type with this name exists; use the destination's?\": abort cancels the copy, use_destination uses the destination's types. Any other callback Revit asks for fails with callback_not_supported naming the interface",
+    "copied = DB.ElementTransformUtils.CopyElements(source, ids, target, DB.Transform.Identity, revit.options.copy_paste())"],
+};
+
 const unitsOperations = {
   to_internal: "Converts a value in unit to Revit internal units",
   from_internal: "Converts a value in Revit internal units to unit",
@@ -151,6 +212,9 @@ export function apiReference(name) {
   }
   for (const [operation, [args, results, effects, example]] of Object.entries(revitPrimitives)) {
     entries.push({ name: `revit.${operation}`, apiVersion: API_VERSION, arguments: args, results, effects, example });
+  }
+  for (const [name, [args, results, effects, example]] of Object.entries(bridgeEntries)) {
+    entries.push({ name, apiVersion: API_VERSION, arguments: args, results, effects, example });
   }
   for (const [operation, effects] of Object.entries(unitsOperations)) {
     entries.push({

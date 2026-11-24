@@ -65,7 +65,17 @@ _member_kinds = {}
 
 def _bridge(call):
     response = _request("bridge.call", call)
-    if response.get("status") != "succeeded":
+    status = response.get("status")
+    # An absolute path outside the workspace root waits for the operator, as a built-in operation does.
+    if status == "pending":
+        error = PolicyPending("Outside-root access is awaiting an operator decision.")
+        error.detail = response
+        raise error
+    if status == "denied":
+        error = PolicyDenied("Outside-root access was denied by the operator.")
+        error.detail = response
+        raise error
+    if status != "succeeded":
         raise RevitError(response)
     return response.get("value")
 
@@ -77,6 +87,8 @@ def _encode(value):
         return {"$h": object.__getattribute__(value, "_h_id")}
     if isinstance(value, _Path):
         return {"$path": object.__getattribute__(value, "_p_path")}
+    if isinstance(value, _Option):
+        return dict(value.settings)
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_encode(item) for item in value]
     raise TypeError(f"A {type(value).__name__} cannot cross to Revit; pass numbers, strings, booleans, None, lists or Revit handles.")
@@ -85,7 +97,38 @@ def _encode(value):
 def _decode(value):
     if isinstance(value, dict) and "$h" in value:
         return _Handle(value["$h"], value.get("type", ""))
+    if isinstance(value, dict) and "$tuple" in value:
+        # A method with out parameters: its return value, then each out value.
+        return tuple(_decode(item) for item in value["$tuple"])
     return value
+
+
+class _Option:
+    """An object Revit calls back with a question, answered by Drive-It as configured here."""
+
+    __slots__ = ("settings",)
+
+    def __init__(self, kind, **settings):
+        self.settings = {"$option": kind, **settings}
+
+    def __repr__(self):
+        return f"<revit.options.{self.settings['$option']}>"
+
+
+class _Options:
+    """revit.options: the helpers for Revit calls that ask a question back."""
+
+    def family_load(self, overwrite=False, overwriteParameterValues=False):
+        """For LoadFamily: replace a family that is already loaded (and its parameter values) only when asked."""
+        if not isinstance(overwrite, bool) or not isinstance(overwriteParameterValues, bool):
+            raise TypeError("revit.options.family_load takes overwrite and overwriteParameterValues as True or False.")
+        return _Option("family_load", overwrite=overwrite, overwriteParameterValues=overwriteParameterValues)
+
+    def copy_paste(self, duplicateTypes="abort"):
+        """For CopyElements: when a type name exists in the destination, "abort" or "use_destination"."""
+        if duplicateTypes not in ("abort", "use_destination"):
+            raise ValueError('revit.options.copy_paste takes duplicateTypes="abort" or "use_destination".')
+        return _Option("copy_paste", duplicateTypes=duplicateTypes)
 
 
 def _arguments(args, kwargs):
@@ -543,6 +586,7 @@ class Units:
 
 
 class Revit:
+    options = _Options()
     OPERATIONS = {
         "open_document", "create_document", "read_document", "save_document",
         "save_as_document", "close_document", "delete_document", "create_level",
@@ -658,6 +702,12 @@ class Revit:
         """A with block; Revit changes go inside one. Leaving it commits; an exception rolls it back."""
         return _Transaction(self, name, document)
 
+    def describe(self, name):
+        """The members and signatures of a Revit API type, from the running Revit. Does not hold Revit."""
+        if not isinstance(name, str):
+            raise TypeError('revit.describe takes a type name, e.g. "FamilyItemFactory".')
+        return _bridge({"op": "describe", "type": name})
+
     def __getattr__(self, name):
         if name not in self.OPERATIONS:
             raise AttributeError(name)
@@ -727,6 +777,7 @@ def main():
             "checks": Checks(),
             "units": Units(),
             "DB": _Path("Autodesk.Revit.DB"),
+            "RevitError": RevitError,
             "result": None,
         }
         exec(compile(run["source"], "<drive-it-script>", "exec"), scope)
