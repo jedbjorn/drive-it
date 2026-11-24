@@ -105,7 +105,7 @@ test("a run's timeout defaults to 30 s, stays under the limit, and a larger requ
 test("operator settings commands read and write the limit the runtime enforces", async (t) => {
   const dataDir = await dataDirectory(t);
   const run = args => execute(process.execPath, [operator, ...args], { env: { ...process.env, DRIVE_IT_DATA_DIR: dataDir } });
-  assert.deepEqual(JSON.parse((await run(["settings", "get"])).stdout), { scriptTimeLimitSeconds: 120 });
+  assert.deepEqual(JSON.parse((await run(["settings", "get"])).stdout), { scriptTimeLimitSeconds: 120, requireDryRun: false });
   assert.deepEqual(JSON.parse((await run(["settings", "set-time-limit", "20"])).stdout), { scriptTimeLimitSeconds: 20 });
   await assert.rejects(run(["settings", "set-time-limit", "5"]), error => {
     assert.match(error.stderr, /^INVALID_SETTING: .*10 to 600/);

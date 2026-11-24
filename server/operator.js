@@ -4,6 +4,7 @@ import { detectClients } from "./clients.js";
 import { DecisionStore } from "./decisions.js";
 import { HistoryStore } from "./history.js";
 import { SettingsStore } from "./settings.js";
+import { stagedDryRun } from "./staged.js";
 import { defaultDataDir } from "./store.js";
 import { WorkspaceStore } from "./workspace.js";
 
@@ -36,11 +37,13 @@ try {
   else if (area === "decisions" && ["approve", "deny"].includes(action) && value) print(await decisions.decide(value, action === "approve"));
   else if (area === "history" && action === "list") print(await history.list());
   else if (area === "history" && action === "get" && value) print(await history.get(value));
-  else if (area === "settings" && action === "get") print(await settings.get());
+  else if (area === "settings" && action === "get") print({ ...await settings.get(), requireDryRun: await settings.requireDryRun() });
   else if (area === "settings" && action === "set-time-limit" && value) print(await settings.setScriptTimeLimitSeconds(value));
+  else if (area === "settings" && action === "set-require-dry-run" && value) print(await settings.setRequireDryRun(value));
+  else if (area === "staged" && action === "get") print(await stagedDryRun(history, await workspace.getRoot().catch(() => null)));
   else if (area === "clients" && action === "detect") print(await detect(value));
   else {
-    console.error("Usage: node server/operator.js workspace get|set [path] | decisions list|approve|deny [id] | history list|get [runId] | settings get|set-time-limit [seconds] | clients detect [mcp.json]");
+    console.error("Usage: node server/operator.js workspace get|set [path] | decisions list|approve|deny [id] | history list|get [runId] | settings get|set-time-limit [seconds]|set-require-dry-run on|off | staged get | clients detect [mcp.json]");
     process.exitCode = 2;
   }
 } catch (error) {

@@ -237,7 +237,7 @@ export async function readHoldResult(processId, runId, { timeoutMs = 4000, conne
 
 // A run's hold: one pipe connection kept from the run's first bridge call to its end. While it is open the
 // add-in serves nothing else, so other clients wait (EBUSY) as they wait behind any Revit work.
-export async function openHold(processId, { runId, displayName, timeLimitMs, dryRun = false, waitMs = timeLimitMs, resultReader = readHoldResult } = {}) {
+export async function openHold(processId, { runId, displayName, timeLimitMs, dryRun = false, requireDryRun = null, waitMs = timeLimitMs, resultReader = readHoldResult } = {}) {
   if (process.platform !== "win32") {
     throw new Error("Run the MCP server on the Windows machine hosting Revit.");
   }
@@ -253,7 +253,8 @@ export async function openHold(processId, { runId, displayName, timeLimitMs, dry
     // A dry run's hold says so, for the status window and its refusals (spec #13 "How It Works"). Only a dry run
     // sends the flag: an add-in from before dry runs refuses a hold with a member it does not know, so a real run's
     // hold.begin stays as it was and only a dry run fails closed against an old add-in.
-    const hold = { displayName: displayName ?? null, timeLimitMs, ...(dryRun ? { dryRun: true } : {}) };
+    // Likewise Require dry run (spec #13), sent only while it is on: { rehearsed } for the add-in's refusals.
+    const hold = { displayName: displayName ?? null, timeLimitMs, ...(dryRun ? { dryRun: true } : {}), ...(requireDryRun ? { requireDryRun } : {}) };
     pipe.write(`${JSON.stringify({ id: runId, type: "hold.begin", hold })}\n`);
     const reply = await lines.next();
     if (reply === null) throw holdError("HOLD_LOST", "Revit closed the connection before the hold began.");

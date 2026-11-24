@@ -63,6 +63,23 @@ export class SettingsStore {
     return { scriptTimeLimitSeconds: seconds };
   }
 
+  // Spec #13 "Require Dry Run": true only when settings.json holds true; missing or malformed reads as off.
+  async requireDryRun() {
+    return (await this.stored()).requireDryRun === true;
+  }
+
+  async setRequireDryRun(value) {
+    const text = typeof value === "string" ? value.trim().toLowerCase() : value;
+    const on = text === true || text === "on" ? true : text === false || text === "off" ? false : null;
+    if (on === null) {
+      const error = new Error("Require dry run takes on or off.");
+      error.code = "INVALID_SETTING";
+      throw error;
+    }
+    await writeJsonAtomic(this.file, { ...(await this.stored()), requireDryRun: on });
+    return { requireDryRun: on };
+  }
+
   // The run's timeout: the agent's timeoutMs when given, else 30 s; never above the setting.
   async runTimeoutMs(requested) {
     const { scriptTimeLimitSeconds } = await this.get();

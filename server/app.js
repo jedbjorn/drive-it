@@ -122,7 +122,7 @@ export function createDriveItServer(options = {}) {
   runtime.references ??= references;
 
   server.registerTool("get_revit_session", {
-    description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user (null until the user picks one in the Drive-It window; ask them to), Revit's installed project templates, family template folders, and library folders, and the install mode (standard, or dev: an administrator installed Drive-It with no guardrails). Use these real paths instead of guessing file names.",
+    description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user (null until the user picks one in the Drive-It window; ask them to), Revit's installed project templates, family template folders, and library folders, the install mode (standard, or dev: an administrator installed Drive-It with no guardrails), and requireDryRun: true when the user requires a dry run before every change (see get_api_reference's dryRun guidance). Use these real paths instead of guessing file names.",
     inputSchema: { processId: processId.optional().describe("Windows process ID of Revit.exe; omit it to use the only running Revit") },
     outputSchema: {
       processId,
@@ -131,6 +131,7 @@ export function createDriveItServer(options = {}) {
       connectionIdentity: z.string(),
       workspaceRoot: z.string().nullable(),
       mode: z.enum([STANDARD, DEV]),
+      requireDryRun: z.boolean().describe("The user's Require dry run setting, read now: when true, dry-run every change first and never save"),
       content: z.object({
         projectTemplates: stringList,
         familyTemplateFolders: stringList,
@@ -145,7 +146,7 @@ export function createDriveItServer(options = {}) {
         if (error.code === "WORKSPACE_NOT_SELECTED") return null;
         throw error;
       });
-      const value = { ...info, workspaceRoot, mode: await modeResolver(), content: await contentReader(info.version) };
+      const value = { ...info, workspaceRoot, mode: await modeResolver(), requireDryRun: await runtime.settings.requireDryRun(), content: await contentReader(info.version) };
       return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: sessionError(error) }] };
@@ -153,7 +154,7 @@ export function createDriveItServer(options = {}) {
   });
 
   server.registerTool("execute_script", {
-    description: "Run inline Python or an exact saved script revision in the Python worker. Its file and typed Revit effects are recorded in a durable receipt; the server instructions say which guardrails apply in this install. With dryRun the run is a rehearsal: Revit applies the changes, the receipt reports them with the dry run actions, warnings and images of the views named, then every change is rolled back and file writes are skipped.",
+    description: "Run inline Python or an exact saved script revision in the Python worker. Its file and typed Revit effects are recorded in a durable receipt; the server instructions say which guardrails apply in this install. With dryRun the run is a rehearsal: Revit applies the changes, the receipt reports them with the dry run actions, warnings and images of the views named, then every change is rolled back and file writes are skipped. When get_revit_session reports requireDryRun, a run that changes a model or writes a file must first be dry-run with the same source and arguments (otherwise it fails with dry_run_required), and saves, save-as, delete-file and closing a changed document fail with not_allowed_while_dry_run_required: ask the user to save in Revit.",
     inputSchema: {
       processId: processId.optional().describe("Windows process ID of the selected Revit.exe; omit it to use the only running Revit"),
       displayName: z.string().trim().min(1).max(200).describe("Required. One plain-language line, written for the user, saying what this run does to their files or model, e.g. \"Add Level 3 at 24 ft to the tower model\". Shown in the Drive-It operator window's run history and approval requests"),

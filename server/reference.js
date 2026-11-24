@@ -43,8 +43,10 @@ export const DRY_RUN_GUIDANCE = [
   "Name the views that show the affected area. Put the user's stated intent into checks so the result answers it directly.",
   "Read actions: per document, what would be created, modified (each changed value before and after, and moved) and deleted. Compare them, the checks and the images with the request before running for real. If they do not match, revise and dry-run again.",
   "Run for real with the same source and arguments, without dryRun. Ids from the dry run do not exist afterwards; read them again.",
+  "If get_revit_session reports requireDryRun, dry-run every script that changes a model or writes a file, then run the same call for real; one dry run allows one real run of the same call. Do not save: tell the user which documents have unsaved changes and ask them to save in Revit. Reading and opening need no dry run.",
+  "With requireDryRun, a change or file write in a run that was not rehearsed fails with dry_run_required: dry-run the same call, then run it again without dryRun. Saving, save-as, delete-file and closing a document with unsaved changes fail with not_allowed_while_dry_run_required in every run; do not retry them.",
   "In a dry run, save, save-as, close and delete-file fail with not_allowed_in_dry_run, and so does any direct save, close, synchronize, reload latest or print call through the bridge. Opening and creating documents and edit_family work. File writes are skipped and listed in skippedFileWrites; a bridge call that would write a file (Document.Export, ViewSchedule.Export, setting ImageExportOptions.FilePath) fails with not_allowed_in_dry_run and its paths are listed there too, so leave exports out of a dry run.",
-  "Report a dry run to the person in a sentence or two, not the full list.",
+  "Report a dry run to the person in a sentence or two, not the full list. If get_revit_session reports requireDryRun, the Drive-It window opens in Staged Actions mode by itself in Revit; tell the person they can review the dry run there.",
   "On a workshared model, tell the person that Drive-It released their borrowed elements after the dry run, including unmodified ones they had borrowed before, or, if the release failed, that they should Relinquish All Mine in Revit.",
   "A dry run does not replace end-of-round QA after the real run.",
 ];

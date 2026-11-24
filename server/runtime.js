@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DecisionStore } from "./decisions.js";
@@ -66,6 +66,11 @@ export const DRY_RUN_NOTES = Object.freeze({
   notReleased: document => `Drive-It could not release the elements this dry run borrowed in ${document}; colleagues cannot edit them until you use Relinquish All Mine or Synchronize with Central in Revit.`,
 });
 
+// Spec #13 "Require Dry Run": what each refusal tells the agent to do next.
+export const REQUIRE_DRY_RUN_MESSAGES = Object.freeze({
+  fileWrite: what => `Require dry run is on and this run was not rehearsed, so ${what} is refused: nothing was written. Dry-run the same call first (execute_script with dryRun: true), compare the result with the request, then run the same call again without dryRun.`,
+});
+
 function documentWithKind(document) {
   if (!document) return null;
   const extension = document.path ? path.extname(document.path).toLowerCase() : "";
@@ -121,6 +126,8 @@ export class Runtime {
     this.sessionReader = sessionReader;
     this.workerRunner = workerRunner;
     this.contentFolders = contentFolders;
+    // Spec #13 D12: one file per dry run a real run has taken, created exclusively, so one dry run allows one real run.
+    this.rehearsals = path.join(dataDir, "rehearsals");
     this.scripts = scripts || new ScriptCatalog({ workspace: this.workspace, history: this.history });
     this.scriptResolver = scriptResolver || ((reference, root) => this.scripts.resolve(reference, root));
     // Where a dry run's images are published (capture.js ReferenceImages); the MCP server sets it.
@@ -248,6 +255,12 @@ export class Runtime {
       receipt.workspaceRoot = workspaceRoot || await this.workspace.getRoot();
       // While another run holds Revit the pipe is busy; this run waits for it, within its own time.
       receipt.session = await this.sessionReader(input.processId, { connectWaitMs: Math.max(0, context.deadline - Date.now()) });
+      // Spec #13 "Require Dry Run": read as the run starts. A real run under it is rehearsed when it takes an unused
+      // dry run of the same call; the worker and the add-in are told, and refuse what an unrehearsed run may not do.
+      if (!dryRun && await this.settings.requireDryRun()) {
+        receipt.rehearsedBy = await this.takeRehearsal(fingerprint, receipt, previous);
+        context.requireDryRun = { rehearsed: receipt.rehearsedBy !== null };
+      }
       temporary = await mkdtemp(path.join(tmpdir(), "drive-it-"));
       const workerReceipt = await this.workerRunner({
         source,
@@ -257,6 +270,7 @@ export class Runtime {
         runId,
         mode: receipt.mode,
         dryRun: Boolean(dryRun),
+        requireDryRun: context.requireDryRun,
         pythonPath: this.pythonPath,
         cwd: temporary,
         timeoutMs: input.timeoutMs || 30000,
@@ -293,13 +307,35 @@ export class Runtime {
     }
     if (context.holdPromise) await this.endHold(receipt, context);
     if (dryRun) this.completeDryRun(receipt, context);
-    else receipt.rehearsedBy = null;
+    else receipt.rehearsedBy ??= null;
 
     receipt.policyDecisionIds = [...context.decisionIds];
     receipt.policyRequests = context.policyRequests;
     if (receipt.status !== "pending") receipt.completedAt = new Date().toISOString();
     await this.history.save(receipt);
     return receipt;
+  }
+
+  /**
+   * Spec #13 D12: the dry run that rehearses this real run, or null. It has the same call (fingerprint without its dry
+   * run options), ran in the same Revit process, succeeded, was rolled back, and no other real run has taken it. A
+   * run that ended pending keeps its dry run when retried under the same idempotency key. No timer.
+   */
+  async takeRehearsal(fingerprint, receipt, previous) {
+    if (previous?.rehearsedBy) return previous.rehearsedBy;
+    const candidates = (await this.history.list()).filter(run => run.dryRun === true && run.status === "succeeded"
+      && run.rolledBack === true && callOf(run.fingerprint) === fingerprint
+      && run.session?.processId === receipt.session?.processId);
+    await mkdir(this.rehearsals, { recursive: true });
+    for (const dry of candidates) {
+      try {
+        await writeFile(path.join(this.rehearsals, `${dry.runId}.json`), `${JSON.stringify({ dryRun: dry.runId, runId: receipt.runId, takenAt: new Date().toISOString() })}\n`, { flag: "wx" });
+        return dry.runId;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+    }
+    return null;
   }
 
   readableRoots(context) {
@@ -352,6 +388,8 @@ export class Runtime {
       document: { path: documentPath, uniqueId: params.document?.uniqueId || null },
       workspaceRoot: context.workspaceRoot,
       operations,
+      // Only with the setting on: an add-in from before it refuses the member, so the run fails closed.
+      ...(context.requireDryRun ? { requireDryRun: context.requireDryRun } : {}),
     };
     // A dry run holds Revit from its first request, built-in or bridge, so every change it makes is rolled back.
     if (context.dryRun && !context.hold) {
@@ -436,6 +474,13 @@ export class Runtime {
           },
         };
       }
+      // Spec #13 D11: with Require dry run on, a file write needs a rehearsal like a model change.
+      if (context.requireDryRun?.rehearsed === false && operation === "write_file") {
+        return {
+          status: "failed",
+          error: { code: "dry_run_required", message: REQUIRE_DRY_RUN_MESSAGES.fileWrite(`${call.member}, which would write ${paths.join(", ")},`) },
+        };
+      }
       const decision = await this.policy.authorize(context.runId, [{ operation, paths }], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
       this.recordPolicy(context.receipt, context, decision);
       if (decision.status === "pending" || decision.status === "denied") return decision;
@@ -484,6 +529,7 @@ export class Runtime {
         displayName: context.receipt.displayName,
         timeLimitMs,
         dryRun: Boolean(context.dryRun),
+        requireDryRun: context.requireDryRun,
       });
       context.hold = hold;
       context.heldAt = Date.now();
