@@ -365,9 +365,12 @@ class Revit:
         "create_wall", "create_3d_view", "create_family_type", "delete_element",
         "get_active_document", "find_elements", "get_parameters", "list_types",
         "list_views", "get_selection", "set_selection", "set_parameters",
+        "get_family_parameters", "set_family_parameters", "edit_family",
     }
     # Read primitives return their output (the broker's results entry) instead of the full response.
-    READ_PRIMITIVES = {"find_elements", "get_parameters", "list_types", "list_views", "get_selection"}
+    READ_PRIMITIVES = {
+        "find_elements", "get_parameters", "list_types", "list_views", "get_selection", "get_family_parameters",
+    }
 
     def __init__(self, process_id, document, policy_pending, policy_denied):
         self.process_id = process_id
@@ -438,6 +441,15 @@ class Revit:
 
     def set_parameters(self, changes, document=None):
         return self._primitive("set_parameters", document, {"changes": changes})
+
+    def get_family_parameters(self, document=None):
+        return self._primitive("get_family_parameters", document, {})
+
+    def set_family_parameters(self, changes, document=None):
+        return self._primitive("set_family_parameters", document, {"changes": changes})
+
+    def edit_family(self, familyId, document=None):
+        return self._primitive("edit_family", document, {"familyId": familyId})
 
     def __getattr__(self, name):
         if name not in self.OPERATIONS:
