@@ -770,6 +770,45 @@ test("failed and partial broker outcomes remain distinct and retain effects", as
   }
 });
 
+// Flag #26 (SC-022): the worker's pipes are UTF-8 whatever the machine's locale (cp1252 on Windows).
+test("non-ASCII text crosses the real worker unchanged in both directions", async (t) => {
+  const name = "Niveau — 12° Café 東京";
+  const envelopes = [];
+  const { root, runtime } = await fixture(t, {
+    brokerExecutor: async (processId, envelope) => {
+      envelopes.push(envelope);
+      const [operation] = envelope.operations;
+      if (operation.type !== "create_level") {
+        return { id: envelope.id, status: "failed", changes: [], affectedFiles: [], affectedElements: [], checks: [], error: { code: "BROKER_TEST", message: `No view named '${name}'` } };
+      }
+      return { id: envelope.id, status: "succeeded", changes: [`Created level '${operation.arguments.name}'`], affectedFiles: [], affectedElements: [], checks: [] };
+    },
+  });
+  const run = (source, idempotencyKey) => runtime.execute(request(root, { source, arguments: { name }, idempotencyKey }));
+
+  const succeeded = await run([
+    "level = revit.create_level(name=args[\"name\"], elevation=4.0)",
+    "print(\"printed — \" + args[\"name\"])",
+    "result = {\"literal\": \"— 12° Café 東京\", \"arg\": args[\"name\"], \"broker\": level[\"changes\"][0]}",
+  ].join("\n"), "utf8-succeeded");
+  assert.equal(succeeded.status, "succeeded", succeeded.error?.message);
+  assert.equal(envelopes[0].operations[0].arguments.name, name, "the broker receives the argument exactly");
+  assert.deepEqual(succeeded.result, { literal: "— 12° Café 東京", arg: name, broker: `Created level '${name}'` });
+  assert.equal(succeeded.logs, `printed — ${name}\n`);
+
+  const raised = await run("raise RuntimeError(\"stopped — \" + args[\"name\"])", "utf8-raised");
+  assert.equal(raised.status, "failed");
+  assert.equal(raised.error.message, `stopped — ${name}`);
+
+  const brokerFailed = await run("revit.read_document()", "utf8-broker-failed");
+  assert.equal(brokerFailed.status, "failed");
+  assert.equal(brokerFailed.error.message, `No view named '${name}'`);
+
+  const died = await run("import os, sys\nsys.__stderr__.write(\"died — \" + args[\"name\"] + \"\\n\")\nsys.__stderr__.flush()\nos._exit(3)", "utf8-died");
+  assert.equal(died.status, "failed");
+  assert.match(died.error.message, new RegExp(`died — ${name}`));
+});
+
 test("a later local failure reports partial effects instead of claiming rollback", async (t) => {
   const { root, runtime } = await fixture(t);
   const target = path.join(root, "completed.txt");

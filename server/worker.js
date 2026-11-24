@@ -71,6 +71,8 @@ export function runWorker({ source, args, processId, document, runId, pythonPath
         child.stdin.write(`${JSON.stringify({ type: "response", id: message.id, error: { code: error.code || "WORKER_REQUEST_FAILED", message: error.message } })}\n`);
       });
     });
+    // Decoded as a stream, so a character split across two chunks stays whole.
+    child.stderr.setEncoding("utf8");
     child.stderr.on("data", chunk => {
       stderr = `${stderr}${chunk}`.slice(-16384);
     });

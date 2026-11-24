@@ -8,6 +8,12 @@ import stat as stat_module
 import sys
 import _thread
 
+# The protocol is UTF-8 whatever the machine's locale. Pipes otherwise use the locale encoding
+# (cp1252 on Windows), and -I makes Python ignore PYTHONIOENCODING.
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 _protocol_in = sys.stdin
 _protocol_out = sys.stdout
 _original_open = builtins.open
