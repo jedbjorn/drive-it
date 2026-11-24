@@ -157,6 +157,54 @@ public class OperatorClientTests
     }
 
     [Fact]
+    public void HistoryMeta_LabelsAHeldRun_WithHowLongItHeldRevit()
+    {
+        var zone = TimeZoneInfo.CreateCustomTimeZone("Test+0", TimeSpan.Zero, "Test+0", "Test+0");
+        using var json = JsonDocument.Parse("""
+            { "runId": "r", "status": "stopped", "startedAt": "2026-11-24T08:05:00.000Z", "displayName": "Place desks",
+              "held": { "ms": 20412, "calls": 310 } }
+            """);
+        var run = RunRecord.FromJson(json.RootElement, zone);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(20412), run.Held);
+        Assert.Equal("stopped · held Revit 20 s · 2026-11-24 08:05", run.Meta);
+    }
+
+    [Theory]
+    [InlineData("""{ "runId": "r", "status": "succeeded", "held": null }""")]
+    [InlineData("""{ "runId": "r", "status": "succeeded" }""")]
+    [InlineData("""{ "runId": "r", "status": "succeeded", "held": { "ms": "20" } }""")]
+    public void HistoryMeta_DoesNotLabelARunThatNeverHeldRevit(string receipt)
+    {
+        using var json = JsonDocument.Parse(receipt);
+        var run = RunRecord.FromJson(json.RootElement);
+        Assert.Null(run.Held);
+        Assert.Equal("succeeded", run.Meta);
+    }
+
+    [Fact]
+    public async Task ScriptTimeLimit_IsReadAndSavedThroughOperator()
+    {
+        var runner = new FakeRunner()
+            .Ok("settings get", """{ "scriptTimeLimitSeconds": 120 }""")
+            .Ok("settings set-time-limit 20", """{ "scriptTimeLimitSeconds": 20 }""");
+        var client = new OperatorClient(runner);
+
+        Assert.Equal(120, await client.GetScriptTimeLimitAsync());
+        Assert.Equal(20, await client.SetScriptTimeLimitAsync(20));
+        Assert.Equal(["settings get", "settings set-time-limit 20"], runner.Calls);
+    }
+
+    [Fact]
+    public async Task ScriptTimeLimit_OutOfRange_IsRejectedWithoutCallingOperator()
+    {
+        var runner = new FakeRunner();
+        var error = await Assert.ThrowsAsync<OperatorException>(() => new OperatorClient(runner).SetScriptTimeLimitAsync(5));
+        Assert.Contains("10 to 600", error.Message);
+        Assert.Empty(runner.Calls);
+    }
+
+    [Fact]
     public void HistoryLabel_FallsBackToTheRunId()
     {
         using var json = JsonDocument.Parse("""{ "runId": "7f3c", "status": "denied", "displayName": " " }""");

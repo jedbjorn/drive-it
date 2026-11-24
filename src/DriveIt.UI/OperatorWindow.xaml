@@ -1,6 +1,6 @@
 <!--
-    The Drive-It operator window: the workspace root, pending outside-root requests (approve or
-    deny each once), and run history. Window conventions follow splash-it
+    The Drive-It operator window: the workspace root, the Script time limit, pending outside-root
+    requests (approve or deny each once), and run history. Window conventions follow splash-it
     src/SplashIt.UI/Settings/SettingsWindow.xaml (splash-it commit ad7796d): Segoe UI 12, the
     palette's WindowBrush/TextBrush, Theme.xaml merged per window, Panel sections, banners, and
     the Primary/Danger buttons. The behavior is the former PowerShell window's
@@ -10,7 +10,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Drive-It"
-        Width="920" Height="700" MinWidth="720" MinHeight="560"
+        Width="920" Height="780" MinWidth="720" MinHeight="640"
         WindowStartupLocation="CenterOwner"
         FontFamily="Segoe UI" FontSize="12" UseLayoutRounding="True"
         TextOptions.TextFormattingMode="Display"
@@ -84,6 +84,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" MinHeight="170" />
             <RowDefinition Height="1.3*" MinHeight="170" />
             <RowDefinition Height="Auto" />
@@ -114,14 +115,39 @@
             </Grid>
         </Border>
 
+        <!-- Script time limit (spec #15 "Time Limit and Long Jobs"); the add-in and the server both enforce it. -->
+        <Border Grid.Row="1" Margin="0,12,0,0" Style="{StaticResource Panel}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.ColumnSpan="4" Style="{StaticResource SectionText}" Text="Script time limit" />
+                <TextBox x:Name="TimeLimitText" Grid.Row="1" Width="72" HorizontalContentAlignment="Right"
+                         AutomationProperties.Name="Script time limit in seconds" />
+                <TextBlock Grid.Row="1" Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center" Text="seconds" />
+                <Button x:Name="SaveTimeLimitButton" Grid.Row="1" Grid.Column="3" Margin="8,0,0,0"
+                        Style="{StaticResource PrimaryButton}" Content="Save limit" Click="OnSaveTimeLimit" />
+                <TextBlock x:Name="TimeLimitHelp" Grid.Row="2" Grid.ColumnSpan="4" Margin="0,6,0,0"
+                           Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+            </Grid>
+        </Border>
+
         <!-- Errors from the last action; cleared by the next one that succeeds. -->
-        <Border x:Name="ErrorPanel" Grid.Row="1" Margin="0,10,0,0" Style="{StaticResource ErrorBanner}"
+        <Border x:Name="ErrorPanel" Grid.Row="2" Margin="0,10,0,0" Style="{StaticResource ErrorBanner}"
                 Visibility="Collapsed">
             <TextBlock x:Name="ErrorText" Style="{StaticResource ErrorText}" />
         </Border>
 
         <!-- Outside-root requests -->
-        <Border Grid.Row="2" Margin="0,12,0,0" Style="{StaticResource Panel}">
+        <Border Grid.Row="3" Margin="0,12,0,0" Style="{StaticResource Panel}">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="320" />
@@ -155,7 +181,7 @@
         </Border>
 
         <!-- Run history -->
-        <Border Grid.Row="3" Margin="0,12,0,0" Style="{StaticResource Panel}">
+        <Border Grid.Row="4" Margin="0,12,0,0" Style="{StaticResource Panel}">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="320" />
@@ -187,6 +213,6 @@
             </Grid>
         </Border>
 
-        <TextBlock x:Name="McpText" Grid.Row="4" Margin="2,10,0,0" Style="{StaticResource MutedText}" />
+        <TextBlock x:Name="McpText" Grid.Row="5" Margin="2,10,0,0" Style="{StaticResource MutedText}" />
     </Grid>
 </Window>

@@ -67,6 +67,9 @@ public sealed class RunRecord
 
     public DateTimeOffset? StartedAt { get; init; }
 
+    /// <summary>How long the run held Revit (the receipt's <c>held.ms</c>); null for a run that never used the bridge.</summary>
+    public TimeSpan? Held { get; init; }
+
     /// <summary>The receipt as operator.js printed it, every field included.</summary>
     public required JsonElement Receipt { get; init; }
 
@@ -79,7 +82,7 @@ public sealed class RunRecord
     /// <summary>The row's first line: the display name, or the run ID for older receipts.</summary>
     public string Title => DisplayName ?? RunId ?? "(unnamed run)";
 
-    /// <summary>The row's second line: "status · local time".</summary>
+    /// <summary>The row's second line: "status · held Revit 12 s · local time" (the middle part only for a held run).</summary>
     public string Meta => OperatorText.HistoryMeta(this);
 
     /// <summary>The details pane: the receipt as indented JSON.</summary>
@@ -99,9 +102,21 @@ public sealed class RunRecord
             Status = Json.String(row, "status"),
             DisplayName = OperatorText.CleanName(Json.String(row, "displayName")),
             StartedAt = started,
+            Held = ReadHeld(row),
             Receipt = row.Clone(),
             TimeZone = timeZone ?? TimeZoneInfo.Local,
         };
+    }
+
+    /// <summary>The receipt's <c>held: {ms, calls}</c> (spec #15 "What Comes Back"); null when absent, null or malformed.</summary>
+    private static TimeSpan? ReadHeld(JsonElement row)
+    {
+        if (row.ValueKind != JsonValueKind.Object
+            || !row.TryGetProperty("held", out var held) || held.ValueKind != JsonValueKind.Object
+            || !held.TryGetProperty("ms", out var ms) || ms.ValueKind != JsonValueKind.Number
+            || !ms.TryGetDouble(out var milliseconds) || milliseconds < 0)
+            return null;
+        return TimeSpan.FromMilliseconds(milliseconds);
     }
 }
 
@@ -136,6 +151,7 @@ public static class OperatorText
     {
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(run.Status)) parts.Add(run.Status!);
+        if (run.Held is { } held) parts.Add("held Revit " + HoldText.Duration(held));
         if (run.StartedAt is { } started)
             parts.Add(TimeZoneInfo.ConvertTime(started, run.TimeZone).ToString(TimeFormat, CultureInfo.InvariantCulture));
         return string.Join(HistorySeparator, parts);

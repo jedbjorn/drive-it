@@ -80,7 +80,8 @@ public sealed class ProcessOperatorRunner(OperatorHost host) : IOperatorRunner
 /// <summary>
 /// The operator.js contract the window uses, with the PowerShell module's behavior
 /// (<c>operator/DriveIt.Operator.psm1</c>): <c>workspace get|set</c>, <c>decisions list|approve|deny</c>
-/// (only <c>pending</c> rows are listed) and <c>history list</c> (newest first, at most 100).
+/// (only <c>pending</c> rows are listed), <c>history list</c> (newest first, at most 100) and
+/// <c>settings get|set-time-limit</c> (the Script time limit).
 /// </summary>
 public sealed class OperatorClient(IOperatorRunner runner)
 {
@@ -140,6 +141,37 @@ public sealed class OperatorClient(IOperatorRunner runner)
                 if (row.ValueKind == JsonValueKind.Object) rows.Add(RunRecord.FromJson(row));
             }
         return rows;
+    }
+
+    /// <summary>The Script time limit in seconds (<see cref="ScriptTimeLimit"/>).</summary>
+    public async Task<int> GetScriptTimeLimitAsync(CancellationToken cancellationToken = default)
+    {
+        var result = await runner.RunAsync(["settings", "get"], cancellationToken).ConfigureAwait(false);
+        return ReadTimeLimit(Parse(result));
+    }
+
+    /// <summary>Saves the Script time limit for future runs; returns the value operator.js stored.</summary>
+    public async Task<int> SetScriptTimeLimitAsync(int seconds, CancellationToken cancellationToken = default)
+    {
+        if (!ScriptTimeLimit.IsValid(seconds))
+            throw new OperatorException($"The script time limit must be a whole number of seconds from {ScriptTimeLimit.MinimumSeconds} to {ScriptTimeLimit.MaximumSeconds}.");
+        var result = await runner.RunAsync(
+            ["settings", "set-time-limit", seconds.ToString(System.Globalization.CultureInfo.InvariantCulture)], cancellationToken)
+            .ConfigureAwait(false);
+        return ReadTimeLimit(Parse(result));
+    }
+
+    private static int ReadTimeLimit(JsonDocument? document)
+    {
+        using (document)
+        {
+            if (document?.RootElement is { ValueKind: JsonValueKind.Object } root
+                && root.TryGetProperty(ScriptTimeLimit.PropertyName, out var value)
+                && value.ValueKind == JsonValueKind.Number
+                && value.TryGetInt32(out var seconds))
+                return seconds;
+        }
+        throw new OperatorException("Drive It did not report the script time limit.");
     }
 
     /// <summary>The command's JSON, or null for empty output; a non-zero exit is an <see cref="OperatorException"/>.</summary>
