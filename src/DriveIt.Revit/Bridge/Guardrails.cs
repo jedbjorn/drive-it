@@ -82,6 +82,19 @@ internal static class Guardrails
         }
     }
 
+    /// <summary>
+    /// A dry run refuses, in both modes, the members with lasting effects a rollback cannot undo (spec #13 D13): the
+    /// commit points (save, save-as, close, synchronize, reload latest) and printing. Opening documents stays allowed.
+    /// </summary>
+    public static void RequireNotLasting(Type type, string member)
+    {
+        var lasting = IsCommitPoint(type, member)
+            || LeaveTheSession.Any(entry => entry.Member == member && entry.Owner.IsAssignableFrom(type));
+        if (lasting)
+            throw new BridgeException("not_allowed_in_dry_run",
+                $"{BridgeCalls.TypeName(type)}.{member} has a lasting effect a rollback cannot undo, so it is not allowed in a dry run. Leave it out of the dry run; the real run, or the person in Revit, can do it.");
+    }
+
     /// <summary>True for a Document call that needs the run's group on that document closed first (Dev Mode only).</summary>
     public static bool IsCommitPoint(Type type, string member) => typeof(Document).IsAssignableFrom(type) && CommitPoints.Contains(member);
 

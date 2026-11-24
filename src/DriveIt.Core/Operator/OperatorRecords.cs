@@ -67,6 +67,9 @@ public sealed class RunRecord
 
     public DateTimeOffset? StartedAt { get; init; }
 
+    /// <summary>The receipt's <c>dryRun</c> (spec #13): a rehearsal whose changes were rolled back.</summary>
+    public bool DryRun { get; init; }
+
     /// <summary>How long the run held Revit (the receipt's <c>held.ms</c>); null for a run that never used the bridge.</summary>
     public TimeSpan? Held { get; init; }
 
@@ -82,7 +85,7 @@ public sealed class RunRecord
     /// <summary>The row's first line: the display name, or the run ID for older receipts.</summary>
     public string Title => DisplayName ?? RunId ?? "(unnamed run)";
 
-    /// <summary>The row's second line: "status · held Revit 12 s · local time" (the middle part only for a held run).</summary>
+    /// <summary>The row's second line: "Dry run · status · held Revit 12 s · local time" (the first part only for a dry run, the third only for a held run).</summary>
     public string Meta => OperatorText.HistoryMeta(this);
 
     /// <summary>The details pane: the receipt as indented JSON.</summary>
@@ -102,6 +105,7 @@ public sealed class RunRecord
             Status = Json.String(row, "status"),
             DisplayName = OperatorText.CleanName(Json.String(row, "displayName")),
             StartedAt = started,
+            DryRun = row.ValueKind == JsonValueKind.Object && row.TryGetProperty("dryRun", out var dry) && dry.ValueKind == JsonValueKind.True,
             Held = ReadHeld(row),
             Receipt = row.Clone(),
             TimeZone = timeZone ?? TimeZoneInfo.Local,
@@ -150,6 +154,7 @@ public static class OperatorText
     public static string HistoryMeta(RunRecord run)
     {
         var parts = new List<string>();
+        if (run.DryRun) parts.Add(HoldText.DryRunLabel);
         if (!string.IsNullOrWhiteSpace(run.Status)) parts.Add(run.Status!);
         if (run.Held is { } held) parts.Add("held Revit " + HoldText.Duration(held));
         if (run.StartedAt is { } started)

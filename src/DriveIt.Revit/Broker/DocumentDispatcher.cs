@@ -16,6 +16,15 @@ public sealed partial class DocumentDispatcher
 
     private readonly Dictionary<string, DocumentState> documents = new(StringComparer.Ordinal);
 
+    /// <summary>The document operations a dry run refuses (spec #13 D3, D7), and what makes each one lasting.</summary>
+    private static readonly Dictionary<string, string> DryRunRefusals = new(StringComparer.Ordinal)
+    {
+        ["save_document"] = "a save writes the model to disk",
+        ["save_as_document"] = "a save-as writes the model to disk",
+        ["close_document"] = "closing discards the document's unsaved state",
+        ["delete_document"] = "deleting removes the file",
+    };
+
     /// <summary>The hold serving this dispatch, or null: model changes then join the run's group, and saves close it.</summary>
     internal IHeldDocuments? Held { get; set; }
 
@@ -119,6 +128,9 @@ public sealed partial class DocumentDispatcher
                 continue;
             }
 
+            if (Held?.DryRun == true && DryRunRefusals.TryGetValue(operation.Type, out var lasting))
+                throw new RequestRejectedException("not_allowed_in_dry_run",
+                    $"{operation.Type} is not allowed in a dry run: {lasting}, which a rollback cannot undo. Leave it out of the dry run; the real run, or the person in Revit, can do it.");
             item.DocumentArguments = Deserialize<DocumentOperationArguments>(operation.Arguments);
             switch (operation.Type)
             {

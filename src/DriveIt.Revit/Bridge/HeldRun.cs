@@ -27,6 +27,9 @@ internal interface IHeldDocuments
 
     /// <summary>The hold's key for a document, so the server can tell which document each effect belongs to.</summary>
     string DocumentKey(Document document);
+
+    /// <summary>A dry run (spec #13): every group is rolled back, and operations with lasting effects are refused.</summary>
+    bool DryRun { get; }
 }
 
 public sealed class HoldSummary
@@ -40,6 +43,12 @@ public sealed class HoldSummary
     public List<HoldWarning> Warnings { get; set; } = [];
     public int WarningsOmitted { get; set; }
     public List<HoldDocument> Documents { get; set; } = [];
+    /// <summary>A succeeded dry run's images, exported with the groups open (spec #13).</summary>
+    public List<DryRunImage>? Images { get; set; }
+    /// <summary>A succeeded dry run's actions: per document, created, modified, deleted and also touched (spec #13).</summary>
+    public JsonArray? Actions { get; set; }
+    /// <summary>A dry run that changed a workshared document: the release of borrowed elements, per document (D17).</summary>
+    public JsonArray? Worksharing { get; set; }
 }
 
 public sealed class HoldWarning
@@ -92,10 +101,15 @@ internal sealed class HeldRun : IHeldDocuments
     private HoldSummary? summary;
     private Committing? committing;
     private readonly List<(Document Document, string Key)> documentKeys = [];
+    private readonly List<DryRunChanges> dryRunChanges = [];
+    private bool recordingChanges = true;
+    private JsonObject? dryRunEvidence;
+    private UIApplication? application;
 
-    public HeldRun(string runId, string? displayName, int? timeLimitMs)
+    public HeldRun(string runId, string? displayName, int? timeLimitMs, bool dryRun = false)
     {
         RunId = runId;
+        DryRun = dryRun;
         calls = new BridgeCalls(this, AnyTransactionOpen);
         DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName.Trim();
         requestedLimit = timeLimitMs is > 0 ? TimeSpan.FromMilliseconds(timeLimitMs.Value) : TimeSpan.MaxValue;
@@ -103,6 +117,7 @@ internal sealed class HeldRun : IHeldDocuments
 
     public string RunId { get; }
     public string? DisplayName { get; }
+    public bool DryRun { get; }
     public DateTimeOffset StartedAt { get; private set; }
     public DateTimeOffset Deadline { get; private set; }
     public int Calls { get; private set; }
@@ -185,6 +200,7 @@ internal sealed class HeldRun : IHeldDocuments
         }
 
         StartedAt = DateTimeOffset.Now;
+        this.application = application;
         var limit = HoldSignal.CurrentTimeLimit();
         Deadline = StartedAt + (requestedLimit < limit ? requestedLimit : limit);
         dispatcher.Held = this;
@@ -265,6 +281,12 @@ internal sealed class HeldRun : IHeldDocuments
             if (type == "hold.end")
             {
                 endMessage = message;
+                // A dry run is never committed. One whose script succeeded asks for its images and actions.
+                if (DryRun)
+                {
+                    dryRunEvidence = message.Request["end"]?["dryRun"] as JsonObject;
+                    return "rolled_back";
+                }
                 return message.Request["end"]?["outcome"]?.GetValue<string>() == "commit" ? "committed" : "rolled_back";
             }
             Calls++;
@@ -462,9 +484,14 @@ internal sealed class HeldRun : IHeldDocuments
 
     private static JsonArray Ids(List<long> ids) => new(ids.Take(MaximumTransactionIds).Select(id => (JsonNode)id).ToArray());
 
-    /// <summary>Revit raises DocumentChanged as a transaction commits; the one being committed keeps its element ids.</summary>
+    /// <summary>
+    /// Revit raises DocumentChanged as a transaction commits; the one being committed keeps its element ids. A dry run
+    /// also keeps every committed transaction's ids per document, built-in, bridge and script-made alike, for its actions.
+    /// </summary>
     private void OnDocumentChanged(object? sender, DocumentChangedEventArgs e)
     {
+        if (DryRun && recordingChanges && e.Operation == UndoOperation.TransactionCommitted)
+            ChangesFor(e.GetDocument()).Record(e.GetAddedElementIds(), e.GetModifiedElementIds(), e.GetDeletedElementIds());
         if (committing is null || e.Operation != UndoOperation.TransactionCommitted || !SameDocument(e.GetDocument(), committing.Document))
             return;
         committing.Added.AddRange(e.GetAddedElementIds().Select(element => element.Value));
@@ -547,6 +574,17 @@ internal sealed class HeldRun : IHeldDocuments
         return true;
     }
 
+    private DryRunChanges ChangesFor(Document document)
+    {
+        var entry = dryRunChanges.FirstOrDefault(candidate => SameDocument(candidate.Document, document));
+        if (entry is null)
+        {
+            entry = new DryRunChanges(document);
+            dryRunChanges.Add(entry);
+        }
+        return entry;
+    }
+
     public string DocumentKey(Document document)
     {
         foreach (var (known, key) in documentKeys)
@@ -568,10 +606,14 @@ internal sealed class HeldRun : IHeldDocuments
         return text;
     }
 
-    /// <summary>Ends every transaction and closes every group: one undo entry each on commit, restored otherwise.</summary>
+    /// <summary>
+    /// Ends every transaction and closes every group: one undo entry each on commit, restored otherwise. A dry run whose
+    /// script succeeded first exports its views and reads its actions with the groups open; after its rollback it reads
+    /// the before values, and on a workshared document it releases the borrowed elements (spec #13 "How It Works").
+    /// </summary>
     private HoldSummary End(string reason)
     {
-        var commit = reason == "committed";
+        var commit = reason == "committed" && !DryRun;
         // A Dev Mode script's own transactions first (innermost), then the revit.transaction ones, then once more for a
         // script group that was around a revit.transaction and can close only after it.
         calls.RollBackScriptTransactions();
@@ -582,6 +624,21 @@ internal sealed class HeldRun : IHeldDocuments
         }
         transactions.Clear();
         calls.RollBackScriptTransactions();
+
+        recordingChanges = false;
+        List<DryRunImage>? images = null;
+        DryRunActions? actions = null;
+        if (DryRun && dryRunEvidence is not null && reason == "rolled_back" && application is not null)
+        {
+            if (dryRunEvidence["export"] is JsonObject export)
+                images = Evidence("images", () => DryRunImages.Export(application, dryRunChanges, export, Deadline));
+            if (dryRunEvidence["actions"] is JsonValue wanted && wanted.TryGetValue<bool>(out var read) && read)
+            {
+                actions = new DryRunActions(dryRunChanges, Deadline);
+                if (Evidence("actions", () => { actions.ReadAfter(); return actions; }) is null)
+                    actions = null;
+            }
+        }
 
         foreach (var entry in groups)
         {
@@ -608,9 +665,15 @@ internal sealed class HeldRun : IHeldDocuments
             }
         }
 
+        var actionsRead = actions is null ? null : Evidence("actions", actions.ReadBefore);
+        var released = DryRun ? Evidence("release", () => DryRunRelease.Release(dryRunChanges)) : null;
+
         var endedAt = DateTimeOffset.Now;
         return new HoldSummary
         {
+            Images = images,
+            Actions = actionsRead,
+            Worksharing = released,
             Outcome = reason,
             StartedAt = StartedAt,
             EndedAt = endedAt,
@@ -628,6 +691,20 @@ internal sealed class HeldRun : IHeldDocuments
                 Message = entry.Message,
             }).ToList(),
         };
+    }
+
+    /// <summary>Evidence a dry run gathers never stops its rollback: a failure is traced and the evidence left out.</summary>
+    private T? Evidence<T>(string what, Func<T?> read) where T : class
+    {
+        try
+        {
+            return read();
+        }
+        catch (Exception exception)
+        {
+            Trace.WriteLine($"Drive-It: reading the dry run's {what} for run {RunId} failed ({exception.GetType().Name}: {exception.Message}).");
+            return null;
+        }
     }
 
     private static void RollBackQuietly(Transaction transaction)

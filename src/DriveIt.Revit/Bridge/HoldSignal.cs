@@ -3,7 +3,7 @@ using System.Diagnostics;
 namespace DriveIt.Revit.Bridge;
 
 /// <summary>A hold has begun: Revit is paused for this run until <see cref="Deadline"/> at the latest.</summary>
-public sealed record HoldStarted(string RunId, string? DisplayName, DateTimeOffset StartedAt, DateTimeOffset Deadline);
+public sealed record HoldStarted(string RunId, string? DisplayName, DateTimeOffset StartedAt, DateTimeOffset Deadline, bool DryRun = false);
 
 /// <summary>
 /// A hold has ended. Outcome is "committed", "rolled_back", "timed_out", "stopped_by_user", "disconnected",
@@ -76,7 +76,7 @@ public static class HoldSignal
     {
         lock (Gate)
             active = run;
-        Raise(Started, new HoldStarted(run.RunId, run.DisplayName, run.StartedAt, run.Deadline));
+        Raise(Started, new HoldStarted(run.RunId, run.DisplayName, run.StartedAt, run.Deadline, run.DryRun));
     }
 
     internal static void RaiseEnded(HeldRun run, string outcome)

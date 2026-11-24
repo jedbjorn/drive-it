@@ -250,8 +250,11 @@ export async function openHold(processId, { runId, displayName, timeLimitMs, dry
     const session = await lines.next();
     if (session === null) throw holdError("HOLD_LOST", "Revit closed the connection before the hold began.");
     validateSession(JSON.parse(session), processId);
-    // A dry run's hold says so, for the status window, and is never committed (spec #13 "How It Works").
-    pipe.write(`${JSON.stringify({ id: runId, type: "hold.begin", hold: { displayName: displayName ?? null, timeLimitMs, dryRun } })}\n`);
+    // A dry run's hold says so, for the status window and its refusals (spec #13 "How It Works"). Only a dry run
+    // sends the flag: an add-in from before dry runs refuses a hold with a member it does not know, so a real run's
+    // hold.begin stays as it was and only a dry run fails closed against an old add-in.
+    const hold = { displayName: displayName ?? null, timeLimitMs, ...(dryRun ? { dryRun: true } : {}) };
+    pipe.write(`${JSON.stringify({ id: runId, type: "hold.begin", hold })}\n`);
     const reply = await lines.next();
     if (reply === null) throw holdError("HOLD_LOST", "Revit closed the connection before the hold began.");
     const begun = JSON.parse(reply);

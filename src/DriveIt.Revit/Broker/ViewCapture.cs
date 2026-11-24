@@ -391,7 +391,13 @@ public sealed partial class DocumentDispatcher
             view = element as View ?? throw new RequestRejectedException("not_a_view",
                 $"Element {viewId} in '{document.Title}' is a {element.GetType().Name}, not a view.");
         }
+        RequireCapturable(view);
+        return view;
+    }
 
+    /// <summary>The checks every exported view passes: not a template, a graphical model view type, and printable.</summary>
+    internal static void RequireCapturable(View view)
+    {
         if (view.IsTemplate)
             throw new RequestRejectedException("view_is_template",
                 $"View '{view.Name}' ({view.Id.Value}) is a view template, which has no graphics to export.");
@@ -401,7 +407,46 @@ public sealed partial class DocumentDispatcher
         if (!view.CanBePrinted)
             throw new RequestRejectedException("view_not_exportable",
                 $"Revit reports that view '{view.Name}' ({view.Id.Value}) cannot be printed or exported.");
-        return view;
+    }
+
+    /// <summary>True for a view a dry run may export because the script created it (spec #13 createdViews).</summary>
+    internal static bool IsCapturable(View view) =>
+        !view.IsTemplate && CapturableViewTypes.Contains(view.ViewType) && view.CanBePrinted;
+
+    /// <summary>
+    /// A dry run's image (spec #13 "How It Works"): exports one view as capture_revit_view does, with the run's groups
+    /// open and no transaction open, to a target in an empty staging directory the server made. Returns the PNG's
+    /// size and fit direction; a failure leaves the staging directory empty.
+    /// </summary>
+    internal static (int Width, int Height, string Fit) ExportForDryRun(Document document, View view, int pixelSize, string targetPath)
+    {
+        var target = ValidateCaptureTarget(targetPath);
+        var staging = Path.GetDirectoryName(target)!;
+        if (pixelSize is < MinimumPixelSize or > MaximumPixelSize)
+            throw new RequestRejectedException("invalid_pixel_size", $"pixelSize must be an integer from {MinimumPixelSize} through {MaximumPixelSize}.");
+        try
+        {
+            var fit = LongerSideFit(view);
+            var produced = ExportOnce(document, view, fit, pixelSize, staging);
+            var (width, height) = PngSize(produced);
+            if (Math.Max(width, height) > pixelSize + PixelTolerance)
+            {
+                File.Delete(produced);
+                fit = fit == FitDirectionType.Horizontal ? FitDirectionType.Vertical : FitDirectionType.Horizontal;
+                produced = ExportOnce(document, view, fit, pixelSize, staging);
+                (width, height) = PngSize(produced);
+                if (Math.Max(width, height) > pixelSize + PixelTolerance)
+                    throw new RequestRejectedException("capture_size_exceeded",
+                        $"Revit exported {width}x{height} for view '{view.Name}', larger than pixelSize {pixelSize} on its longer side with either fit direction.");
+            }
+            File.Move(produced, target);
+            return (width, height, fit.ToString());
+        }
+        catch
+        {
+            RemoveStagedFiles(staging);
+            throw;
+        }
     }
 
     private static Document? OtherDocumentWithView(UIApplication application, Document document, long raw)

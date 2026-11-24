@@ -68,7 +68,7 @@ public sealed class App : IExternalApplication
         var host = OperatorHost.ForAssemblyDirectory(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
         HoldSignal.TimeLimit = () => ScriptTimeLimit.HoldLimit(host, DateTimeOffset.Now);
         HoldSignal.Started += hold => HoldStatus.Begin(hold.RunId, hold.DisplayName, hold.StartedAt,
-            hold.Deadline - hold.StartedAt, () => HoldSignal.RequestStop(hold.RunId));
+            hold.Deadline - hold.StartedAt, () => HoldSignal.RequestStop(hold.RunId), hold.DryRun);
         HoldSignal.Ended += hold => HoldStatus.End(hold.RunId);
     }
 

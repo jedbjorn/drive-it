@@ -23,6 +23,8 @@ public sealed class HoldRequest
 {
     public string? DisplayName { get; set; }
     public int? TimeLimitMs { get; set; }
+    /// <summary>A dry run (spec #13): never committed, refuses lasting operations, and labelled in the status window.</summary>
+    public bool DryRun { get; set; }
 }
 
 /// <summary>

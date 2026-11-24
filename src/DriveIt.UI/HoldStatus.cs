@@ -23,7 +23,7 @@ public static class HoldStatus
     private static HoldStatusWindow? _window;
 
     /// <summary>A hold started: show the window once it has lasted <see cref="ShowAfter"/>. <paramref name="stop"/> runs on the status thread when the person presses Stop.</summary>
-    public static void Begin(string runId, string? displayName, DateTimeOffset startedAt, TimeSpan limit, Action stop)
+    public static void Begin(string runId, string? displayName, DateTimeOffset startedAt, TimeSpan limit, Action stop, bool dryRun = false)
     {
         var dispatcher = StatusDispatcher();
         dispatcher.InvokeAsync(() =>
@@ -38,7 +38,7 @@ public static class HoldStatus
                 ((DispatcherTimer)sender!).Stop();
                 _pending = null;
                 if (_runId != runId) return;
-                _window = new HoldStatusWindow(displayName, startedAt, limit, stop);
+                _window = new HoldStatusWindow(displayName, startedAt, limit, stop, dryRun);
                 _window.Show();
             }, dispatcher);
         });
