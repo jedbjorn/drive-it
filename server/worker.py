@@ -134,7 +134,13 @@ class _Proxy:
             chunk = _bridge({"op": "next", "iterator": chunk["$iter"]})
 
     def __len__(self):
-        return _bridge({"op": "len", "target": self._target()})
+        try:
+            return _bridge({"op": "len", "target": self._target()})
+        except RevitError as error:
+            # list() and friends ask for a length first and accept TypeError as "unknown".
+            if (error.response.get("error") or {}).get("code") == "no_length":
+                raise TypeError(str(error)) from None
+            raise
 
     def __eq__(self, other):
         try:

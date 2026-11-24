@@ -173,6 +173,7 @@ class StubHold {
       case "get": {
         const target = this.resolve(call.target);
         if (call.member === "Collector") return this.handle(this.collection());
+        if (call.member === "Levels") return this.handle({ ...this.collection(), kind: "Collector" });
         if (typeof target[call.member] === "function") return { $method: call.member };
         if (!(call.member in target)) throw coded("member_not_found", `${target.kind} has no member '${call.member}'. Its members are: ${Object.keys(target).join(", ")}.`);
         return this.handle(target[call.member]);
@@ -204,8 +205,11 @@ class StubHold {
         }
         return chunk;
       }
-      case "len":
-        return this.resolve(call.target).items.length;
+      case "len": {
+        const target = this.resolve(call.target);
+        if (target.kind === "Collector") throw coded("no_length", "A Autodesk.Revit.DB.FilteredElementCollector has no length.");
+        return target.items.length;
+      }
       case "eq": {
         const left = this.resolve(call.target);
         const right = this.resolve(call.other);
@@ -305,12 +309,13 @@ result = {
     "eq": DB.BuiltInCategory.OST_Levels == DB.BuiltInCategory.OST_Levels,
     "same": level == level,
     "repr": repr(level),
+    "unsized": len(list(doc.Levels)),
 }`;
   const receipt = await run(runtime, source);
   assert.equal(receipt.status, "succeeded", receipt.error?.message);
   assert.deepEqual(receipt.result, {
     title: "Tower", x: 1, moved: [2, 3, 4], again: 2, str: "(2, 3, 4)", name: "Ground", id: 30,
-    count: 601, len: 601, first: "Ground", eq: true, same: true, repr: "<Revit Autodesk.Revit.DB.Level handle>",
+    count: 601, len: 601, first: "Ground", eq: true, same: true, repr: "<Revit Autodesk.Revit.DB.Level handle>", unsized: 601,
   });
   const [hold] = revit.opened;
   assert.equal(revit.opened.length, 1);
@@ -322,7 +327,7 @@ result = {
   const adds = hold.sent.filter(message => message.call?.member === "Add");
   assert.deepEqual(adds.map(message => message.call.op), ["get", "call", "call"]);
   // 601 items cross in chunks of 256.
-  assert.equal(hold.sent.filter(message => message.call?.op === "next").length, 2);
+  assert.equal(hold.sent.filter(message => message.call?.op === "next").length, 4, "two walks of 601 items, in chunks of 256");
   assert.deepEqual(receipt.held, { ms: 5, calls: hold.calls });
   assert.deepEqual(receipt.warnings, [{ description: "Overlap", severity: "warning", elementIds: [1] }]);
 });
