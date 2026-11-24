@@ -23,6 +23,9 @@ internal interface IHeldDocuments
 
     /// <summary>Revit's error messages from the last transaction it rolled back, or null.</summary>
     string? TakeErrors();
+
+    /// <summary>The hold's key for a document, so the server can tell which document each effect belongs to.</summary>
+    string DocumentKey(Document document);
 }
 
 public sealed class HoldSummary
@@ -66,6 +69,7 @@ public sealed class HoldDocument
 internal sealed class HeldRun : IHeldDocuments
 {
     private const int MaximumWarnings = 200;
+    private const int MaximumTransactionIds = 1000;
     private static readonly TimeSpan Poll = TimeSpan.FromMilliseconds(200);
 
     private readonly BlockingCollection<Message> inbox = new();
@@ -85,6 +89,8 @@ internal sealed class HeldRun : IHeldDocuments
     private bool isEnded;
     private volatile bool stopRequested;
     private HoldSummary? summary;
+    private Committing? committing;
+    private readonly List<(Document Document, string Key)> documentKeys = [];
 
     public HeldRun(string runId, string? displayName, int? timeLimitMs)
     {
@@ -178,6 +184,7 @@ internal sealed class HeldRun : IHeldDocuments
         Deadline = StartedAt + (requestedLimit < limit ? requestedLimit : limit);
         dispatcher.Held = this;
         application.Application.FailuresProcessing += OnFailuresProcessing;
+        application.Application.DocumentChanged += OnDocumentChanged;
         HoldSignal.RaiseStarted(this);
         begun.TrySetResult(new JsonObject
         {
@@ -208,6 +215,7 @@ internal sealed class HeldRun : IHeldDocuments
             try
             {
                 application.Application.FailuresProcessing -= OnFailuresProcessing;
+                application.Application.DocumentChanged -= OnDocumentChanged;
             }
             catch (Exception)
             {
@@ -288,6 +296,7 @@ internal sealed class HeldRun : IHeldDocuments
                 "tx.start" => StartTransaction(application, dispatcher, call),
                 "tx.commit" => CommitTransaction(call),
                 "tx.rollback" => RollBackTransaction(call),
+                "describe" => BridgeCalls.Describe(call),
                 _ => throw new BridgeException("invalid_call", $"Unknown bridge operation '{op}'."),
             };
             return new JsonObject
@@ -400,12 +409,15 @@ internal sealed class HeldRun : IHeldDocuments
         return id;
     }
 
-    private JsonNode? CommitTransaction(JsonObject call)
+    /// <summary>Commits a revit.transaction; the reply names what Revit reported as added, changed and deleted.</summary>
+    private JsonNode CommitTransaction(JsonObject call)
     {
         var (id, transaction) = OpenTransaction(call);
         var name = transaction.GetName();
+        var document = transactions[id].Document;
         errors.Clear();
         TransactionStatus status;
+        var changed = committing = new Committing(document);
         try
         {
             status = transaction.Commit();
@@ -417,13 +429,41 @@ internal sealed class HeldRun : IHeldDocuments
         }
         finally
         {
+            committing = null;
             transactions.Remove(id);
             transaction.Dispose();
         }
         if (status != TransactionStatus.Committed)
             throw new BridgeException("transaction_failed",
                 $"Revit rolled back the transaction '{name}': {TakeErrors() ?? $"status {status}"}");
-        return null;
+        return new JsonObject
+        {
+            ["name"] = name,
+            ["document"] = document.Title,
+            ["documentKey"] = DocumentKey(document),
+            ["added"] = Ids(changed.Added),
+            ["changed"] = Ids(changed.Modified),
+            ["deleted"] = Ids(changed.Deleted),
+            ["totals"] = new JsonObject
+            {
+                ["added"] = changed.Added.Count,
+                ["changed"] = changed.Modified.Count,
+                ["deleted"] = changed.Deleted.Count,
+            },
+            ["truncated"] = new[] { changed.Added, changed.Modified, changed.Deleted }.Any(list => list.Count > MaximumTransactionIds),
+        };
+    }
+
+    private static JsonArray Ids(List<long> ids) => new(ids.Take(MaximumTransactionIds).Select(id => (JsonNode)id).ToArray());
+
+    /// <summary>Revit raises DocumentChanged as a transaction commits; the one being committed keeps its element ids.</summary>
+    private void OnDocumentChanged(object? sender, DocumentChangedEventArgs e)
+    {
+        if (committing is null || e.Operation != UndoOperation.TransactionCommitted || !SameDocument(e.GetDocument(), committing.Document))
+            return;
+        committing.Added.AddRange(e.GetAddedElementIds().Select(element => element.Value));
+        committing.Modified.AddRange(e.GetModifiedElementIds().Select(element => element.Value));
+        committing.Deleted.AddRange(e.GetDeletedElementIds().Select(element => element.Value));
     }
 
     private JsonNode? RollBackTransaction(JsonObject call)
@@ -485,6 +525,18 @@ internal sealed class HeldRun : IHeldDocuments
         entry.CommitPoint = true;
         entry.State = "committed";
         return true;
+    }
+
+    public string DocumentKey(Document document)
+    {
+        foreach (var (known, key) in documentKeys)
+        {
+            if (SameDocument(known, document))
+                return key;
+        }
+        var next = $"d{documentKeys.Count + 1}";
+        documentKeys.Add((document, next));
+        return next;
     }
 
     public string? TakeErrors()
@@ -647,6 +699,14 @@ internal sealed class HeldRun : IHeldDocuments
         {
             return false;
         }
+    }
+
+    private sealed class Committing(Document document)
+    {
+        public Document Document { get; } = document;
+        public List<long> Added { get; } = [];
+        public List<long> Modified { get; } = [];
+        public List<long> Deleted { get; } = [];
     }
 
     private sealed class GroupEntry(Document document)

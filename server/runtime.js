@@ -26,11 +26,35 @@ function append(target, values) {
   if (Array.isArray(values)) target.push(...values);
 }
 
-// Receipt lists that hold Revit effects; inside a hold they are provisional until a save or a commit.
-const PROVISIONAL = ["changes", "affectedElements", "createdViews"];
+// Receipt lists that hold Revit effects; inside a hold they are provisional until a save of their document,
+// or the run's commit, keeps them.
+const PROVISIONAL = ["changes", "affectedElements", "createdViews", "transactions"];
 
-function provisional() {
-  return { changes: [], affectedElements: [], createdViews: [] };
+// Bridge members that only read the file a path names, so Revit's installed content passes (decision #23).
+// A path given to any other member is checked as a write.
+const BRIDGE_READS = new Set(["LoadFamily", "LoadFamilySymbol"]);
+
+// A string argument that is an absolute file path goes through the outside-root policy (spec #15 "Guardrails").
+function isAbsoluteFilePath(value) {
+  return typeof value === "string" && !/[\r\n]/.test(value)
+    && path.isAbsolute(value) && /[^\\/]/.test(value);
+}
+
+function bridgePaths(value, found = []) {
+  if (isAbsoluteFilePath(value)) found.push(value);
+  else if (Array.isArray(value)) for (const item of value) bridgePaths(item, found);
+  return found;
+}
+
+// Replaces each checked path with its canonical form, so Revit gets the path the policy decided on.
+function withCanonicalPaths(value, canonical) {
+  if (isAbsoluteFilePath(value)) return canonical.get(value);
+  return Array.isArray(value) ? value.map(item => withCanonicalPaths(item, canonical)) : value;
+}
+
+function transactionLine(transaction) {
+  const { added, changed, deleted } = transaction.totals;
+  return `${transaction.name} in ${transaction.document}: ${added} added, ${changed} changed, ${deleted} deleted.`;
 }
 
 export class Runtime {
@@ -209,8 +233,10 @@ export class Runtime {
   }
 
   recordPolicy(receipt, context, detail) {
+    // A pending decision is reported twice, when it is made and again in the worker's receipt; record it once.
+    const known = detail.decisionId && context.decisionIds.has(detail.decisionId);
     if (detail.decisionId) context.decisionIds.add(detail.decisionId);
-    if (detail.policyRequests) {
+    if (detail.policyRequests && !known) {
       context.policyRequests.push(...detail.policyRequests);
       receipt.policyRequests = context.policyRequests;
     }
@@ -280,20 +306,33 @@ export class Runtime {
       }
     }
     this.observeBroker(response, context);
-    if (response.commitPoint !== undefined) {
+    if (response.commitPoints !== undefined || response.effectDocuments !== undefined) {
       response = { ...response };
-      delete response.commitPoint;
+      delete response.commitPoints;
+      delete response.effectDocuments;
     }
     return response;
   }
 
   async bridgeCall(params, context) {
+    if (params.op === "describe") return this.describe(params, context);
     const call = { ...params };
     if (call.document && typeof call.document === "object" && !("$h" in call.document)) {
       call.document = {
         path: call.document.path ? await canonicalPath(call.document.path) : null,
         uniqueId: call.document.uniqueId || null,
       };
+    }
+    // Checked before Revit is held: no decision is awaited while Revit is paused.
+    const paths = [...bridgePaths(call.args), ...bridgePaths(call.value)];
+    if (paths.length) {
+      const operation = BRIDGE_READS.has(call.member) ? "read_file" : "write_file";
+      const decision = await this.policy.authorize(context.runId, [{ operation, paths }], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
+      this.recordPolicy(context.receipt, context, decision);
+      if (decision.status === "pending" || decision.status === "denied") return decision;
+      const canonical = new Map(paths.map((original, index) => [original, decision.requests[0].paths[index]]));
+      if (call.args) call.args = withCanonicalPaths(call.args, canonical);
+      if ("value" in call) call.value = withCanonicalPaths(call.value, canonical);
     }
     let hold;
     try {
@@ -302,7 +341,29 @@ export class Runtime {
       return { status: "failed", error: { code: error.code || "HOLD_FAILED", message: `Revit could not be held for this run: ${error.message}` } };
     }
     context.heldCalls += 1;
-    return hold.send({ type: "bridge.call", call });
+    const response = await hold.send({ type: "bridge.call", call });
+    if (call.op !== "tx.commit" || response.status !== "succeeded" || !response.value) return response;
+    // A committed revit.transaction: one changes line, its added and changed ids, and the transaction itself.
+    const { documentKey, ...transaction } = response.value;
+    const affectedElements = [...transaction.added, ...transaction.changed];
+    this.observeBroker({
+      changes: [transactionLine(transaction)],
+      affectedElements,
+      transactions: [transaction],
+      effectDocuments: [{ document: documentKey, changes: 1, affectedElements: affectedElements.length, transactions: 1 }],
+    }, context);
+    return { ...response, value: null };
+  }
+
+  // revit.describe reads the running Revit's API without holding it: through the run's hold if it has one,
+  // otherwise as its own request, which the add-in answers without Revit's thread.
+  async describe(params, context) {
+    const call = { op: "describe", type: params.type };
+    if (context.hold) return context.hold.send({ type: "bridge.call", call });
+    return this.brokerExecutor(context.processId, { id: context.runId, type: "api.describe", describe: { type: params.type } }, {
+      timeoutMs: context.timeoutMs,
+      connectWaitMs: Math.max(0, context.deadline - Date.now()),
+    });
   }
 
   // The hold starts at the run's first bridge call and is bounded by the time the run has left.
@@ -316,7 +377,8 @@ export class Runtime {
       });
       context.hold = hold;
       context.heldAt = Date.now();
-      context.uncommitted = provisional();
+      context.uncommitted = [];
+      context.transactions = context.receipt.transactions = [];
       hold.onLost(() => this.holdLost(context));
       return hold;
     })();
@@ -355,12 +417,14 @@ export class Runtime {
       // Revit is gone; what it kept is unknown.
     }
     receipt.held = { ms: summary?.ms ?? Date.now() - context.heldAt, calls: summary?.calls ?? context.heldCalls };
-    if (summary?.warnings?.length) receipt.warnings = summary.warnings;
+    receipt.warnings = summary?.warnings ?? [];
 
     const failedDocuments = (summary?.documents || []).filter(document => document.state.endsWith("_failed"));
     if (summary?.outcome !== "committed") {
       for (const key of PROVISIONAL) {
-        for (const index of [...context.uncommitted[key]].sort((left, right) => right - left)) context[key].splice(index, 1);
+        for (const entry of context.uncommitted.filter(item => item.key === key).sort((left, right) => right.position - left.position)) {
+          context[key].splice(entry.position, 1);
+        }
       }
       if (receipt.status === "succeeded" || !summary) {
         const code = summary?.outcome === "stopped_by_user" ? "stopped_by_user" : summary?.outcome === "timed_out" ? "RUN_TIMEOUT" : "HOLD_LOST";
@@ -393,14 +457,19 @@ export class Runtime {
 
   observeBroker(response, context) {
     // In a hold, Revit effects stay provisional until a save keeps them; a rollback removes them again.
-    // A save keeps everything before it, and this response's effects up to its position in the batch.
-    const kept = response.commitPoint;
-    if (kept) context.uncommitted = provisional();
+    // A save (or close) keeps what the run did to that document only: its earlier effects, and this
+    // response's effects in that document up to the save. Other documents' effects stay provisional.
     if (context.uncommitted) {
+      const points = response.commitPoints || [];
+      const marks = response.effectDocuments || [];
+      const documentOf = (key, index) => marks.find(mark => (mark[key] ?? 0) > index)?.document ?? null;
+      context.uncommitted = context.uncommitted.filter(entry => !points.some(point => point.document === entry.document));
       for (const key of PROVISIONAL) {
         const values = Array.isArray(response[key]) ? response[key] : [];
-        for (let index = kept?.[key] ?? 0; index < values.length; index += 1) {
-          context.uncommitted[key].push(context[key].length + index);
+        for (let index = 0; index < values.length; index += 1) {
+          const document = documentOf(key, index);
+          if (document !== null && points.some(point => point.document === document && index < (point[key] ?? 0))) continue;
+          context.uncommitted.push({ key, position: context[key].length + index, document });
         }
       }
     }
@@ -408,6 +477,7 @@ export class Runtime {
     append(context.affectedFiles, response.affectedFiles);
     append(context.affectedElements, response.affectedElements);
     append(context.createdViews, response.createdViews);
+    if (context.transactions) append(context.transactions, response.transactions);
     append(context.checks, response.checks);
     if (response.document) context.receipt.document = documentWithKind(response.document);
   }

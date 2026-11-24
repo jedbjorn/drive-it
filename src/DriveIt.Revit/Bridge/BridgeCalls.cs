@@ -19,6 +19,9 @@ internal sealed record TypeReference(Type Type)
     public override string ToString() => Type.FullName ?? Type.Name;
 }
 
+/// <summary>A method's return value followed by its out parameters; crosses to the script as a tuple.</summary>
+internal sealed record OutValues(IReadOnlyList<object?> Values);
+
 /// <summary>
 /// Resolves a script's bridge calls by reflection, on Revit's thread, against the run's handle table.
 /// Numbers, strings, booleans and null cross by value; everything else is a handle that lasts for the run.
@@ -192,6 +195,9 @@ internal sealed class BridgeCalls
         var target => (string?)Invoke(() => target.ToString()),
     };
 
+    /// <summary>revit.describe inside a hold; outside one the broker answers it without Revit's thread.</summary>
+    public static JsonNode Describe(JsonObject call) => ApiDescription.Describe(call["type"]?.GetValue<string>());
+
     /// <summary>Hands the script a handle to an object the add-in resolved (a document or an element).</summary>
     public JsonNode? Handle(object value) => Encode(value);
 
@@ -255,6 +261,9 @@ internal sealed class BridgeCalls
     {
         if (ids.TryGetValue(value, out var id))
             return id;
+        if (objects.Count >= Guardrails.MaximumHandles)
+            throw new BridgeException("limit_exceeded",
+                $"This run already holds {Guardrails.MaximumHandles} handles, the most one run may hold. Filter the collector to what you need, or carry element ids and split the work into more runs.");
         id = ++nextId;
         objects[id] = value;
         ids[value] = id;
@@ -286,7 +295,13 @@ internal sealed class BridgeCalls
             case float or double or decimal:
                 var number = Convert.ToDouble(value, CultureInfo.InvariantCulture);
                 return double.IsFinite(number) ? JsonValue.Create(number) : number.ToString(CultureInfo.InvariantCulture);
+            case Guid guid:
+                return guid.ToString();
+            case OutValues tuple:
+                return new JsonObject { ["$tuple"] = new JsonArray(tuple.Values.Select(Encode).ToArray()) };
         }
+        if (value is not TypeReference)
+            Guardrails.RequireAllowed(value.GetType());
         return new JsonObject
         {
             ["$h"] = Add(value),
@@ -375,20 +390,46 @@ internal sealed class BridgeCalls
         if (type.IsAbstract)
             throw new BridgeException("not_constructible", $"{TypeName(type)} is abstract and cannot be constructed.");
         var constructor = SelectOverload(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments, out var converted)
-            ?? throw NoOverload(type, ".ctor", type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments);
+            ?? throw NoMatch(type, ".ctor", type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), arguments);
         return Invoke(() => ((ConstructorInfo)constructor).Invoke(converted))!;
     }
 
     private object? InvokeMethod(Type type, object? target, string name, JsonArray arguments, BindingFlags flags)
     {
+        Guardrails.RequireCallable(type, name);
         var candidates = type.GetMethods(BindingFlags.Public | flags)
             .Where(method => method.Name == name && !method.ContainsGenericParameters)
             .ToList();
         if (candidates.Count == 0)
             throw MemberNotFound(type, name, flags);
         var method = SelectOverload(candidates, arguments, out var converted)
-            ?? throw NoOverload(type, name, candidates, arguments);
-        return Invoke(() => method.Invoke(target, converted));
+            ?? throw NoMatch(type, name, candidates, arguments);
+        var result = Invoke(() => method.Invoke(target, converted));
+        var parameters = method.GetParameters();
+        if (!parameters.Any(IsOut))
+            return result;
+        // Out parameters come back after the return value, as a Python tuple; a single value comes back as itself.
+        var values = new List<object?>();
+        if (((MethodInfo)method).ReturnType != typeof(void))
+            values.Add(result);
+        values.AddRange(parameters.Where(IsOut).Select(parameter => converted[parameter.Position]));
+        return values.Count == 1 ? values[0] : new OutValues(values);
+    }
+
+    private static bool IsOut(ParameterInfo parameter) => parameter.ParameterType.IsByRef && parameter.IsOut;
+
+    /// <summary>No overload fits: a callback Revit asks for is named, otherwise every signature is listed.</summary>
+    private static BridgeException NoMatch(Type type, string name, IEnumerable<MethodBase> candidates, JsonArray arguments)
+    {
+        var callback = candidates
+            .Select(method => method.GetParameters().Where(parameter => !IsOut(parameter)).ToArray())
+            .Where(inputs => inputs.Length >= arguments.Count)
+            .SelectMany(inputs => inputs.Select((parameter, index) => (parameter.ParameterType, index)))
+            .FirstOrDefault(entry => Guardrails.IsUnsupportedCallback(entry.ParameterType)
+                && (entry.index >= arguments.Count || arguments[entry.index] is not JsonObject { } given || given["$option"] is null));
+        return callback.ParameterType is not null
+            ? Guardrails.CallbackNotSupported(type, name, callback.ParameterType)
+            : NoOverload(type, name, candidates, arguments);
     }
 
     private MethodBase? SelectOverload(IEnumerable<MethodBase> candidates, JsonArray arguments, out object?[] converted)
@@ -399,22 +440,27 @@ internal sealed class BridgeCalls
         foreach (var candidate in candidates.OrderBy(method => method.GetParameters().Length))
         {
             var parameters = candidate.GetParameters();
-            if (parameters.Any(parameter => parameter.ParameterType.IsByRef || parameter.IsDefined(typeof(ParamArrayAttribute))))
+            // Out parameters take no argument and come back with the result; ref parameters and params arrays are not supported.
+            if (parameters.Any(parameter => (parameter.ParameterType.IsByRef && !IsOut(parameter)) || parameter.IsDefined(typeof(ParamArrayAttribute))))
                 continue;
-            var required = parameters.Count(parameter => !parameter.IsOptional);
-            if (arguments.Count < required || arguments.Count > parameters.Length)
+            var inputs = parameters.Count(parameter => !IsOut(parameter));
+            var required = parameters.Count(parameter => !IsOut(parameter) && !parameter.IsOptional);
+            if (arguments.Count < required || arguments.Count > inputs)
                 continue;
             var values = new object?[parameters.Length];
             var score = 0;
             var matches = true;
+            var next = 0;
             for (var index = 0; index < parameters.Length && matches; index++)
             {
-                if (index >= arguments.Count)
+                if (IsOut(parameters[index]))
+                    continue;
+                if (next >= arguments.Count)
                 {
                     values[index] = parameters[index].HasDefaultValue ? parameters[index].DefaultValue : Type.Missing;
                     continue;
                 }
-                matches = TryConvert(arguments[index], parameters[index].ParameterType, out values[index], out var argumentScore);
+                matches = TryConvert(arguments[next++], parameters[index].ParameterType, out values[index], out var argumentScore);
                 score += argumentScore;
             }
             if (!matches || score <= bestScore)
@@ -444,6 +490,9 @@ internal sealed class BridgeCalls
                 return TryObject(Lookup(id.GetValue<long>()), target, out value, out score);
             case JsonObject reference when reference["$path"] is { } path:
                 return TryObject(ResolvePath(path.GetValue<string>()), target, out value, out score);
+            case JsonObject option when option["$option"] is not null:
+                score = 100;
+                return Guardrails.TryOption(option, target, out value);
             case JsonObject:
                 return false;
             case JsonArray array:
@@ -469,6 +518,12 @@ internal sealed class BridgeCalls
                 {
                     value = text[0];
                     score = 60;
+                    return true;
+                }
+                if (target == typeof(Guid) && Guid.TryParse(text, out var guid))
+                {
+                    value = guid;
+                    score = 90;
                     return true;
                 }
                 value = text;
