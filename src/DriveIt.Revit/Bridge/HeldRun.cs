@@ -23,6 +23,9 @@ internal interface IHeldDocuments
 
     /// <summary>Revit's error messages from the last transaction it rolled back, or null.</summary>
     string? TakeErrors();
+
+    /// <summary>The hold's key for a document, so the server can tell which document each effect belongs to.</summary>
+    string DocumentKey(Document document);
 }
 
 public sealed class HoldSummary
@@ -87,6 +90,7 @@ internal sealed class HeldRun : IHeldDocuments
     private volatile bool stopRequested;
     private HoldSummary? summary;
     private Committing? committing;
+    private readonly List<(Document Document, string Key)> documentKeys = [];
 
     public HeldRun(string runId, string? displayName, int? timeLimitMs)
     {
@@ -436,6 +440,7 @@ internal sealed class HeldRun : IHeldDocuments
         {
             ["name"] = name,
             ["document"] = document.Title,
+            ["documentKey"] = DocumentKey(document),
             ["added"] = Ids(changed.Added),
             ["changed"] = Ids(changed.Modified),
             ["deleted"] = Ids(changed.Deleted),
@@ -520,6 +525,18 @@ internal sealed class HeldRun : IHeldDocuments
         entry.CommitPoint = true;
         entry.State = "committed";
         return true;
+    }
+
+    public string DocumentKey(Document document)
+    {
+        foreach (var (known, key) in documentKeys)
+        {
+            if (SameDocument(known, document))
+                return key;
+        }
+        var next = $"d{documentKeys.Count + 1}";
+        documentKeys.Add((document, next));
+        return next;
     }
 
     public string? TakeErrors()

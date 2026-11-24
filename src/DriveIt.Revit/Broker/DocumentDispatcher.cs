@@ -176,6 +176,7 @@ public sealed partial class DocumentDispatcher
             if (IsQuery(operation.Type))
             {
                 current = ExecuteQuery(application, operation, current, response, index);
+                MarkEffects(response, current);
                 continue;
             }
             if (IsModelChange(operation.Type))
@@ -188,7 +189,9 @@ public sealed partial class DocumentDispatcher
                     index++;
                 }
                 index--;
-                if (!ApplyModelBatch(current, changes, response))
+                var applied = ApplyModelBatch(current, changes, response);
+                MarkEffects(response, current);
+                if (!applied)
                     return;
                 continue;
             }
@@ -198,9 +201,11 @@ public sealed partial class DocumentDispatcher
             {
                 case "open_document":
                     current = Open(application, arguments, response);
+                    MarkEffects(response, current);
                     break;
                 case "create_document":
                     current = Create(application, arguments, response);
+                    MarkEffects(response, current);
                     break;
                 case "read_document":
                     current = RequireDocument(current);
@@ -218,15 +223,13 @@ public sealed partial class DocumentDispatcher
                     break;
                 case "close_document":
                     current = RequireDocument(current);
-                    Held?.CommitPoint(current.Document);
-                    Close(current, response);
+                    KeepThrough(current, response, state => Close(state, response));
                     current = null;
                     break;
                 case "delete_document":
                     current = RequireDocument(current);
                     RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
-                    Held?.CommitPoint(current.Document);
-                    Delete(current, response);
+                    KeepThrough(current, response, state => Delete(state, response));
                     current = null;
                     break;
             }
@@ -234,32 +237,51 @@ public sealed partial class DocumentDispatcher
     }
 
     /// <summary>
-    /// In a hold, a save keeps what the run did to the document before it (spec #15, a save is a
-    /// commit point). The response records where in this batch that was, so effects of later
-    /// operations in the same batch stay provisional.
+    /// In a hold, a save, close or delete keeps what the run did to that document before it (spec #15, a
+    /// save is a commit point). The response records the document and where in this batch that was, so
+    /// that document's later effects, and every other document's, stay provisional.
     /// </summary>
-    private void KeepThrough(DocumentState state, BrokerResponse response, Action<DocumentState> save)
+    private void KeepThrough(DocumentState state, BrokerResponse response, Action<DocumentState> act)
     {
+        // Keyed while the document is still open: a close or delete leaves it invalid.
+        var key = Held?.DocumentKey(state.Document);
         if (Held?.CommitPoint(state.Document) != true)
         {
-            save(state);
+            act(state);
+            MarkEffects(response, key);
             return;
         }
         try
         {
-            save(state);
+            act(state);
         }
         finally
         {
             // The group is already kept, so the position is reported even if the save then fails.
-            response.CommitPoint = new EffectPosition
-            {
-                Changes = response.Changes.Count,
-                AffectedElements = response.AffectedElements.Count,
-                CreatedViews = response.CreatedViews?.Count ?? 0,
-            };
+            (response.CommitPoints ??= []).Add(Position(response, key));
+            MarkEffects(response, key);
         }
     }
+
+    private void MarkEffects(BrokerResponse response, DocumentState? state)
+    {
+        if (Held is not null && state is not null)
+            MarkEffects(response, Held.DocumentKey(state.Document));
+    }
+
+    private static void MarkEffects(BrokerResponse response, string? key)
+    {
+        if (key is not null)
+            (response.EffectDocuments ??= []).Add(Position(response, key));
+    }
+
+    private static EffectPosition Position(BrokerResponse response, string? key) => new()
+    {
+        Document = key,
+        Changes = response.Changes.Count,
+        AffectedElements = response.AffectedElements.Count,
+        CreatedViews = response.CreatedViews?.Count ?? 0,
+    };
 
     private DocumentState Open(UIApplication application, DocumentOperationArguments arguments, BrokerResponse response)
     {

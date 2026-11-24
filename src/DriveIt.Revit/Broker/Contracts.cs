@@ -212,16 +212,22 @@ public sealed class BrokerResponse
     /// </summary>
     public List<JsonNode?>? Results { get; set; }
     /// <summary>
-    /// Held runs only: a save in this batch kept the run's changes to that document up to it. The
-    /// counts say how many of this response's effects came up to and including the last such save;
-    /// effects after them stay provisional and are rolled back with the rest of the run.
+    /// Held runs only: each save, close or delete in this batch that kept the run's changes to its document.
+    /// Document is the hold's key for that document; the counts say how many of this response's effects came
+    /// up to and including it. That document's effects after it, and other documents' effects, stay provisional.
     /// </summary>
-    public EffectPosition? CommitPoint { get; set; }
+    public List<EffectPosition>? CommitPoints { get; set; }
+    /// <summary>
+    /// Held runs only: after each operation, the hold's key for the document it acted on and the response's
+    /// effect counts so far, so every effect can be matched to its document's commit points.
+    /// </summary>
+    public List<EffectPosition>? EffectDocuments { get; set; }
     public ErrorReceipt? Error { get; set; }
 }
 
 public sealed class EffectPosition
 {
+    public string? Document { get; set; }
     public int Changes { get; set; }
     public int AffectedElements { get; set; }
     public int CreatedViews { get; set; }

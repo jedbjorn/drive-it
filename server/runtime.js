@@ -25,12 +25,9 @@ function append(target, values) {
   if (Array.isArray(values)) target.push(...values);
 }
 
-// Receipt lists that hold Revit effects; inside a hold they are provisional until a save or a commit.
+// Receipt lists that hold Revit effects; inside a hold they are provisional until a save of their document,
+// or the run's commit, keeps them.
 const PROVISIONAL = ["changes", "affectedElements", "createdViews", "transactions"];
-
-function provisional() {
-  return { changes: [], affectedElements: [], createdViews: [], transactions: [] };
-}
 
 // Bridge members that only read the file a path names, so Revit's installed content passes (decision #23).
 // A path given to any other member is checked as a write.
@@ -303,9 +300,10 @@ export class Runtime {
       }
     }
     this.observeBroker(response, context);
-    if (response.commitPoint !== undefined) {
+    if (response.commitPoints !== undefined || response.effectDocuments !== undefined) {
       response = { ...response };
-      delete response.commitPoint;
+      delete response.commitPoints;
+      delete response.effectDocuments;
     }
     return response;
   }
@@ -340,11 +338,13 @@ export class Runtime {
     const response = await hold.send({ type: "bridge.call", call });
     if (call.op !== "tx.commit" || response.status !== "succeeded" || !response.value) return response;
     // A committed revit.transaction: one changes line, its added and changed ids, and the transaction itself.
-    const transaction = response.value;
+    const { documentKey, ...transaction } = response.value;
+    const affectedElements = [...transaction.added, ...transaction.changed];
     this.observeBroker({
       changes: [transactionLine(transaction)],
-      affectedElements: [...transaction.added, ...transaction.changed],
+      affectedElements,
       transactions: [transaction],
+      effectDocuments: [{ document: documentKey, changes: 1, affectedElements: affectedElements.length, transactions: 1 }],
     }, context);
     return { ...response, value: null };
   }
@@ -371,7 +371,7 @@ export class Runtime {
       });
       context.hold = hold;
       context.heldAt = Date.now();
-      context.uncommitted = provisional();
+      context.uncommitted = [];
       context.transactions = context.receipt.transactions = [];
       hold.onLost(() => this.holdLost(context));
       return hold;
@@ -416,7 +416,9 @@ export class Runtime {
     const failedDocuments = (summary?.documents || []).filter(document => document.state.endsWith("_failed"));
     if (summary?.outcome !== "committed") {
       for (const key of PROVISIONAL) {
-        for (const index of [...context.uncommitted[key]].sort((left, right) => right - left)) context[key].splice(index, 1);
+        for (const entry of context.uncommitted.filter(item => item.key === key).sort((left, right) => right.position - left.position)) {
+          context[key].splice(entry.position, 1);
+        }
       }
       if (receipt.status === "succeeded" || !summary) {
         const code = summary?.outcome === "stopped_by_user" ? "stopped_by_user" : summary?.outcome === "timed_out" ? "RUN_TIMEOUT" : "HOLD_LOST";
@@ -449,14 +451,19 @@ export class Runtime {
 
   observeBroker(response, context) {
     // In a hold, Revit effects stay provisional until a save keeps them; a rollback removes them again.
-    // A save keeps everything before it, and this response's effects up to its position in the batch.
-    const kept = response.commitPoint;
-    if (kept) context.uncommitted = provisional();
+    // A save (or close) keeps what the run did to that document only: its earlier effects, and this
+    // response's effects in that document up to the save. Other documents' effects stay provisional.
     if (context.uncommitted) {
+      const points = response.commitPoints || [];
+      const marks = response.effectDocuments || [];
+      const documentOf = (key, index) => marks.find(mark => (mark[key] ?? 0) > index)?.document ?? null;
+      context.uncommitted = context.uncommitted.filter(entry => !points.some(point => point.document === entry.document));
       for (const key of PROVISIONAL) {
         const values = Array.isArray(response[key]) ? response[key] : [];
-        for (let index = kept?.[key] ?? 0; index < values.length; index += 1) {
-          context.uncommitted[key].push(context[key].length + index);
+        for (let index = 0; index < values.length; index += 1) {
+          const document = documentOf(key, index);
+          if (document !== null && points.some(point => point.document === document && index < (point[key] ?? 0))) continue;
+          context.uncommitted.push({ key, position: context[key].length + index, document });
         }
       }
     }

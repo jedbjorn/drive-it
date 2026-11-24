@@ -37,21 +37,25 @@ class StubRevit {
   execute(envelope, hold) {
     if (envelope.type === "api.describe") return { id: envelope.id, type: "api.describe", ...describe(envelope.describe.type) };
     const response = { id: envelope.id, type: "model.execute", status: "succeeded", changes: [], affectedFiles: [], affectedElements: [], checks: [], results: [] };
+    // Like the add-in's hold: each document has its own key; "doc-2" is a second open document.
+    const document = envelope.document?.uniqueId === "doc-2" ? "d2" : "d1";
+    const position = () => ({ document, changes: response.changes.length, affectedElements: response.affectedElements.length, createdViews: 0 });
     for (const operation of envelope.operations) {
       if (operation.type === "create_level") {
-        const level = { id: this.nextId++, name: operation.arguments.name, elevation: operation.arguments.elevation };
+        const level = { id: this.nextId++, name: operation.arguments.name, elevation: operation.arguments.elevation, document };
         (hold ? hold.pending : this.levels).push(level);
         response.changes.push(`Created level '${level.name}' (${level.id}).`);
         response.affectedElements.push(level.id);
       } else if (operation.type === "save_document") {
-        if (hold) hold.commitPoint();
-        response.changes.push("Saved C:\\model.rvt.");
-        // Like the add-in: how many of this batch's effects the save kept.
-        if (hold) response.commitPoint = { changes: response.changes.length, affectedElements: response.affectedElements.length, createdViews: 0 };
+        if (hold) hold.commitPoint(document);
+        response.changes.push(`Saved C:\\${document === "d2" ? "other" : "model"}.rvt.`);
+        // Like the add-in: the document the save kept, and how many of this batch's effects came up to it.
+        if (hold) (response.commitPoints ??= []).push(position());
       } else {
         response.status = "failed";
         response.error = { code: "unsupported_operation", message: operation.type };
       }
+      if (hold) (response.effectDocuments ??= []).push(position());
       response.results.push(null);
     }
     return response;
@@ -96,9 +100,10 @@ class StubHold {
     for (const listener of this.listeners.splice(0)) listener();
   }
 
-  commitPoint() {
-    this.revit.levels.push(...this.pending);
-    this.pending = [];
+  // A save keeps the run's changes to that document only; with no document (the run's commit) it keeps them all.
+  commitPoint(document) {
+    this.revit.levels.push(...this.pending.filter(level => !document || level.document === document));
+    this.pending = this.pending.filter(level => document && level.document !== document);
   }
 
   finish(outcome) {
@@ -161,7 +166,7 @@ class StubHold {
     if (![...this.transactions.values()].some(open => open)) {
       throw coded("modification_outside_transaction", "Attempt to modify the model outside of transaction. Put Revit changes inside `with revit.transaction(\"name\"):`.");
     }
-    const level = { id: this.revit.nextId++, name: `Level ${elevation}`, elevation };
+    const level = { id: this.revit.nextId++, name: `Level ${elevation}`, elevation, document: "d1" };
     this.pending.push(level);
     for (const open of this.transactions.values()) open.added.push(level.id);
     return levelObject(level);
@@ -188,7 +193,7 @@ class StubHold {
         // Like the add-in: what Revit reported for the transaction as it committed.
         const { name, added } = this.transactions.get(call.transaction);
         this.transactions.delete(call.transaction);
-        return { name, document: "Tower", added, changed: [], deleted: [], totals: { added: added.length, changed: 0, deleted: 0 }, truncated: false };
+        return { name, document: "Tower", documentKey: "d1", added, changed: [], deleted: [], totals: { added: added.length, changed: 0, deleted: 0 }, truncated: false };
       }
       case "tx.rollback":
         this.transactions.delete(call.transaction);
@@ -801,4 +806,35 @@ test("the safety and ability statements and the bridge guidance are in the READM
   for (const code of ["type_not_allowed", "member_not_allowed", "limit_exceeded", "callback_not_supported", "member_not_found", "no_matching_overload"]) {
     assert.match(apiReference("DB")[0].effects, new RegExp(code), code);
   }
+});
+
+test("a failed run that changed two documents and saved one keeps only that document's effects before its save", async (t) => {
+  const revit = new StubRevit();
+  const { runtime } = await fixture(t, revit);
+  const receipt = await run(runtime, `
+other = {"path": None, "uniqueId": "doc-2"}
+doc = revit.document()
+with revit.transaction("Level in Tower"):
+    DB.Level.Create(doc, 10)
+revit.create_level(name="Other kept", elevation=5, document=other)
+revit.save_document(document=other)
+revit.create_level(name="Other lost", elevation=6, document=other)
+revit.create_level(name="Tower lost", elevation=7)
+raise RuntimeError("fails after saving the other document")`);
+  assert.equal(receipt.status, "partially_applied");
+  assert.deepEqual(revit.levels.map(level => level.name), ["Level 1", "Other kept"]);
+  assert.deepEqual(receipt.changes, ["Created level 'Other kept' (101).", "Saved C:\\other.rvt."]);
+  assert.deepEqual(receipt.affectedElements, [101]);
+  assert.deepEqual(receipt.transactions, [], "Tower's transaction was rolled back with its group");
+  assert.ok(!("documentKey" in (receipt.transactions[0] ?? {})));
+
+  const kept = await run(runtime, `
+doc = revit.document()
+with revit.transaction("Kept in Tower"):
+    DB.Level.Create(doc, 20)
+revit.save_document()
+raise RuntimeError("fails after saving Tower")`);
+  assert.equal(kept.status, "partially_applied");
+  assert.deepEqual(kept.transactions.map(entry => Object.keys(entry).includes("documentKey")), [false]);
+  assert.deepEqual(kept.changes, ["Kept in Tower in Tower: 1 added, 0 changed, 0 deleted.", "Saved C:\\model.rvt."]);
 });
