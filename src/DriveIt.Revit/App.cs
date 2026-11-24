@@ -37,6 +37,9 @@ public sealed class App : IExternalApplication
     private CancellationTokenSource? stopping;
     private Task? listener;
     private PushButton? operatorButton;
+    private static UIControlledApplication? controlled;
+    private static string? stagedRunId;
+    private static bool openingStaged;
 
     public Result OnStartup(UIControlledApplication application)
     {
@@ -52,6 +55,7 @@ public sealed class App : IExternalApplication
         stopping = new CancellationTokenSource();
         listener = ServeAsync($"drive-it-{session.processId}", message, broker, stopping.Token);
 
+        controlled = application;
         ConnectHoldStatus();
         AddRibbon(application);
         return Result.Succeeded;
@@ -69,7 +73,47 @@ public sealed class App : IExternalApplication
         HoldSignal.TimeLimit = () => ScriptTimeLimit.HoldLimit(host, DateTimeOffset.Now);
         HoldSignal.Started += hold => HoldStatus.Begin(hold.RunId, hold.DisplayName, hold.StartedAt,
             hold.Deadline - hold.StartedAt, () => HoldSignal.RequestStop(hold.RunId), hold.DryRun);
-        HoldSignal.Ended += hold => HoldStatus.End(hold.RunId);
+        HoldSignal.Ended += hold =>
+        {
+            HoldStatus.End(hold.RunId);
+            if (hold.DryRun && RequireDryRun.Read(host)) OpenStagedWhenFree(hold.RunId);
+        };
+    }
+
+    /// <summary>
+    /// Spec #13 "It opens itself": with Require dry run on, after a dry run's hold has ended, the window opens (or comes
+    /// forward) in Staged Actions mode on that dry run, once Revit is idle. Raised on Revit's thread as the hold ends.
+    /// </summary>
+    private static void OpenStagedWhenFree(string runId)
+    {
+        stagedRunId = runId;
+        if (openingStaged || controlled is null)
+            return;
+        try
+        {
+            controlled.Idling += OnIdlingOpenStaged;
+            openingStaged = true;
+        }
+        catch (Exception exception)
+        {
+            Trace.WriteLine($"Drive-It: waiting to open Staged Actions failed ({exception.GetType().Name}: {exception.Message}).");
+        }
+    }
+
+    private static void OnIdlingOpenStaged(object? sender, IdlingEventArgs e)
+    {
+        controlled!.Idling -= OnIdlingOpenStaged;
+        openingStaged = false;
+        var runId = stagedRunId;
+        stagedRunId = null;
+        try
+        {
+            OperatorLauncher.ShowStaged((sender as UIApplication)?.MainWindowHandle ?? IntPtr.Zero, RevitThemeDetector.Detect(), runId);
+        }
+        catch (Exception exception)
+        {
+            Trace.WriteLine($"Drive-It: opening Staged Actions failed ({exception.GetType().Name}: {exception.Message}).");
+        }
     }
 
     private void AddRibbon(UIControlledApplication application)

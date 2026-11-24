@@ -9,7 +9,7 @@ public sealed record HoldStarted(string RunId, string? DisplayName, DateTimeOffs
 /// A hold has ended. Outcome is "committed", "rolled_back", "timed_out", "stopped_by_user", "disconnected",
 /// or "rollback_failed" when a document could not be restored.
 /// </summary>
-public sealed record HoldEnded(string RunId, string Outcome, DateTimeOffset EndedAt, int Calls);
+public sealed record HoldEnded(string RunId, string Outcome, DateTimeOffset EndedAt, int Calls, bool DryRun = false);
 
 /// <summary>
 /// The add-in's in-process view of the hold, for the status window and the time limit setting.
@@ -86,7 +86,7 @@ public static class HoldSignal
             if (ReferenceEquals(active, run))
                 active = null;
         }
-        Raise(Ended, new HoldEnded(run.RunId, outcome, DateTimeOffset.Now, run.Calls));
+        Raise(Ended, new HoldEnded(run.RunId, outcome, DateTimeOffset.Now, run.Calls, run.DryRun));
     }
 
     private static void Raise<T>(Action<T>? handlers, T value)

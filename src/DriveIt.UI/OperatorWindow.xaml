@@ -3,7 +3,9 @@
     each once), and run history. In Dev Mode (spec #10) a caution banner says no guardrails apply and
     the outside-root requests pane is hidden: nothing waits for one. The Settings button opens the
     settings drawer (spec #23) over the window's right edge: one row per setting, today the Script
-    time limit, then the Agents row's Detect agents.
+    time limit, the Require dry run switch, then the Agents row's Detect agents. With Require dry run on
+    (spec #13 "The mode switcher"), a switcher at the top left offers Staged Actions mode, which gives the
+    whole window to the last dry run that completed, and Home, the window as it is otherwise.
     Window conventions follow splash-it src/SplashIt.UI/Settings/SettingsWindow.xaml (splash-it
     commit ad7796d): Segoe UI 12, the palette's WindowBrush/TextBrush, Theme.xaml merged per window, Panel sections, banners, and
     the Primary/Danger buttons. The behavior is the former PowerShell window's
@@ -89,6 +91,88 @@
                 </Setter>
             </Style>
 
+            <!-- The mode switcher's two choices (spec #13): flat segments in palette colors; lane D finishes the look. -->
+            <Style x:Key="ModeTab" TargetType="RadioButton">
+                <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+                <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="RadioButton">
+                            <Border x:Name="Segment" Background="Transparent" CornerRadius="3" Padding="12,4" SnapsToDevicePixels="True">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Segment" Property="Background" Value="{StaticResource HoverBrush}" />
+                                </Trigger>
+                                <Trigger Property="IsChecked" Value="True">
+                                    <Setter TargetName="Segment" Property="Background" Value="{StaticResource AccentSoftBrush}" />
+                                    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+                                    <Setter Property="FontWeight" Value="SemiBold" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- The Require dry run switch: a track and a knob, on when checked. -->
+            <Style x:Key="SwitchToggle" TargetType="CheckBox">
+                <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="CheckBox">
+                            <Border x:Name="Track" Width="36" Height="20" CornerRadius="10" BorderThickness="1"
+                                    Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource StrongBorderBrush}"
+                                    SnapsToDevicePixels="True">
+                                <Ellipse x:Name="Knob" Width="12" Height="12" Margin="3,0" HorizontalAlignment="Left"
+                                         Fill="{StaticResource MutedTextBrush}" />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsChecked" Value="True">
+                                    <Setter TargetName="Track" Property="Background" Value="{StaticResource CheckFillBrush}" />
+                                    <Setter TargetName="Track" Property="BorderBrush" Value="{StaticResource CheckFillBrush}" />
+                                    <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right" />
+                                    <Setter TargetName="Knob" Property="Fill" Value="{StaticResource OnAccentBrush}" />
+                                </Trigger>
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Setter Property="Opacity" Value="0.45" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- Also touched by Revit: one line, collapsed until clicked. -->
+            <Style x:Key="Disclosure" TargetType="ToggleButton">
+                <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+                <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="HorizontalAlignment" Value="Left" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ToggleButton">
+                            <StackPanel Orientation="Horizontal" Background="Transparent">
+                                <TextBlock x:Name="Chevron" FontFamily="{StaticResource IconFont}" FontSize="9" VerticalAlignment="Center"
+                                           Text="&#xE76C;" />
+                                <ContentPresenter Margin="6,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsChecked" Value="True">
+                                    <Setter TargetName="Chevron" Property="Text" Value="&#xE70D;" />
+                                </Trigger>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
             <Style x:Key="DetailsBox" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
                 <Setter Property="IsReadOnly" Value="True" />
                 <Setter Property="FontFamily" Value="{StaticResource DetailsFont}" />
@@ -107,13 +191,24 @@
         <Grid x:Name="MainContent" Margin="16">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition x:Name="RequestsRow" Height="*" MinHeight="170" />
-                <RowDefinition Height="1.3*" MinHeight="170" />
-                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
             </Grid.RowDefinitions>
+
+            <!--
+                The mode switcher (spec #13), only with Require dry run on: the window's own control at its top
+                left, Staged Actions first. Self-contained, so the rest of the window's layout can change around it.
+            -->
+            <Border x:Name="ModeSwitcher" Grid.Row="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,0,0,8"
+                    Padding="2" CornerRadius="4" BorderThickness="1" BorderBrush="{StaticResource BorderBrush}"
+                    Background="{StaticResource SurfaceBrush}" Visibility="Collapsed"
+                    AutomationProperties.Name="Mode" AutomationProperties.AutomationId="ModeSwitcher">
+                <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="StagedTab" Style="{StaticResource ModeTab}" GroupName="Mode" Content="Staged Actions"
+                                 Click="OnStagedTab" AutomationProperties.AutomationId="StagedActionsMode" />
+                    <RadioButton x:Name="HomeTab" Style="{StaticResource ModeTab}" GroupName="Mode" Content="Home" IsChecked="True"
+                                 Margin="2,0,0,0" Click="OnHomeTab" AutomationProperties.AutomationId="HomeMode" />
+                </StackPanel>
+            </Border>
 
             <!-- Settings: opens the drawer. Disabled while the window is busy. -->
             <Button x:Name="SettingsButton" Grid.Row="0" HorizontalAlignment="Right" Margin="0,0,0,8"
@@ -126,8 +221,19 @@
                 </StackPanel>
             </Button>
 
+            <!-- Home: the window as it is without Staged Actions mode. -->
+            <Grid x:Name="HomeContent" Grid.Row="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition x:Name="RequestsRow" Height="*" MinHeight="170" />
+                <RowDefinition Height="1.3*" MinHeight="170" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
             <!-- Dev Mode: shown for the whole life of the window; the mode changes only by reinstalling. -->
-            <Border x:Name="DevModePanel" Grid.Row="1" Margin="0,0,0,12" Style="{StaticResource WarningBanner}"
+            <Border x:Name="DevModePanel" Grid.Row="0" Margin="0,0,0,12" Style="{StaticResource WarningBanner}"
                     Visibility="Collapsed" AutomationProperties.Name="Dev Mode: no guardrails">
                 <StackPanel>
                     <TextBlock FontWeight="SemiBold" Text="Dev Mode: no guardrails" />
@@ -137,7 +243,7 @@
             </Border>
 
             <!-- Workspace root -->
-            <Border Grid.Row="2" Style="{StaticResource Panel}">
+            <Border Grid.Row="1" Style="{StaticResource Panel}">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
@@ -162,13 +268,13 @@
             </Border>
 
             <!-- Errors from the last action; cleared by the next one that succeeds. Drawer actions show theirs in the drawer. -->
-            <Border x:Name="ErrorPanel" Grid.Row="3" Margin="0,10,0,0" Style="{StaticResource ErrorBanner}"
+            <Border x:Name="ErrorPanel" Grid.Row="2" Margin="0,10,0,0" Style="{StaticResource ErrorBanner}"
                     Visibility="Collapsed">
                 <TextBlock x:Name="ErrorText" Style="{StaticResource ErrorText}" />
             </Border>
 
             <!-- Outside-root requests -->
-            <Border x:Name="RequestsPanel" Grid.Row="4" Margin="0,12,0,0" Style="{StaticResource Panel}">
+            <Border x:Name="RequestsPanel" Grid.Row="3" Margin="0,12,0,0" Style="{StaticResource Panel}">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="320" />
@@ -202,7 +308,7 @@
             </Border>
 
             <!-- Run history -->
-            <Border Grid.Row="5" Margin="0,12,0,0" Style="{StaticResource Panel}">
+            <Border Grid.Row="4" Margin="0,12,0,0" Style="{StaticResource Panel}">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="320" />
@@ -234,7 +340,118 @@
                 </Grid>
             </Border>
 
-            <TextBlock x:Name="McpText" Grid.Row="6" Margin="2,10,0,0" Style="{StaticResource MutedText}" />
+            <TextBlock x:Name="McpText" Grid.Row="5" Margin="2,10,0,0" Style="{StaticResource MutedText}" />
+            </Grid>
+
+            <!--
+                Staged Actions mode (spec #13): the whole window for the last dry run that completed in this
+                workspace. Name, time, document and outcome, Applied when the same call has since run for real,
+                then per document Created, Modified and Deleted as readable lists, Also touched by Revit collapsed,
+                the images and the workshared release line. No JSON; the receipt stays in run history.
+            -->
+            <ScrollViewer x:Name="StagedPanel" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled" Focusable="False"
+                          AutomationProperties.Name="Staged Actions" AutomationProperties.AutomationId="StagedActions">
+                <StackPanel Margin="0,4,4,0">
+                    <Border x:Name="StagedErrorPanel" Margin="0,0,0,10" Style="{StaticResource ErrorBanner}" Visibility="Collapsed">
+                        <TextBlock x:Name="StagedErrorText" Style="{StaticResource ErrorText}" />
+                    </Border>
+                    <TextBlock x:Name="StagedNoneText" Style="{StaticResource MutedText}" TextWrapping="Wrap" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="StagedNone" />
+                    <StackPanel x:Name="StagedRunPanel" Visibility="Collapsed">
+                        <DockPanel LastChildFill="True">
+                            <Border x:Name="AppliedBadge" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="12,0,0,0"
+                                    Padding="10,2" CornerRadius="10" Background="{StaticResource AccentSoftBrush}"
+                                    Visibility="Collapsed" AutomationProperties.Name="Applied">
+                                <TextBlock x:Name="AppliedText" FontWeight="SemiBold" Foreground="{StaticResource AccentForegroundBrush}" />
+                            </Border>
+                            <TextBlock x:Name="StagedTitle" Style="{StaticResource HeadingText}" TextWrapping="Wrap" />
+                        </DockPanel>
+                        <TextBlock x:Name="StagedMeta" Margin="0,4,0,0" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+                        <Border x:Name="StagedFailurePanel" Margin="0,12,0,0" Style="{StaticResource ErrorBanner}" Visibility="Collapsed">
+                            <TextBlock x:Name="StagedFailureText" Style="{StaticResource ErrorText}" />
+                        </Border>
+                        <TextBlock x:Name="StagedNothingText" Margin="0,12,0,0" TextWrapping="Wrap" Visibility="Collapsed" />
+                        <ItemsControl x:Name="StagedDocuments" Margin="0,12,0,0" Focusable="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Style="{StaticResource Panel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <TextBlock Style="{StaticResource SectionText}" Text="{Binding Title}" />
+                                            <ItemsControl ItemsSource="{Binding Groups}" Focusable="False">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <StackPanel Margin="0,4,0,8">
+                                                            <TextBlock FontWeight="SemiBold" Text="{Binding Heading}" />
+                                                            <ItemsControl ItemsSource="{Binding Lines}" Focusable="False">
+                                                                <ItemsControl.ItemTemplate>
+                                                                    <DataTemplate>
+                                                                        <StackPanel Margin="12,4,0,0">
+                                                                            <TextBlock TextWrapping="Wrap" Text="{Binding Text}" />
+                                                                            <ItemsControl ItemsSource="{Binding Details}" Margin="16,1,0,0" Focusable="False">
+                                                                                <ItemsControl.ItemTemplate>
+                                                                                    <DataTemplate>
+                                                                                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Text="{Binding}" />
+                                                                                    </DataTemplate>
+                                                                                </ItemsControl.ItemTemplate>
+                                                                            </ItemsControl>
+                                                                        </StackPanel>
+                                                                    </DataTemplate>
+                                                                </ItemsControl.ItemTemplate>
+                                                            </ItemsControl>
+                                                        </StackPanel>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <StackPanel Visibility="{Binding AlsoTouched, Converter={StaticResource NullToCollapsed}}">
+                                                <ToggleButton x:Name="AlsoTouchedToggle" Style="{StaticResource Disclosure}" Content="{Binding AlsoTouched}" />
+                                                <ItemsControl ItemsSource="{Binding AlsoTouchedLines}" Margin="18,2,0,0" Focusable="False"
+                                                              Visibility="{Binding IsChecked, ElementName=AlsoTouchedToggle, Converter={StaticResource BoolToVisible}}">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <TextBlock Style="{StaticResource MutedText}" Text="{Binding}" />
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <ItemsControl x:Name="StagedImages" Focusable="False">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Width="400" Margin="0,0,12,12">
+                                        <Border BorderThickness="1" BorderBrush="{StaticResource BorderBrush}"
+                                                Visibility="{Binding Image, Converter={StaticResource NullToCollapsed}}">
+                                            <Image Source="{Binding Image}" Stretch="Uniform" MaxHeight="300" />
+                                        </Border>
+                                        <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" Text="{Binding Caption}" />
+                                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Text="{Binding Error}"
+                                                   Visibility="{Binding Error, Converter={StaticResource NullToCollapsed}}" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <ItemsControl x:Name="StagedWorksharing" Focusable="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Margin="0,0,0,8" Style="{StaticResource InfoBanner}">
+                                        <TextBlock TextWrapping="Wrap" Text="{Binding}" />
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock x:Name="StagedIdsNote" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
         </Grid>
 
         <!-- The dimmed rest of the window while the drawer is open; a click here closes the drawer. -->
@@ -291,6 +508,33 @@
                                            Style="{StaticResource ErrorText}" Visibility="Collapsed"
                                            AutomationProperties.Name="Script time limit error" />
                                 <TextBlock x:Name="TimeLimitHelp" Grid.Row="3" Grid.ColumnSpan="4" Margin="0,6,0,0"
+                                           Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+                            </Grid>
+                        </Border>
+
+                        <!--
+                            Require dry run (spec #13 "The drawer row"): saved at once on click; on failure the switch
+                            returns to the stored value and the error shows here.
+                        -->
+                        <Border x:Name="RequireDryRunRow" Style="{StaticResource Panel}" Margin="0,0,0,12">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Style="{StaticResource SectionText}" VerticalAlignment="Center" Margin="0" Text="Require dry run" />
+                                <CheckBox x:Name="RequireDryRunSwitch" Grid.Column="1" Style="{StaticResource SwitchToggle}"
+                                          VerticalAlignment="Center" Click="OnRequireDryRunClicked"
+                                          AutomationProperties.Name="Require dry run" AutomationProperties.AutomationId="RequireDryRunSwitch" />
+                                <TextBlock x:Name="RequireDryRunErrorLine" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,6,0,0"
+                                           Style="{StaticResource ErrorText}" Visibility="Collapsed"
+                                           AutomationProperties.Name="Require dry run error" />
+                                <TextBlock x:Name="RequireDryRunHelp" Grid.Row="2" Grid.ColumnSpan="2" Margin="0,6,0,0"
                                            Style="{StaticResource MutedText}" TextWrapping="Wrap" />
                             </Grid>
                         </Border>
