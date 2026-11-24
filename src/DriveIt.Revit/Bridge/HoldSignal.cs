@@ -34,8 +34,9 @@ public static class HoldSignal
     public static Func<TimeSpan> TimeLimit { get; set; } = () => TimeSpan.FromSeconds(120);
 
     /// <summary>
-    /// The longest any hold lasts, whatever TimeLimit returns: the top of the Script time limit setting's
-    /// 10 to 600 second range (spec #15). capture_revit_view waits this long for a hold to end (server/capture.js).
+    /// The cap on a hold's time limit, whatever TimeLimit returns: the top of the Script time limit setting's
+    /// 10 to 600 second range (spec #15). The limit is checked between Revit calls, so a hold can run past it;
+    /// capture_revit_view waits until the pipe frees rather than for this long (server/capture.js).
     /// </summary>
     public static readonly TimeSpan MaximumTimeLimit = TimeSpan.FromSeconds(600);
 

@@ -24,14 +24,21 @@ export async function openPipe(processId, { attempts = 8, waitMs = 0, signal, co
   for (;;) {
     signal?.throwIfAborted();
     const pipe = connector(pipeName(processId));
+    let aborted;
     try {
       await new Promise((resolve, reject) => {
         pipe.once("connect", resolve);
         pipe.once("error", reject);
+        // A cancelled caller stops waiting on an in-flight attempt too, not just between attempts.
+        aborted = () => reject(signal.reason);
+        signal?.addEventListener("abort", aborted, { once: true });
       });
+      // A pipe that connected as the signal aborted is not handed back to write through.
+      signal?.throwIfAborted();
       return pipe;
     } catch (error) {
       pipe.destroy();
+      if (signal?.aborted) throw signal.reason;
       if (error.code === "EBUSY") {
         busy += 1;
         absent = 0;
@@ -42,8 +49,10 @@ export async function openPipe(processId, { attempts = 8, waitMs = 0, signal, co
       } else {
         throw error;
       }
-      await pause(Math.min(25 * (busy + absent), 250), signal);
+    } finally {
+      signal?.removeEventListener("abort", aborted);
     }
+    await pause(Math.min(25 * (busy + absent), 250), signal);
   }
 }
 
@@ -117,6 +126,8 @@ export async function executeBroker(processId, envelope, { timeoutMs = 30000, co
   try {
     const session = validateSession(await connection.readJson(4096), processId);
     onSession?.(session);
+    // Nothing reaches Revit once the caller has cancelled, however late in the connection.
+    signal?.throwIfAborted();
     await connection.writeJson(envelope);
     const response = await connection.readJson(10 * 1024 * 1024);
     if (response.id !== envelope.id) throw new Error("Revit broker response did not match the run ID.");

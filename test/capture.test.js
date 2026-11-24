@@ -403,6 +403,36 @@ test("a capture behind a hold stops waiting only when cancelled or the session c
   assert.ok(exportMs >= BROKER_BUDGET.timeoutMs - 500 && exportMs <= BROKER_BUDGET.timeoutMs + 500, `${exportMs} ms`);
 });
 
+test("a capture cancelled while its pipe connection is in flight sends Revit nothing", async (t) => {
+  const launchRoot = await base(t, "connect-cancel");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  // One attempt whose connect stays pending until the request is cancelled; the add-in side
+  // greets and records anything written to it.
+  const [client, addIn] = duplexPair();
+  addIn.setEncoding("utf8");
+  addIn.write(`${JSON.stringify({ processId: 4242, version: "2026", build: "26.0.4.409" })}\n`);
+  const written = [];
+  addIn.on("data", chunk => written.push(chunk));
+  const pipe = { answer: true, firstAttemptAt: null, connected: false, attempts: 0 };
+  pipe.connector = () => {
+    pipe.attempts += 1;
+    pipe.firstAttemptAt ??= Date.now();
+    return client;
+  };
+  const controller = new AbortController();
+  const { error } = await heldCapture(t, launchRoot, pipe, {
+    signal: controller.signal,
+    // The connection completes the moment after the cancellation, as in a race with the add-in.
+    at: { ms: 1_000, run: () => { controller.abort(); client.emit("connect"); } },
+  });
+  assert.equal(error?.code, "EXPORT_FAILED");
+  assert.match(error.message, /cancelled while Revit was busy; no capture was taken/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(written, []);
+  assert.equal(client.destroyed, true);
+  assert.equal(pipe.attempts, 1);
+});
+
 test("a client that cancels capture_revit_view ends the wait for Revit", { timeout: 10_000 }, async (t) => {
   const launchRoot = await base(t, "held-cancel");
   let waiting;
