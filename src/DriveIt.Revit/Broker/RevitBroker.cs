@@ -49,6 +49,8 @@ public sealed class RevitBroker
 
     public async Task<string> ExecuteAsync(string json, CancellationToken cancellationToken)
     {
+        if (RequestType(json) == "api.describe")
+            return Describe(json);
         BrokerRequest? request;
         try
         {
@@ -190,6 +192,28 @@ public sealed class RevitBroker
             ["status"] = summary is null ? (run is null ? "unknown" : "held") : "ended",
             ["hold"] = summary is null ? null : JsonSerializer.SerializeToNode(summary, JsonOptions),
         }.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>revit.describe outside a hold: reflection over the loaded RevitAPI, without Revit's thread.</summary>
+    private static string Describe(string json)
+    {
+        var request = JsonNode.Parse(json)!.AsObject();
+        var id = request["id"] is JsonValue value && value.TryGetValue<string>(out var text) ? text : "";
+        try
+        {
+            var name = request["describe"]?["type"] is JsonValue type && type.TryGetValue<string>(out var typeName) ? typeName : null;
+            return new JsonObject
+            {
+                ["id"] = id,
+                ["type"] = "api.describe",
+                ["status"] = "succeeded",
+                ["value"] = ApiDescription.Describe(name),
+            }.ToJsonString();
+        }
+        catch (BridgeException exception)
+        {
+            return InvalidRequest(id, exception.Code, exception.Message, "api.describe");
+        }
     }
 
     private static string? RequestType(string json)
