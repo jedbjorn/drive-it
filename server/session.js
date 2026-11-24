@@ -45,15 +45,19 @@ export async function openPipe(processId, { attempts = 8, waitMs = 0, connector 
   }
 }
 
-async function connect(processId, timeoutMs, connectWaitMs = 0) {
-  if (process.platform !== "win32") {
+// With totalMs, the time spent queued for the pipe comes out of the time Revit gets, so a caller
+// with a fixed tool timeout can wait behind a long hold and still answer within it.
+async function connect(processId, timeoutMs, { connectWaitMs = 0, totalMs, connector } = {}) {
+  if (!connector && process.platform !== "win32") {
     throw new Error("Run the MCP server on the Windows machine hosting Revit.");
   }
-  const pipe = await openPipe(processId, { waitMs: connectWaitMs });
+  const started = Date.now();
+  const pipe = await openPipe(processId, { waitMs: connectWaitMs, connector });
+  const limitMs = totalMs === undefined ? timeoutMs : Math.min(timeoutMs, totalMs - (Date.now() - started));
   pipe.setEncoding("utf8");
   const iterator = pipe[Symbol.asyncIterator]();
   let buffered = "";
-  const timeout = setTimeout(() => pipe.destroy(new Error("Revit connection timed out.")), timeoutMs);
+  const timeout = setTimeout(() => pipe.destroy(new Error("Revit connection timed out.")), limitMs);
 
   async function readJson(maxBytes) {
     while (!buffered.includes("\n")) {
@@ -87,7 +91,7 @@ function validateSession(info, processId) {
 }
 
 export async function readSession(processId, { timeoutMs = 4000, connectWaitMs = 0 } = {}) {
-  const connection = await connect(processId, timeoutMs, connectWaitMs);
+  const connection = await connect(processId, timeoutMs, { connectWaitMs });
   try {
     return validateSession(await connection.readJson(4096), processId);
   } finally {
@@ -95,8 +99,8 @@ export async function readSession(processId, { timeoutMs = 4000, connectWaitMs =
   }
 }
 
-export async function executeBroker(processId, envelope, { timeoutMs = 30000, connectWaitMs = 0, onSession } = {}) {
-  const connection = await connect(processId, timeoutMs, connectWaitMs);
+export async function executeBroker(processId, envelope, { timeoutMs = 30000, connectWaitMs = 0, totalMs, connector, onSession } = {}) {
+  const connection = await connect(processId, timeoutMs, { connectWaitMs, totalMs, connector });
   try {
     const session = validateSession(await connection.readJson(4096), processId);
     onSession?.(session);
@@ -190,7 +194,7 @@ function lineReader(pipe, maxBytes) {
 
 // The outcome of a hold the add-in has ended, read without Revit's thread.
 export async function readHoldResult(processId, runId, { timeoutMs = 4000, connectWaitMs = 2000 } = {}) {
-  const connection = await connect(processId, timeoutMs, connectWaitMs);
+  const connection = await connect(processId, timeoutMs, { connectWaitMs });
   try {
     validateSession(await connection.readJson(4096), processId);
     await connection.writeJson({ id: runId, type: "hold.result" });

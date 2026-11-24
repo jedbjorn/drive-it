@@ -33,8 +33,10 @@ const PNG_END = Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x6
 // Revit may round the fitted side; anything beyond this is an export larger than requested.
 const PIXEL_TOLERANCE = 2;
 // Worst case must stay under the 150 s tool timeout of clients such as Codex and ChatGPT
-// (server/clients.js): up to 20 s queued behind another client on the pipe, then 110 s in Revit.
-export const BROKER_BUDGET = Object.freeze({ connectWaitMs: 20_000, timeoutMs: 110_000 });
+// (server/clients.js). A capture queues up to 125 s behind another client on the pipe, which
+// covers a run holding Revit for the default 120 s script time limit (spec #15: capture waits for
+// a hold to end); Revit then gets what is left of 135 s, at most 110 s.
+export const BROKER_BUDGET = Object.freeze({ connectWaitMs: 125_000, timeoutMs: 110_000, totalMs: 135_000 });
 // A pid alive with a start time this far from the recorded one belongs to another process.
 const START_TOLERANCE_MS = 10_000;
 
@@ -539,7 +541,10 @@ export class ReferenceImages {
           onSession: value => { session = value; },
         });
       } catch (error) {
-        throw captureError("EXPORT_FAILED", `The capture did not complete in Revit: ${error.message}`, { stage: "export" });
+        const message = error.code === "EBUSY"
+          ? `Revit stayed busy for ${BROKER_BUDGET.connectWaitMs / 1000} s, most likely held by a script run; capture again after that run ends.`
+          : `The capture did not complete in Revit: ${error.message}`;
+        throw captureError("EXPORT_FAILED", message, { stage: "export" });
       }
       if (this.closed) throw captureError("SESSION_CLOSING", "This MCP session is shutting down; the capture was discarded.", { stage: "export" });
       if (response?.status !== "succeeded") {
