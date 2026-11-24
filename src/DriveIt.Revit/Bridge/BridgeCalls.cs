@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Autodesk.Revit.DB;
+using DriveIt.Core.Bridge;
 
 namespace DriveIt.Revit.Bridge;
 
@@ -404,19 +405,29 @@ internal sealed class BridgeCalls
             throw MemberNotFound(type, name, flags);
         var method = SelectOverload(candidates, arguments, out var converted)
             ?? throw NoMatch(type, name, candidates, arguments);
+        Overloads.SupplyOutputs(method, converted, Output);
         var result = Invoke(() => method.Invoke(target, converted));
-        var parameters = method.GetParameters();
-        if (!parameters.Any(IsOut))
-            return result;
         // Out parameters come back after the return value, as a Python tuple; a single value comes back as itself.
-        var values = new List<object?>();
-        if (((MethodInfo)method).ReturnType != typeof(void))
-            values.Add(result);
-        values.AddRange(parameters.Where(IsOut).Select(parameter => converted[parameter.Position]));
-        return values.Count == 1 ? values[0] : new OutValues(values);
+        return Overloads.Outputs(method, result, converted) switch
+        {
+            null => result,
+            [var single] => single,
+            { } values => new OutValues(values),
+        };
     }
 
-    private static bool IsOut(ParameterInfo parameter) => parameter.ParameterType.IsByRef && parameter.IsOut;
+    /// <summary>
+    /// What an out parameter starts as: a new Revit API object when its type is one Drive-It can construct with no
+    /// arguments (Revit fills NewFootPrintRoof's ModelCurveArray in place and refuses null), otherwise null.
+    /// Nothing the script gives goes in; ref parameters stay unsupported.
+    /// </summary>
+    private static object? Output(Type type) =>
+        type.Assembly == RevitApi && type is { IsClass: true, IsAbstract: false } && !OwnedByDriveIt.Contains(type)
+            && type.GetConstructor(Type.EmptyTypes) is { } constructor
+            ? Invoke(() => constructor.Invoke(null))
+            : null;
+
+    private static bool IsOut(ParameterInfo parameter) => Overloads.IsOut(parameter);
 
     /// <summary>No overload fits: a callback Revit asks for is named, otherwise every signature is listed.</summary>
     private static BridgeException NoMatch(Type type, string name, IEnumerable<MethodBase> candidates, JsonArray arguments)
@@ -432,45 +443,10 @@ internal sealed class BridgeCalls
             : NoOverload(type, name, candidates, arguments);
     }
 
-    private MethodBase? SelectOverload(IEnumerable<MethodBase> candidates, JsonArray arguments, out object?[] converted)
-    {
-        MethodBase? best = null;
-        var bestScore = int.MinValue;
-        converted = [];
-        foreach (var candidate in candidates.OrderBy(method => method.GetParameters().Length))
-        {
-            var parameters = candidate.GetParameters();
-            // Out parameters take no argument and come back with the result; ref parameters and params arrays are not supported.
-            if (parameters.Any(parameter => (parameter.ParameterType.IsByRef && !IsOut(parameter)) || parameter.IsDefined(typeof(ParamArrayAttribute))))
-                continue;
-            var inputs = parameters.Count(parameter => !IsOut(parameter));
-            var required = parameters.Count(parameter => !IsOut(parameter) && !parameter.IsOptional);
-            if (arguments.Count < required || arguments.Count > inputs)
-                continue;
-            var values = new object?[parameters.Length];
-            var score = 0;
-            var matches = true;
-            var next = 0;
-            for (var index = 0; index < parameters.Length && matches; index++)
-            {
-                if (IsOut(parameters[index]))
-                    continue;
-                if (next >= arguments.Count)
-                {
-                    values[index] = parameters[index].HasDefaultValue ? parameters[index].DefaultValue : Type.Missing;
-                    continue;
-                }
-                matches = TryConvert(arguments[next++], parameters[index].ParameterType, out values[index], out var argumentScore);
-                score += argumentScore;
-            }
-            if (!matches || score <= bestScore)
-                continue;
-            best = candidate;
-            bestScore = score;
-            converted = values;
-        }
-        return best;
-    }
+    private MethodBase? SelectOverload(IEnumerable<MethodBase> candidates, JsonArray arguments, out object?[] converted) =>
+        Overloads.Select(candidates, arguments.Count,
+            (int index, Type parameterType, out object? value, out int score) => TryConvert(arguments[index], parameterType, out value, out score),
+            out converted);
 
     /// <summary>Converts one script value to a parameter type; a higher score is a closer match.</summary>
     private bool TryConvert(JsonNode? node, Type target, out object? value, out int score)
@@ -708,10 +684,18 @@ internal sealed class BridgeCalls
     private static BridgeException NoOverload(Type type, string name, IEnumerable<MethodBase> candidates, JsonArray arguments)
     {
         var signatures = candidates.Select(method =>
-            $"{(name == ".ctor" ? TypeName(type) : name)}({string.Join(", ", method.GetParameters().Select(parameter => $"{TypeName(parameter.ParameterType)} {parameter.Name}"))})");
+            $"{(name == ".ctor" ? TypeName(type) : name)}({string.Join(", ", method.GetParameters().Select(Signature))})");
+        var outs = candidates.Any(method => method.GetParameters().Any(IsOut))
+            ? " Pass no argument for an out parameter; its value comes back after the return value, as a tuple."
+            : "";
         return new BridgeException("no_matching_overload",
-            $"No {TypeName(type)}.{(name == ".ctor" ? "constructor" : name)} takes these {arguments.Count} argument(s). It has: {string.Join("; ", signatures)}.");
+            $"No {TypeName(type)}.{(name == ".ctor" ? "constructor" : name)} takes these {arguments.Count} argument(s). It has: {string.Join("; ", signatures)}.{outs}");
     }
+
+    /// <summary>A parameter as revit.describe writes by-reference ones: out ModelCurveArray mapping, not ModelCurveArray&amp;.</summary>
+    private static string Signature(ParameterInfo parameter) => parameter.ParameterType.IsByRef
+        ? $"{(IsOut(parameter) ? "out" : "ref")} {TypeName(parameter.ParameterType.GetElementType()!)} {parameter.Name}"
+        : $"{TypeName(parameter.ParameterType)} {parameter.Name}";
 
     private static int Depth(Type? type)
     {
