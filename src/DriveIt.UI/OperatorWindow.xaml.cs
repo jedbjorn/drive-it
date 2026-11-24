@@ -171,7 +171,15 @@ public partial class OperatorWindow : Window
     public string? StagedErrorMessage => StagedErrorPanel.Visibility == Visibility.Visible ? StagedErrorText.Text : null;
 
     /// <summary>Every line of text Staged Actions mode shows, top to bottom (the self-test checks there is no JSON).</summary>
-    public IReadOnlyList<string> StagedTextShown => VisibleText(StagedPanel);
+    public IReadOnlyList<string> StagedTextShown
+    {
+        get
+        {
+            // The lists' rows exist only once layout has generated them.
+            UpdateLayout();
+            return VisibleText(StagedPanel);
+        }
+    }
 
     public int PendingCount => RequestList.Items.Count;
 
