@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DecisionStore } from "./decisions.js";
 import { HistoryStore } from "./history.js";
-import { installMode } from "./mode.js";
+import { DEV, installMode } from "./mode.js";
 import { ScriptCatalog, validateArguments } from "./library.js";
 import { revitContentFolders } from "./content.js";
 import { executeBroker, openHold, readSession } from "./session.js";
@@ -222,7 +222,11 @@ export class Runtime {
       receipt.status = error.code === "RUN_TIMEOUT" ? "timed_out" : "failed";
       receipt.error = { code: error.code || "EXECUTION_FAILED", message: error.message };
     } finally {
-      if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      // In Dev Mode a process the script left running may still use the run's folder (on Windows its
+      // working directory cannot be removed); the folder stays rather than costing the run its receipt.
+      if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(error => {
+        if (receipt.mode !== DEV) throw error;
+      });
     }
     if (context.holdPromise) await this.endHold(receipt, context);
 
