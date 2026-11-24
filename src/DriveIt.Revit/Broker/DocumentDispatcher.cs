@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 
@@ -23,6 +24,7 @@ public sealed partial class DocumentDispatcher
         {
             Id = request.Id,
             WorkspaceRoot = request.WorkspaceRoot,
+            Results = request.Operations.Select(_ => (JsonNode?)null).ToList(),
         };
 
         try
@@ -63,15 +65,19 @@ public sealed partial class DocumentDispatcher
 
     private List<PreparedOperation> PrepareOperations(UIApplication application, BrokerRequest request)
     {
-        string? currentPath = null;
+        // Preflight follows each document the batch reaches. save_as_document moves that document's
+        // projected path, so when get_active_document later selects it, save and delete are
+        // authorized for where it will live, not where it was before the batch.
+        var tracked = new List<ProjectedDocument>();
+        ProjectedDocument? current = null;
         if (!string.IsNullOrWhiteSpace(request.Document?.UniqueId))
         {
-            var state = Resolve(application, request.Document);
-            currentPath = CanonicalDocumentPath(state.Document);
+            current = Track(tracked, Resolve(application, request.Document).Document);
         }
         else if (!string.IsNullOrWhiteSpace(request.Document?.Path))
         {
-            currentPath = WorkspacePolicy.Canonicalize(request.Document.Path, "document.path");
+            current = ProjectOpen(application, tracked,
+                WorkspacePolicy.Canonicalize(request.Document.Path, "document.path"));
         }
 
         var prepared = new List<PreparedOperation>();
@@ -80,6 +86,19 @@ public sealed partial class DocumentDispatcher
             if (operation is null || string.IsNullOrWhiteSpace(operation.Type))
                 throw new RequestRejectedException("invalid_operation", "Every operation requires a type.");
             var item = new PreparedOperation(operation.Type);
+            if (IsQuery(operation.Type))
+            {
+                // Queries and selection carry no policy paths. get_active_document retargets the
+                // operations after it to the active document, at its projected path; the rest
+                // leave the current document unchanged.
+                if (operation.Type == "get_active_document")
+                    current = application.ActiveUIDocument?.Document is { IsLinked: false } active
+                        ? Track(tracked, active)
+                        : null;
+                item.Query = PrepareQuery(operation);
+                prepared.Add(item);
+                continue;
+            }
             if (IsModelChange(operation.Type))
             {
                 item.ModelChange = Deserialize<ModelChangeRequest>(operation.Arguments);
@@ -94,27 +113,36 @@ public sealed partial class DocumentDispatcher
                 case "open_document":
                     item.DocumentArguments.Path = WorkspacePolicy.Canonicalize(item.DocumentArguments.Path, "open_document.path");
                     item.PolicyPaths.Add(item.DocumentArguments.Path);
-                    currentPath = item.DocumentArguments.Path;
+                    current = ProjectOpen(application, tracked, item.DocumentArguments.Path);
                     break;
                 case "create_document":
                     item.DocumentArguments.TemplatePath = WorkspacePolicy.Canonicalize(item.DocumentArguments.TemplatePath,
                         "create_document.templatePath");
                     item.PolicyPaths.Add(item.DocumentArguments.TemplatePath);
-                    currentPath = null;
+                    current = new ProjectedDocument(null, null);
                     break;
                 case "save_document":
+                    if (current?.Path is not null)
+                        item.PolicyPaths.Add(current.Path);
+                    break;
                 case "delete_document":
-                    if (currentPath is not null)
-                        item.PolicyPaths.Add(currentPath);
+                    if (current?.Path is not null)
+                        item.PolicyPaths.Add(current.Path);
+                    if (current is not null)
+                        tracked.Remove(current);
+                    current = null;
                     break;
                 case "save_as_document":
                     item.DocumentArguments.DestinationPath = WorkspacePolicy.Canonicalize(
                         item.DocumentArguments.DestinationPath, "save_as_document.destinationPath");
                     item.PolicyPaths.Add(item.DocumentArguments.DestinationPath);
-                    currentPath = item.DocumentArguments.DestinationPath;
+                    if (current is not null)
+                        current.Path = item.DocumentArguments.DestinationPath;
                     break;
                 case "close_document":
-                    currentPath = null;
+                    if (current is not null)
+                        tracked.Remove(current);
+                    current = null;
                     break;
                 case "read_document":
                     break;
@@ -133,6 +161,11 @@ public sealed partial class DocumentDispatcher
         for (var index = 0; index < prepared.Count; index++)
         {
             var operation = prepared[index];
+            if (IsQuery(operation.Type))
+            {
+                current = ExecuteQuery(application, operation, current, response, index);
+                continue;
+            }
             if (IsModelChange(operation.Type))
             {
                 current = RequireDocument(current);
@@ -164,6 +197,7 @@ public sealed partial class DocumentDispatcher
                     break;
                 case "save_document":
                     current = RequireDocument(current);
+                    RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
                     Save(current, response);
                     break;
                 case "save_as_document":
@@ -177,6 +211,7 @@ public sealed partial class DocumentDispatcher
                     break;
                 case "delete_document":
                     current = RequireDocument(current);
+                    RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
                     Delete(current, response);
                     current = null;
                     break;
@@ -542,7 +577,7 @@ public sealed partial class DocumentDispatcher
     }
 
     private static DocumentState RequireDocument(DocumentState? state) => state ??
-        throw new RequestRejectedException("document_not_open", "The requested operation requires an open selected document.");
+        throw new RequestRejectedException("document_not_open", "The requested operation requires an open selected document, and this script has none. Call revit.get_active_document() first to use the model open in Revit's window, or pass document= with a uniqueId from an earlier receipt.");
 
     private DocumentState Register(Document document, bool created = false)
     {
@@ -563,10 +598,12 @@ public sealed partial class DocumentDispatcher
         return state;
     }
 
-    private static DocumentReceipt Snapshot(DocumentState state)
+    private static DocumentReceipt Snapshot(DocumentState state) => Snapshot<DocumentReceipt>(state);
+
+    private static T Snapshot<T>(DocumentState state) where T : DocumentReceipt, new()
     {
         var document = state.Document;
-        var receipt = new DocumentReceipt
+        var receipt = new T
         {
             UniqueId = state.Id,
             Title = document.Title,
@@ -605,6 +642,54 @@ public sealed partial class DocumentDispatcher
     private static bool AllCovered(OutsideRootApproval? approval, List<PolicyPathGrant> requests)
     {
         return requests.All(request => request.Paths.All(path => WorkspacePolicy.IsCovered(approval, request.Operation, path)));
+    }
+
+    /// <summary>
+    /// The batch's projection of an open document, created at its pre-batch path the first time
+    /// preflight reaches it. A null path is an unsaved document (save and delete then fail on
+    /// their own before any effect).
+    /// </summary>
+    private static ProjectedDocument Track(List<ProjectedDocument> tracked, Document document)
+    {
+        var known = tracked.FirstOrDefault(projected => projected.Source is not null && SameDocument(projected.Source, document));
+        if (known is not null)
+            return known;
+        var added = new ProjectedDocument(document, CanonicalDocumentPath(document));
+        tracked.Add(added);
+        return added;
+    }
+
+    /// <summary>
+    /// What open_document (or a document.path target) reaches, as execution resolves it: the
+    /// document projected at that path, else an open document still there, else a fresh one.
+    /// </summary>
+    private static ProjectedDocument ProjectOpen(UIApplication application, List<ProjectedDocument> tracked, string path)
+    {
+        var projected = tracked.FirstOrDefault(candidate => PathsEqual(candidate.Path, path));
+        if (projected is not null)
+            return projected;
+        var open = OpenDocuments(application).FirstOrDefault(document => PathsEqual(document.PathName, path)
+            && !tracked.Any(candidate => candidate.Source is not null && SameDocument(candidate.Source, document)));
+        if (open is not null)
+            return Track(tracked, open);
+        var fresh = new ProjectedDocument(null, path);
+        tracked.Add(fresh);
+        return fresh;
+    }
+
+    /// <summary>
+    /// Fail-closed backstop for save and delete: the file the operation actually reaches must be
+    /// inside the root or covered by the batch's decision, even where preflight predicted another
+    /// target (for example, a document Revit's window switched to between preflight and execution).
+    /// </summary>
+    private static void RequireAuthorized(BrokerRequest request, string root, string operation, DocumentState state)
+    {
+        var path = CanonicalDocumentPath(state.Document);
+        if (path is null || WorkspacePolicy.IsInside(root, path)
+            || WorkspacePolicy.IsCovered(request.OutsideRootApproval, operation, path))
+            return;
+        throw new RequestRejectedException("policy_required",
+            $"{operation} reaches {path}, outside the workspace root, and the batch's outside-root decision does not cover it.");
     }
 
     private static bool HasEffects(BrokerResponse response) =>
@@ -707,7 +792,15 @@ public sealed partial class DocumentDispatcher
         public string Type { get; } = type;
         public DocumentOperationArguments DocumentArguments { get; set; } = new();
         public ModelChangeRequest? ModelChange { get; set; }
+        /// <summary>The parsed, bounded arguments of a query or selection operation.</summary>
+        public object? Query { get; set; }
         public List<string> PolicyPaths { get; } = [];
+    }
+
+    private sealed class ProjectedDocument(Document? source, string? path)
+    {
+        public Document? Source { get; } = source;
+        public string? Path { get; set; } = path;
     }
 
     private sealed class DocumentState(string id, Document document)

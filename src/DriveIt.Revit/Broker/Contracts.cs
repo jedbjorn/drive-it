@@ -68,6 +68,49 @@ public sealed class ModelChangeRequest
     public PointRequest? End { get; set; }
 }
 
+/// <summary>Arguments of get_active_document and get_selection, which take none.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class NoArguments { }
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class FindElementsArguments
+{
+    public string? Category { get; set; }
+    public string? Kind { get; set; }
+    public long? LevelId { get; set; }
+    public string? TypeName { get; set; }
+    public int? Limit { get; set; }
+    public int? Offset { get; set; }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class GetParametersArguments
+{
+    public List<long>? ElementIds { get; set; }
+    public List<string>? Names { get; set; }
+    public bool? IncludeType { get; set; }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class ListTypesArguments
+{
+    public string? Category { get; set; }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class ListViewsArguments
+{
+    public List<string>? ViewTypes { get; set; }
+    public bool? IncludeSheets { get; set; }
+    public bool? IncludeTemplates { get; set; }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class SetSelectionArguments
+{
+    public List<long>? ElementIds { get; set; }
+}
+
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class PointRequest
 {
@@ -104,6 +147,11 @@ public sealed class BrokerResponse
     public List<PolicyPathGrant>? PolicyRequests { get; set; }
     public CaptureReceipt? Capture { get; set; }
     public List<ViewSummary>? CreatedViews { get; set; }
+    /// <summary>
+    /// One entry per model.execute operation in batch order: a read primitive's output, null for
+    /// every other operation and for every operation after a failure.
+    /// </summary>
+    public List<JsonNode?>? Results { get; set; }
     public ErrorReceipt? Error { get; set; }
 }
 
@@ -175,7 +223,8 @@ public sealed class ViewSummary
     public string? NotCapturable { get; set; }
 }
 
-public sealed class DocumentReceipt
+[JsonDerivedType(typeof(ActiveDocumentReceipt))]
+public class DocumentReceipt
 {
     public string UniqueId { get; set; } = "";
     public string Title { get; set; } = "";
@@ -185,6 +234,29 @@ public sealed class DocumentReceipt
     public int? WallCount { get; set; }
     public List<LevelReceipt>? Levels { get; set; }
     public List<string>? FamilyTypes { get; set; }
+}
+
+/// <summary>
+/// get_active_document's snapshot: the standard receipt plus the active document's state and every
+/// open, non-linked document. Serialized as itself through the base-typed response property.
+/// </summary>
+public sealed class ActiveDocumentReceipt : DocumentReceipt
+{
+    public bool IsModified { get; set; }
+    /// <summary>{id, name, viewType}, or JSON null when the document has no active view.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public JsonObject? ActiveView { get; set; }
+    public List<OpenDocumentReceipt> OpenDocuments { get; set; } = [];
+}
+
+public sealed class OpenDocumentReceipt
+{
+    public string UniqueId { get; set; } = "";
+    public string Title { get; set; } = "";
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Path { get; set; }
+    public string Kind { get; set; } = "";
+    public bool IsActive { get; set; }
 }
 
 public sealed class LevelReceipt
