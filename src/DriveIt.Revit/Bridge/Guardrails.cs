@@ -37,6 +37,19 @@ internal static class Guardrails
         (typeof(RevitApplication), "NewFamilyDocument", "create_document"),
     ];
 
+    /// <summary>
+    /// Calls that leave the Revit session and cannot be rolled back: synchronize with central, reload latest and print
+    /// (spec #16 "Calls Refused", flag #28). Every Revit 2026 API member that does one of these.
+    /// </summary>
+    private static readonly (Type Owner, string Member, string Action)[] LeaveTheSession =
+    [
+        (typeof(Document), "SynchronizeWithCentral", "synchronize with central"),
+        (typeof(Document), "ReloadLatest", "reload latest"),
+        (typeof(Document), "Print", "print"),
+        (typeof(View), "Print", "print"),
+        (typeof(PrintManager), "SubmitPrint", "print"),
+    ];
+
     /// <summary>Refuses a handle for anything but a Revit model API object or a standard collection of them.</summary>
     public static void RequireAllowed(Type type)
     {
@@ -48,6 +61,12 @@ internal static class Guardrails
     /// <summary>Refuses the document and transaction calls that stay with Drive-It, naming the built-in to use.</summary>
     public static void RequireCallable(Type type, string member)
     {
+        foreach (var (owner, name, action) in LeaveTheSession)
+        {
+            if (name == member && owner.IsAssignableFrom(type))
+                throw new BridgeException("member_not_allowed",
+                    $"{owner.Name}.{member} leaves the Revit session and cannot be rolled back, so Drive-It does not run it. Ask the user to {action} in Revit.");
+        }
         foreach (var (owner, name, instead) in BuiltInOnly)
         {
             if (name == member && owner.IsAssignableFrom(type))
