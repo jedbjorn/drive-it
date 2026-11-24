@@ -1,7 +1,7 @@
 ---
 title: Drive-It
 tags: [drive-it, revit, mcp, dotnet]
-date: 2026-11-22
+date: 2026-11-24
 project: Drive-It
 purpose: MCP server and Revit add-in
 ---
@@ -15,7 +15,8 @@ purpose: MCP server and Revit add-in
 [![License: MIT](https://img.shields.io/github/license/jedbjorn/drive-it?style=flat-square&color=blue)](https://github.com/jedbjorn/drive-it/blob/main/LICENSE)
 
 [![Revit 2026](https://img.shields.io/badge/Revit-2026-0696D7?style=flat-square&logo=autodeskrevit&logoColor=white)](#requirements)
-[![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4?style=flat-square&logo=dotnet&logoColor=white)](#install)
+[![Revit 2027](https://img.shields.io/badge/Revit-2027-0696D7?style=flat-square&logo=autodeskrevit&logoColor=white)](#requirements)
+[![.NET 8 | 10](https://img.shields.io/badge/.NET-8.0%20%7C%2010.0-512BD4?style=flat-square&logo=dotnet&logoColor=white)](#install)
 [![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white)](#install)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#requirements)
 [![Open in md-converter](https://img.shields.io/badge/Open%20in-md--converter-6b46c1?style=flat-square)](https://md-converter.designs-os.com/?url=https://github.com/jedbjorn/drive-it/blob/main/README.md)
@@ -27,13 +28,13 @@ purpose: MCP server and Revit add-in
 
 ## Overview
 
-Drive-It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes these stdio MCP tools:
+Drive-It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 or Revit 2027 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes these stdio MCP tools:
 
 - `get_revit_session` finds the running Revit (when only one has Drive-It loaded, no process ID is needed) and returns its version, build, named-pipe identity, the workspace root, and Revit's installed project templates, family template folders, and library folders, so the agent uses real paths instead of guessing.
 - `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker. Every call carries a required `displayName`: one plain-language line the agent writes for you, such as "Add Level 3 at 24 ft to the tower model". It is kept on the run receipt and on any outside-root request, and the operator surface lists runs and requests by it.
 - `save_script`, `search_scripts`, `get_script`, `promote_script`, and `retire_script` manage the workspace script library (see [Script library](#script-library)).
 - `capture_revit_view` exports an existing Revit view to a PNG and returns the image so the agent can check its own work (see [View capture](#view-capture)).
-- `get_api_reference` returns local, versioned references for the callable Drive-It file, check, and Revit operations. `get_guidance` is not registered.
+- `get_api_reference` returns local, versioned references for the callable Drive-It file, check, and Revit operations. The version names the selected Revit session's version (for example `revit-2027-alpha.4`); with no session selected it names both supported versions, whose built-in operations are the same. `get_guidance` is not registered.
 
 Generated Python receives `args`, `files`, `revit`, `checks`, and `units`, and through the [Revit API bridge](#revit-api-bridge) `DB` and handles to Revit objects; read [Safety and ability](#safety-and-ability) before using it. Typed model operations use the Drive-It add-in's current-user named pipe and execute in Revit's API context. The worker uses Python isolated mode, blocks package installation, process execution, native loading, and thread creation, and records observed effects and checks in a durable run receipt. Scripts can import only the modules in `ALLOWED_MODULES` in `server/worker.py` (in-memory data, text, math, and date utilities plus `os`/`pathlib` for mediated file access); every other import or module load is denied. Text in the encodings Python ships, such as `open(path, encoding="utf-16")` for Revit's shared parameter files, works without importing anything. This is a guardrail for generated code, not an operating-system sandbox.
 
@@ -59,7 +60,7 @@ node server/operator.js workspace set C:\DriveIt
 node server/operator.js workspace get
 ```
 
-Reads, creates, overwrites, renames, moves, and deletes inside the canonical root do not produce a Drive-It prompt. Reading Revit's own installed content also needs no prompt: reading files and folders, opening documents, and using a file as a template under `%ProgramData%\Autodesk\RVT 2026\Templates`, `Family Templates`, and `Libraries`. Writing there still needs a decision. Links and junctions are resolved at the point of use. An outside-root request returns a `pending` receipt and changes nothing in the requested batch. List the request and make a one-time decision:
+Reads, creates, overwrites, renames, moves, and deletes inside the canonical root do not produce a Drive-It prompt. Reading Revit's own installed content also needs no prompt: reading files and folders, opening documents, and using a file as a template under `%ProgramData%\Autodesk\RVT <version>\Templates`, `Family Templates`, and `Libraries`, for the selected session's Revit version (`RVT 2026` or `RVT 2027`). Writing there still needs a decision. Links and junctions are resolved at the point of use. An outside-root request returns a `pending` receipt and changes nothing in the requested batch. List the request and make a one-time decision:
 
 ```powershell
 node server/operator.js decisions list
@@ -203,13 +204,20 @@ By default, images are deleted when the MCP session ends; the response tells the
 
 ## Requirements
 
-The Windows alpha installer requires Windows and Autodesk Revit 2026. It provisions private Node.js and Python runtimes and reuses a suitable existing .NET runtime or provisions .NET 8 in Drive-It's private runtime directory. No administrator account, development checkout, global Node.js/npm, or global Python is required.
+The Windows alpha installer requires Windows and Autodesk Revit 2026, Revit 2027, or both. It provisions private Node.js and Python runtimes and reuses a suitable existing .NET runtime (8 or later: Revit 2026 installs .NET 8 and Revit 2027 installs .NET 10, and the Drive-It window runs on either) or provisions .NET 8 in Drive-It's private runtime directory. No administrator account, development checkout, global Node.js/npm, or global Python is required.
+
+The add-in is built twice from one source: for Revit 2026 on .NET 8 against the 2026 API, and for Revit 2027 on .NET 10 against the 2027 API. Every install registers both, whichever Revit is present:
+
+| Revit | Add-in manifest | Add-in build |
+|---|---|---|
+| 2026 | `%APPDATA%\Autodesk\Revit\Addins\2026\DriveIt.addin` | `%LOCALAPPDATA%\DriveIt\app\addin\2026` (.NET 8) |
+| 2027 | `%APPDATA%\Autodesk\Revit\Addins\2027\DriveIt.addin` | `%LOCALAPPDATA%\DriveIt\app\addin\2027` (.NET 10) |
 
 For a source build, install:
 
 - Windows
-- Autodesk Revit 2026
-- .NET 8 SDK
+- Autodesk Revit 2026 or 2027
+- .NET 8 and .NET 10 SDKs
 - Node.js 22 or newer
 - Python 3 for source builds
 
@@ -225,8 +233,8 @@ Revit is required to use the add-in, but not to run the Node.js tests or compile
 
 ### Windows (MSI)
 
-1. Download `DriveIt-<version>.msi` from the [latest release](https://github.com/jedbjorn/drive-it/releases/latest) and run it. It is a per-user install and needs no administrator account, and it needs Autodesk Revit 2026 on the computer. Releases are digitally signed by **AnJ Arch-Tech LLC**, the company behind Designs/OS. To check, right-click the MSI and choose **Properties › Digital Signatures**.
-2. Start Revit 2026. Revit asks about the Drive-It add-in the first time; choose **Always Load**.
+1. Download `DriveIt-<version>.msi` from the [latest release](https://github.com/jedbjorn/drive-it/releases/latest) and run it. It is a per-user install and needs no administrator account, and it needs Autodesk Revit 2026 or 2027 on the computer. It installs the add-in for both years, so a Revit year you install later finds Drive-It already in place. Releases are digitally signed by **AnJ Arch-Tech LLC**, the company behind Designs/OS. To check, right-click the MSI and choose **Properties › Digital Signatures**.
+2. Start Revit 2026 or 2027. Each Revit asks about the Drive-It add-in the first time; choose **Always Load**.
 3. Open **Drive-It** from the Start Menu, or click **Drive-It** in the **Drive-It** panel on Revit's **Add-Ins** tab, and select your workspace folder.
 4. Restart Claude, ChatGPT or Codex so it picks up the new `drive-it` MCP server. In the ChatGPT desktop app, Drive-It's tools are available in Codex and Work mode, not in plain Chat.
 5. The first time the assistant calls a Drive-It tool, the client asks for permission. Choose **Always allow** so later runs are not interrupted; Drive-It still asks you itself before a script writes outside your workspace.
@@ -244,7 +252,7 @@ The MSI registers Drive-It with every supported MCP client it finds for your Win
 
 Before changing a client file, the installer saves a copy next to it as `<file>.drive-it.bak`. If a client configuration cannot be read, `config.toml` is not valid TOML, or Codex already defines its own `drive-it` server, that client is skipped and its file is left untouched. The updated `config.toml` is also parsed before it is saved, because a malformed file stops the ChatGPT and Codex apps from starting. If you install a client after Drive-It, repair Drive-It from the folder that holds the MSI with `msiexec /fa DriveIt-<version>.msi` to register it. You can also copy the entry from `%LOCALAPPDATA%\DriveIt\mcp.json` into any other stdio MCP client.
 
-To remove Drive-It, uninstall it from Settings > Apps. This removes the application, the Revit add-in registration, the Start Menu shortcut, and the `drive-it` entries it added to Claude and Codex. Your workspace selection and run receipts in `%LOCALAPPDATA%\DriveIt` are kept.
+To remove Drive-It, uninstall it from Settings > Apps. This removes the application, the Revit 2026 and 2027 add-in registrations, the Start Menu shortcut, and the `drive-it` entries it added to Claude and Codex. Your workspace selection and run receipts in `%LOCALAPPDATA%\DriveIt` are kept.
 
 For an unattended install, upgrade, or removal, use the same command lines RST's tray uses; each exits `0` on success and never asks for a reboot:
 
@@ -263,13 +271,13 @@ The script installer is still available: extract `drive-it-windows-alpha.zip` fr
 .\Install-DriveIt.ps1 -WorkspaceRoot "C:\DriveIt"
 ```
 
-Both installers place the application, private Node.js/Python runtimes, and local data in `%LOCALAPPDATA%\DriveIt`, write a ready-to-use stdio configuration to `%LOCALAPPDATA%\DriveIt\mcp.json`, and register the detected clients above. The MCP environment points `DRIVE_IT_DATA_DIR` at that data directory and `DRIVE_IT_PYTHON` at the bundled Python executable. The installer verifies the runtimes and starts the installed MCP server before registering the current-user Revit 2026 add-in. Existing toolchains are not replaced.
+Both installers place the application, private Node.js/Python runtimes, and local data in `%LOCALAPPDATA%\DriveIt`, write a ready-to-use stdio configuration to `%LOCALAPPDATA%\DriveIt\mcp.json`, and register the detected clients above. The MCP environment points `DRIVE_IT_DATA_DIR` at that data directory and `DRIVE_IT_PYTHON` at the bundled Python executable. The installer verifies the runtimes and starts the installed MCP server before registering the current-user Revit 2026 and 2027 add-ins. `Uninstall-DriveIt.ps1` removes every year's add-in registration that names its install. Existing toolchains are not replaced.
 
 With the script installer, pass `-McpConfigPath <path>` to merge the same entry into another MCP client configuration while preserving its other servers. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
 
 The Drive-It window opens from the Start Menu (`Drive-It`) and from the **Drive-It** panel on Revit's **Add-Ins** tab; inside Revit it follows Revit's light or dark theme, and from the Start Menu the Windows app theme. Use it for first-run root selection. The same window changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests.
 
-The window (`app\operator\DriveIt.Operator.exe` and `DriveIt.UI.dll` in the add-in folder) uses the installed private Node runtime to call `server/operator.js` directly: `workspace get|set`, `decisions list|approve|deny`, and `history list`. Runs and pending requests are listed by their display name when they carry one, with the run ID in the details. These commands are not MCP tools. The shared local state contract is:
+The window (`app\operator\DriveIt.Operator.exe`, and `DriveIt.UI.dll` in each year's add-in folder) uses the installed private Node runtime to call `server/operator.js` directly: `workspace get|set`, `decisions list|approve|deny`, and `history list`. Runs and pending requests are listed by their display name when they carry one, with the run ID in the details. These commands are not MCP tools. The shared local state contract is:
 
 - `workspace.json`: the selected root used for future operations.
 - `decisions/<id>.json`: pending, approved, denied, or consumed requests with canonical `operation` and `paths` details. Approval is consumed once and never reused for another request.
@@ -283,14 +291,17 @@ From a source checkout, run these commands in PowerShell with Revit closed:
 npm ci
 dotnet build src/DriveIt.Revit -c Release
 
-$build = "src/DriveIt.Revit/bin/Release/net8.0-windows"
-$addins = Join-Path $env:APPDATA "Autodesk/Revit/Addins/2026"
-New-Item -ItemType Directory -Force "$addins/DriveIt" | Out-Null
-Copy-Item "$build/DriveIt.Revit.dll", "$build/DriveIt.UI.dll", "$build/DriveIt.Core.dll" "$addins/DriveIt/"
-Copy-Item "$build/DriveIt.addin" "$addins/"
+# One build per Revit year: 2026 is net8.0-windows, 2027 is net10.0-windows.
+foreach ($target in @(@{ Year = "2026"; Framework = "net8.0-windows" }, @{ Year = "2027"; Framework = "net10.0-windows" })) {
+  $build = "src/DriveIt.Revit/bin/Release/$($target.Framework)"
+  $addins = Join-Path $env:APPDATA "Autodesk/Revit/Addins/$($target.Year)"
+  New-Item -ItemType Directory -Force "$addins/DriveIt" | Out-Null
+  Copy-Item "$build/DriveIt.Revit.dll", "$build/DriveIt.UI.dll", "$build/DriveIt.Core.dll" "$addins/DriveIt/"
+  Copy-Item "$build/DriveIt.addin" "$addins/"
+}
 ```
 
-Tagged releases also provide the compiled add-in and MCP server as `DriveIt-<version>.zip`, with checksums for every asset in `SHA256SUMS.txt`. Extract the bundle, run `npm ci` in its directory, then copy `DriveIt.addin` and the `DriveIt` folder into `%APPDATA%\Autodesk\Revit\Addins\2026` as above.
+Tagged releases also provide the compiled add-ins and MCP server as `DriveIt-<version>.zip`, with checksums for every asset in `SHA256SUMS.txt`. Extract the bundle, run `npm ci` in its directory, then copy the contents of its `2026` or `2027` folder (`DriveIt.addin` and the `DriveIt` folder) into `%APPDATA%\Autodesk\Revit\Addins\<year>` for that year.
 
 Start Revit and allow the add-in to load. Configure your MCP client to launch the server over stdio, replacing the example path with your checkout or extracted release bundle:
 
@@ -343,9 +354,9 @@ In Dev Mode, `%LOCALAPPDATA%\DriveIt\mcp.json` also carries this as a commented 
 
 ## Use
 
-`get_revit_session` and `execute_script` find the running Revit on their own when only one Revit has the Drive-It add-in loaded. With several Revit windows open, the agent is told which process IDs are running and asks which to use; it then passes that `processId`. When a run needs an outside-root approval, the tool tells the agent to ask you to decide in the Drive-It window and to resume with the same `idempotencyKey`.
+`get_revit_session` and `execute_script` find the running Revit on their own when only one Revit has the Drive-It add-in loaded. With several Revit windows open, including Revit 2026 and 2027 side by side, the agent is told which process IDs are running with their Revit versions and asks which to use; it then passes that `processId`. When a run needs an outside-root approval, the tool tells the agent to ask you to decide in the Drive-It window and to resume with the same `idempotencyKey`.
 
-A successful session response contains the selected Revit process and its version information:
+A successful session response contains the selected Revit process and its version information (`"2026"` or `"2027"`):
 
 ```json
 {
@@ -400,9 +411,9 @@ Build the self-contained installer package on a development machine with `instal
 - `server/workspace.js`, `server/decisions.js`, and `server/history.js` persist policy and run evidence outside the selected workspace.
 - `src/DriveIt.Revit/App.cs` serves the session greeting and typed requests, and adds the **Drive-It** panel (button `DriveIt.OpenOperator`) to the Add-Ins tab. `Broker/RevitBroker.cs` raises an external event, and `Broker/DocumentDispatcher.cs` executes document and model operations in Revit's API context.
 - `npm test` exercises real stdio discovery, isolated Python execution, policy and failure paths, replay, operator commands, and temporary-file cleanup. Windows runs also exercise the named-pipe session, newline-JSON broker contract, operator state, approvals, and run history.
-- `dotnet build src/DriveIt.Revit -c Release` compiles the Revit 2026 add-in. The operator window is `src/DriveIt.UI` (WPF, the family theme copied from Splash-It), hosted in Revit and by `src/DriveIt.Operator` (the Start Menu exe); its operator.js client and labels are in `src/DriveIt.Core`, tested by `dotnet test test/DriveIt.Core.Tests` on any OS.
+- `dotnet build src/DriveIt.Revit -c Release` compiles the add-in for Revit 2026 (`net8.0-windows`, 2026 API) and Revit 2027 (`net10.0-windows`, 2027 API) from the same files; `REVIT2026` or `REVIT2027` is defined for `#if` where the two APIs differ. `installer/Build-DriveItPackage.ps1` holds the supported-years list: it publishes each year to `app\addin\<year>` and records the list in the package, where the installers, the MSI build and the tests read it. The operator window is `src/DriveIt.UI` (WPF, the family theme copied from Splash-It), hosted in Revit and by `src/DriveIt.Operator` (the Start Menu exe); its operator.js client and labels are in `src/DriveIt.Core`, tested by `dotnet test test/DriveIt.Core.Tests` on any OS.
 - `DriveIt.Operator.exe --self-test <report.json>` opens and closes the window in both themes against the installed operator.js; the installer and MSI tests run it.
-- CI builds the Windows alpha package and MSI, runs the script installer tests, and checks the MSI against the RST companion contract. `installer/inspect-msi.ps1` reads its tables: per-user scope, UpgradeCode, the two upgrade rows, the name `Drive-It`, the version, the Settings > Apps icon and links, the Revit 2026 launch condition, and the 450 MB limit. `test/msi.Tests.ps1` then installs it for real with the tray's command line against a stub Revit 2026: the launch condition without Revit, an upgrade from a lower-version build while Drive-It's Node.js and Python hold files open, the Settings > Apps entry, the add-in manifest, a blocked downgrade, and a silent uninstall, each exiting `0`. It also checks the Claude/Codex registrations and preserved user data. `installer/verify-signatures.ps1` checks that only signing release builds are signed.
+- CI builds the Windows alpha package and MSI, runs the script installer tests, and checks the MSI against the RST companion contract. `installer/inspect-msi.ps1` reads its tables: per-user scope, UpgradeCode, the two upgrade rows, the name `Drive-It`, the version, the Settings > Apps icon and links, the Revit 2026 and 2027 detection, the launch condition `Installed OR REVIT2026FOUND OR REVIT2027FOUND`, and the 450 MB limit. `test/msi.Tests.ps1` then installs it for real with the tray's command line against stub Revit folders: the launch condition with neither Revit; Revit 2026 alone and Revit 2027 alone, each installing both years' add-ins and uninstalling both; and with both, an upgrade from a lower-version build while Drive-It's Node.js and Python hold files open, the Settings > Apps entry, the add-in manifests, a blocked downgrade, and a silent uninstall, each exiting `0`. It also checks the Claude/Codex registrations and preserved user data. `test/operator-runtime.Tests.ps1` starts the Drive-It window on a .NET 10-only runtime, as on a computer with Revit 2027 and not 2026. `installer/verify-signatures.ps1` checks that only signing release builds are signed.
 - `test/clients.test.js` covers the Claude Desktop, Claude Code (file and CLI), Codex and ChatGPT desktop configuration merges, TOML validation, and their removal.
 - Element marks are computed in `src/DriveIt.Revit/Marks/`. For verification only, setting `DRIVE_IT_MARKS_DIAGNOSTICS` to an existing folder in Revit's environment makes each marked capture also write, under its capture id, the unmarked export (`.export.png`), a false-colour map of the element each pixel shows (`.idmap.png`), and a report (`.report.json`), so an image check can test every mark against the export. None of it reaches the tool result.
 - `test/revit-broker.integration.ps1` exercises the live broker against a running Revit process. Copy a project template to `C:\DriveIt\broker-fixtures\broker-project.rte`, a family template to `broker-family.rft`, and an annotation family template (such as `Metric Generic Annotation.rft`) to `broker-annotation.rft`, then run `powershell -ExecutionPolicy Bypass -File test/revit-broker.integration.ps1 -ProcessId <pid>`. It writes JSONL receipts to that workspace and uses only disposable model files.
