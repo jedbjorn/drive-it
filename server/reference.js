@@ -74,6 +74,12 @@ const revitPrimitives = {
     "Full response with a changes line and a selection_readback check comparing the request with Revit's selection",
     "Replaces the active document's UI selection. No transaction, no document change, no undo entry, no zoom or view change; document_not_active or element_not_found leave the selection unchanged",
     "revit.set_selection(elementIds=[123])"],
+  set_parameters: [withCurrentDocument({
+    changes: "Required: List of {elementId, parameter | builtIn | guid, value | valueString}. Name the parameter by its name, BuiltInParameter name, or shared-parameter GUID. value matches the storage type: a number in Revit internal units for Double, an integer or boolean for Integer, a string for String, an integer element id for ElementId. valueString is parsed in the document's display units, such as \"1200 mm\" or \"3' 6\\\"\"",
+  }),
+  "Full response with a changes line per entry naming the element, parameter and new display value, each element id in affectedElements, and a parameter_readback check per entry (doubles within 1e-9 internal units; valueString by display string)",
+  "Changes instance or type parameters in the model transaction, all or nothing, undoable in Revit as Drive It model batch. A type parameter is set on the type's id (get_parameters returns it as type.id); an instance id is never redirected to its type. The whole call is validated first and rejected with nothing applied on element_not_found, parameter_not_found, ambiguous_parameter (a name several parameters share; it lists their builtIn and guid), parameter_read_only, or value_type_mismatch",
+  "revit.set_parameters(changes=[{\"elementId\": 123, \"parameter\": \"Comments\", \"value\": \"Checked\"}])"],
 };
 
 const unitsOperations = {

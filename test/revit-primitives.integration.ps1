@@ -1,5 +1,5 @@
-# Live checks for the built-in read primitives (spec #9 Phase A, criteria 2-4) over the add-in's pipe.
-# A document the broker creates is never active in Revit's window, so the run has three phases:
+# Live checks for the built-in primitives (spec #9 Phase A criteria 2-4, Phase B criterion 5) over the add-in's pipe.
+# A document the broker creates is never active in Revit's window, so the run has phases:
 #   Prepare   - Revit open with no document: get_active_document fails with no_active_document; then
 #               build the fixture (5 walls on two levels, a named 3D view), save it, and close it.
 #   Active    - Revit restarted with the fixture as its active document: active-document targeting,
@@ -9,12 +9,16 @@
 #               to its own path).
 #   Selection - after a person (or windows-mcp) selects a wall in Revit's window: report what
 #               get_selection returns, with each element's Length, so it can be matched to the click.
+#   Parameters - the fixture active again (criterion 5, Phase B): set_parameters commits Comments and
+#               wall heights (value and valueString) with parameter_readback checks, sets a type
+#               parameter on the type id only, and every rejection (read-only, ambiguous, missing,
+#               type mismatch) leaves every value unchanged. The commit is left unsaved for undo.
 # Each phase prints one JSON summary and throws on the first failed assertion.
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Prepare", "Active", "Selection")]
+    [ValidateSet("Prepare", "Active", "Selection", "Parameters")]
     [string]$Phase,
     [Parameter(Mandatory = $true)]
     [string]$FixturePath,
@@ -202,6 +206,129 @@ if ($Phase -eq "Selection") {
         selection = @($selected)
         selectedFixtureWalls = @($ids | Where-Object { $expectedIds -contains $_ })
         lengths = $lengths
+    } | ConvertTo-Json -Depth 8
+    return
+}
+
+if ($Phase -eq "Parameters") {
+    # Criterion 5 (Phase B): set_parameters on the active fixture. The committed batch is left
+    # unsaved, so its "Drive It model batch" entry stays in Revit's undo list for inspection.
+    $active = Get-Active
+    Assert-True (Same-Path $active.document.path $FixturePath) "The fixture is not the active document: $($active.document.path)"
+    $documentId = $active.document.uniqueId
+    $wallA = [long]$expected.walls[0].id
+    $wallB = [long]$expected.walls[1].id
+
+    function Read-Values([long[]]$Ids) {
+        $read = Read-Primitive $documentId "get_parameters" @{ elementIds = $Ids; includeType = $false }
+        $values = @{}
+        foreach ($element in @($read)) {
+            $entry = @{}
+            foreach ($parameter in @($element.parameters)) {
+                if ($parameter.builtIn -in "ALL_MODEL_INSTANCE_COMMENTS", "WALL_USER_HEIGHT_PARAM", "CURVE_ELEM_LENGTH") {
+                    $entry[$parameter.builtIn] = [ordered]@{ value = $parameter.value; display = $parameter.display }
+                }
+            }
+            $values["$($element.id)"] = $entry  # string keys: ConvertTo-Json needs them
+        }
+        return $values
+    }
+
+    function Assert-Rejected([object[]]$Changes, [string]$Code, [string]$Label) {
+        $response = Invoke-Broker @(Op "set_parameters" @{ changes = $Changes }) (Target $documentId)
+        Assert-Failure $response $Code $Label
+        Assert-True (@($response.changes).Count -eq 0 -and @($response.affectedElements).Count -eq 0) "${Label}: reported effects."
+        Assert-True (@($response.checks | Where-Object { $_.name -in "parameter_readback", "transaction_commit" }).Count -eq 0) "${Label}: a transaction ran."
+        return $response
+    }
+
+    $original = Read-Values @($wallA, $wallB)
+    Assert-True ([Math]::Abs($original["$wallA"]["WALL_USER_HEIGHT_PARAM"].value - $expected.walls[0].height) -lt 1e-9) "Wall A does not start at the fixture height."
+
+    # Committed: Comments by name, height by builtIn with value, height by name with valueString.
+    $comment = "F8 set_parameters $([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $committed = Invoke-Broker @(Op "set_parameters" @{ changes = @(
+        @{ elementId = $wallA; parameter = "Comments"; value = $comment },
+        @{ elementId = $wallA; builtIn = "WALL_USER_HEIGHT_PARAM"; value = 12.0 },
+        @{ elementId = $wallB; parameter = "Unconnected Height"; valueString = "9' 6`"" }
+    ) }) (Target $documentId)
+    Assert-Status $committed "succeeded" "set_parameters commit"
+    $readbacks = @($committed.checks | Where-Object { $_.name -eq "parameter_readback" })
+    Assert-True ($readbacks.Count -eq 3 -and @($readbacks | Where-Object { -not $_.passed }).Count -eq 0) "parameter_readback: $($readbacks | ConvertTo-Json -Compress)"
+    Assert-True (@($committed.checks | Where-Object { $_.name -eq "transaction_commit" -and $_.passed }).Count -eq 1) "No committed transaction."
+    Assert-True (@($committed.changes).Count -eq 3) "Expected three changes lines: $($committed.changes -join '; ')"
+    Assert-True ((Compare-Object @($committed.affectedElements | ForEach-Object { [long]$_ }) @($wallA, $wallB)) -eq $null) "affectedElements: $($committed.affectedElements -join ',')"
+    Assert-True (@($committed.results).Count -eq 1 -and $null -eq $committed.results[0]) "set_parameters put an output in results."
+    Pass "set_parameters_commits_with_readback"
+
+    $after = Read-Values @($wallA, $wallB)
+    Assert-True ($after["$wallA"]["ALL_MODEL_INSTANCE_COMMENTS"].value -eq $comment) "Comments re-read as $($after["$wallA"]['ALL_MODEL_INSTANCE_COMMENTS'].value)."
+    Assert-True ([Math]::Abs($after["$wallA"]["WALL_USER_HEIGHT_PARAM"].value - 12.0) -le 1e-9) "Wall A height re-read as $($after["$wallA"]['WALL_USER_HEIGHT_PARAM'].value)."
+    Assert-True ([Math]::Abs($after["$wallB"]["WALL_USER_HEIGHT_PARAM"].value - 9.5) -le 1e-9) "Wall B height re-read as $($after["$wallB"]['WALL_USER_HEIGHT_PARAM'].value)."
+    Pass "re_read_shows_new_values"
+
+    # A type parameter is set on the type's id; the instance id is never redirected to its type.
+    $typed = Read-Primitive $documentId "get_parameters" @{ elementIds = @($wallA); names = @("Type Comments") }
+    $typeId = [long]$typed[0].type.id
+    Assert-Rejected @(@{ elementId = $wallA; parameter = "Type Comments"; value = "on the instance" }) "parameter_not_found" "type parameter on an instance id" | Out-Null
+    $typeComment = "F8 type $([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $typeSet = Invoke-Broker @(Op "set_parameters" @{ changes = @(@{ elementId = $typeId; parameter = "Type Comments"; value = $typeComment }) }) (Target $documentId)
+    Assert-Status $typeSet "succeeded" "set_parameters on the type id"
+    $typeRead = Read-Primitive $documentId "get_parameters" @{ elementIds = @($typeId); names = @("Type Comments"); includeType = $false }
+    Assert-True ($typeRead[0].parameters[0].value -eq $typeComment) "Type Comments re-read as $($typeRead[0].parameters[0].value)."
+    Pass "type_parameter_set_on_type_id_only"
+
+    # All or nothing: a writable change beside a read-only one applies neither.
+    $readOnly = Assert-Rejected @(
+        @{ elementId = $wallB; parameter = "Comments"; value = "must not apply" },
+        @{ elementId = $wallA; builtIn = "CURVE_ELEM_LENGTH"; value = 99.0 }
+    ) "parameter_read_only" "read-only parameter in the batch"
+    $unchanged = Read-Values @($wallA, $wallB)
+    foreach ($id in $wallA, $wallB) {
+        foreach ($name in "ALL_MODEL_INSTANCE_COMMENTS", "WALL_USER_HEIGHT_PARAM", "CURVE_ELEM_LENGTH") {
+            Assert-True ("$($unchanged["$id"][$name].value)" -eq "$($after["$id"][$name].value)") "$name on $id changed after a rejected batch."
+        }
+    }
+    Pass "read_only_rejects_whole_batch_unchanged"
+
+    # ambiguous_parameter needs one element with two parameters of the same name. Find one among
+    # the fixture's walls, their type, levels, views and project information.
+    $candidates = [System.Collections.Generic.List[long]]::new()
+    $candidates.AddRange([long[]]@($wallA, $typeId, $expected.lowerLevelId, $expected.upperLevelId))
+    foreach ($view in @(Read-Primitive $documentId "list_views" @{ includeTemplates = $true })) { $candidates.Add([long]$view.id) }
+    foreach ($info in @((Read-Primitive $documentId "find_elements" @{ category = "OST_ProjectInformation" }).elements)) { $candidates.Add([long]$info.id) }
+    $duplicate = $null
+    foreach ($element in @(Read-Primitive $documentId "get_parameters" @{ elementIds = @($candidates | Select-Object -Unique); includeType = $false })) {
+        $group = @($element.parameters | Group-Object name | Where-Object { $_.Count -gt 1 }) | Select-Object -First 1
+        if ($group) { $duplicate = [ordered]@{ id = [long]$element.id; name = $group.Name; builtIns = @($group.Group | ForEach-Object { $_.builtIn }) }; break }
+    }
+    Assert-True ($null -ne $duplicate) "No element among $($candidates.Count) candidates has two parameters with one name, so ambiguous_parameter could not be exercised."
+    $ambiguous = Assert-Rejected @(@{ elementId = $duplicate.id; parameter = $duplicate.name; value = "x" }) "ambiguous_parameter" "duplicate parameter name"
+    Assert-True ($ambiguous.error.message -match "builtIn" -and $ambiguous.error.message -match "guid") "ambiguous_parameter does not list builtIn and guid: $($ambiguous.error.message)"
+    Pass "ambiguous_parameter_lists_candidates"
+
+    Assert-Rejected @(@{ elementId = 999999901; parameter = "Comments"; value = "x" }, @{ elementId = $wallA; parameter = "Comments"; value = "x" }) "element_not_found" "missing element" | Out-Null
+    Assert-Rejected @(@{ elementId = $wallA; parameter = "No Such Parameter F8"; value = "x" }) "parameter_not_found" "missing parameter" | Out-Null
+    Assert-Rejected @(@{ elementId = $wallA; builtIn = "NOT_A_BUILTIN_F8"; value = "x" }) "parameter_not_found" "unknown builtIn" | Out-Null
+    Assert-Rejected @(@{ elementId = $wallA; parameter = "Comments"; value = 5 }) "value_type_mismatch" "number for a String" | Out-Null
+    Assert-Rejected @(@{ elementId = $wallA; builtIn = "WALL_USER_HEIGHT_PARAM"; value = "tall" }) "value_type_mismatch" "string for a Double" | Out-Null
+    Assert-Rejected @(@{ elementId = $wallA; parameter = "Comments"; valueString = "1200 mm" }) "value_type_mismatch" "valueString for a String" | Out-Null
+    Assert-Rejected @(@{ elementId = $wallA; builtIn = "WALL_USER_HEIGHT_PARAM"; valueString = "not a length" }) "value_type_mismatch" "unparsable valueString" | Out-Null
+    Assert-Rejected @(@{ elementId = $wallA; parameter = "Comments"; builtIn = "ALL_MODEL_INSTANCE_COMMENTS"; value = "x" }) "invalid_arguments" "two identifiers" | Out-Null
+    $final = Read-Values @($wallA, $wallB)
+    Assert-True ($final["$wallA"]["ALL_MODEL_INSTANCE_COMMENTS"].value -eq $comment -and [Math]::Abs($final["$wallA"]["WALL_USER_HEIGHT_PARAM"].value - 12.0) -le 1e-9) "A rejected call changed wall A."
+    Pass "validation_failures_change_nothing"
+
+    [ordered]@{
+        status = "succeeded"; phase = $Phase; processId = $ProcessId; receiptLog = $receiptLog
+        isModified = (Get-Active).document.isModified
+        committedChanges = @($committed.changes)
+        readbacks = $readbacks
+        before = $original; after = $after
+        typeComment = [ordered]@{ typeId = $typeId; value = $typeComment }
+        readOnlyError = $readOnly.error
+        ambiguous = [ordered]@{ element = $duplicate; error = $ambiguous.error }
+        checks = @($checks)
     } | ConvertTo-Json -Depth 8
     return
 }

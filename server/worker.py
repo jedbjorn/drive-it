@@ -364,7 +364,7 @@ class Revit:
         "save_as_document", "close_document", "delete_document", "create_level",
         "create_wall", "create_3d_view", "create_family_type", "delete_element",
         "get_active_document", "find_elements", "get_parameters", "list_types",
-        "list_views", "get_selection", "set_selection",
+        "list_views", "get_selection", "set_selection", "set_parameters",
     }
     # Read primitives return their output (the broker's results entry) instead of the full response.
     READ_PRIMITIVES = {"find_elements", "get_parameters", "list_types", "list_views", "get_selection"}
@@ -435,6 +435,9 @@ class Revit:
 
     def set_selection(self, elementIds, document=None):
         return self._primitive("set_selection", document, {"elementIds": elementIds})
+
+    def set_parameters(self, changes, document=None):
+        return self._primitive("set_parameters", document, {"changes": changes})
 
     def __getattr__(self, name):
         if name not in self.OPERATIONS:

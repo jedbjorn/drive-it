@@ -205,7 +205,6 @@ public sealed partial class DocumentDispatcher
 
     private static JsonObject ParameterEntry(Parameter parameter)
     {
-        var builtIn = (parameter.Definition as InternalDefinition)?.BuiltInParameter ?? BuiltInParameter.INVALID;
         JsonNode? value = parameter.StorageType switch
         {
             StorageType.Double => double.IsFinite(parameter.AsDouble()) ? parameter.AsDouble() : null,
@@ -217,7 +216,7 @@ public sealed partial class DocumentDispatcher
         return new JsonObject
         {
             ["name"] = parameter.Definition.Name,
-            ["builtIn"] = builtIn == BuiltInParameter.INVALID ? null : builtIn.ToString(),
+            ["builtIn"] = BuiltInName(parameter),
             ["guid"] = parameter.IsShared ? parameter.GUID.ToString() : null,
             ["storageType"] = parameter.StorageType.ToString(),
             ["value"] = value,
