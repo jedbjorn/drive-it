@@ -82,22 +82,31 @@ public sealed class RunRecord
     /// <summary>How long the run held Revit (the receipt's <c>held.ms</c>); null for a run that never used the bridge.</summary>
     public TimeSpan? Held { get; init; }
 
+    /// <summary>The titles of the receipt's <c>targets</c> in order (spec #28); empty for a run that named none.</summary>
+    public IReadOnlyList<string> Targets { get; init; } = [];
+
     /// <summary>The receipt as operator.js printed it, every field included.</summary>
     public required JsonElement Receipt { get; init; }
 
     /// <summary>The zone <see cref="Label"/> shows <see cref="StartedAt"/> in; the machine's by default.</summary>
     public TimeZoneInfo TimeZone { get; init; } = TimeZoneInfo.Local;
 
-    /// <summary>The list row: "displayName · status · local time".</summary>
+    /// <summary>The list row: "displayName · Tower.rvt · status · local time", with "Tower.rvt +2" for three targets.</summary>
     public string Label => OperatorText.HistoryLabel(this);
 
     /// <summary>The row's first line: the display name, or the run ID for older receipts.</summary>
     public string Title => DisplayName ?? RunId ?? "(unnamed run)";
 
-    /// <summary>The row's second line in words: "Dry run · Succeeded · held Revit 12 s · local time" (the first part only for a dry run, the third only for a held run).</summary>
+    /// <summary>
+    /// The row's second line in words, its tooltip: "Dry run · Tower.rvt, Annex.rvt · Succeeded · held Revit 12 s · local time"
+    /// (the dry-run label only for a dry run, every target title only for a run that named targets, the held time only for a held run).
+    /// </summary>
     public string Meta => OperatorText.HistoryMeta(this);
 
-    /// <summary><see cref="Meta"/> without the dry-run label, which the row shows as a badge: "Succeeded · held Revit 12 s · local time".</summary>
+    /// <summary>
+    /// The row's second line as shown: <see cref="Meta"/> without the dry-run label, which the row shows as a badge, and
+    /// with the first target title and a count of the rest: "Tower.rvt +1 · Succeeded · held Revit 12 s · local time".
+    /// </summary>
     public string Detail => OperatorText.HistoryDetail(this);
 
     /// <summary>The details pane: the receipt as indented JSON.</summary>
@@ -119,9 +128,21 @@ public sealed class RunRecord
             StartedAt = started,
             DryRun = row.ValueKind == JsonValueKind.Object && row.TryGetProperty("dryRun", out var dry) && dry.ValueKind == JsonValueKind.True,
             Held = ReadHeld(row),
+            Targets = ReadTargets(row),
             Receipt = row.Clone(),
             TimeZone = timeZone ?? TimeZoneInfo.Local,
         };
+    }
+
+    /// <summary>The titles in the receipt's <c>targets: [{uniqueId, title, path, kind}]</c>; empty when absent or malformed.</summary>
+    private static IReadOnlyList<string> ReadTargets(JsonElement row)
+    {
+        if (row.ValueKind != JsonValueKind.Object || !row.TryGetProperty("targets", out var targets) || targets.ValueKind != JsonValueKind.Array)
+            return [];
+        return targets.EnumerateArray()
+            .Select(target => target.ValueKind == JsonValueKind.Object ? OperatorText.CleanName(Json.String(target, "title")) : null)
+            .OfType<string>()
+            .ToList();
     }
 
     /// <summary>The receipt's <c>held: {ms, calls}</c> (spec #15 "What Comes Back"); null when absent, null or malformed.</summary>
@@ -159,20 +180,33 @@ public static class OperatorText
 
     public static string HistoryLabel(RunRecord run)
     {
-        var meta = HistoryMeta(run);
+        var meta = Meta(run, HistoryTargets(run));
         return meta.Length == 0 ? run.Title : run.Title + HistorySeparator + meta;
     }
 
-    public static string HistoryMeta(RunRecord run)
+    public static string HistoryMeta(RunRecord run) => Meta(run, string.Join(", ", run.Targets));
+
+    public static string HistoryDetail(RunRecord run) => Detail(run, HistoryTargets(run));
+
+    /// <summary>Spec #28 "The Drive-It Window": the first target title, and "+N" for the rest; empty for a run that named none.</summary>
+    public static string HistoryTargets(RunRecord run) => run.Targets.Count switch
     {
-        var detail = HistoryDetail(run);
+        0 => "",
+        1 => run.Targets[0],
+        _ => $"{run.Targets[0]} +{run.Targets.Count - 1}",
+    };
+
+    private static string Meta(RunRecord run, string targets)
+    {
+        var detail = Detail(run, targets);
         if (!run.DryRun) return detail;
         return detail.Length == 0 ? HoldText.DryRunLabel : HoldText.DryRunLabel + HistorySeparator + detail;
     }
 
-    public static string HistoryDetail(RunRecord run)
+    private static string Detail(RunRecord run, string targets)
     {
         var parts = new List<string>();
+        if (targets.Length > 0) parts.Add(targets);
         if (!string.IsNullOrWhiteSpace(run.Status)) parts.Add(HistoryStatus(run));
         if (run.Held is { } held) parts.Add("held Revit " + HoldText.Duration(held));
         if (run.StartedAt is { } started)

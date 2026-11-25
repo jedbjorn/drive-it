@@ -160,6 +160,45 @@ public class OperatorClientTests
         Assert.Equal("Succeeded · 2026-11-23 10:05", run.Meta);
     }
 
+    // Spec #28 "The Drive-It Window": the targets follow the name; several show the first and a count, the tooltip all.
+    [Theory]
+    [InlineData("[]", "Add level 3 · Succeeded · 2026-11-25 14:03", "Succeeded · 2026-11-25 14:03", "Succeeded · 2026-11-25 14:03")]
+    [InlineData("""[{ "uniqueId": "a1", "title": "Tower.rvt", "path": "C:\\w\\Tower.rvt", "kind": "rvt" }]""",
+        "Add level 3 · Tower.rvt · Succeeded · 2026-11-25 14:03", "Tower.rvt · Succeeded · 2026-11-25 14:03", "Tower.rvt · Succeeded · 2026-11-25 14:03")]
+    [InlineData("""[{ "uniqueId": "a1", "title": "Tower.rvt", "path": null, "kind": "rvt" }, { "uniqueId": "b2", "title": "Annex.rvt", "path": null, "kind": "rvt" }, { "uniqueId": "c3", "title": "Site.rvt", "path": null, "kind": "rvt" }]""",
+        "Add level 3 · Tower.rvt +2 · Succeeded · 2026-11-25 14:03", "Tower.rvt +2 · Succeeded · 2026-11-25 14:03", "Tower.rvt, Annex.rvt, Site.rvt · Succeeded · 2026-11-25 14:03")]
+    public void HistoryRow_ShowsTheTargetTitlesAfterTheName(string targets, string label, string detail, string tooltip)
+    {
+        var zone = TimeZoneInfo.CreateCustomTimeZone("Test+0", TimeSpan.Zero, "Test+0", "Test+0");
+        using var json = JsonDocument.Parse($$"""
+            { "runId": "r", "status": "succeeded", "startedAt": "2026-11-25T14:03:00.000Z", "displayName": "Add level 3", "targets": {{targets}} }
+            """);
+        var run = RunRecord.FromJson(json.RootElement, zone);
+
+        Assert.Equal(label, run.Label);
+        Assert.Equal("Add level 3", run.Title);
+        Assert.Equal(detail, run.Detail);
+        Assert.Equal(tooltip, run.Meta);
+    }
+
+    [Fact]
+    public void HistoryRow_WithoutTargets_ReadsAsBefore_AndADryRunKeepsItsLabelFirst()
+    {
+        var zone = TimeZoneInfo.CreateCustomTimeZone("Test+0", TimeSpan.Zero, "Test+0", "Test+0");
+        using var old = JsonDocument.Parse("""{ "runId": "r", "status": "succeeded", "startedAt": "2026-11-25T14:03:00.000Z", "displayName": "Old run" }""");
+        Assert.Empty(RunRecord.FromJson(old.RootElement, zone).Targets);
+        Assert.Equal("Old run · Succeeded · 2026-11-25 14:03", RunRecord.FromJson(old.RootElement, zone).Label);
+
+        using var dry = JsonDocument.Parse("""
+            { "runId": "d", "status": "succeeded", "dryRun": true, "startedAt": "2026-11-25T14:03:00.000Z", "displayName": "Try it",
+              "targets": [{ "uniqueId": "a1", "title": "Tower.rvt" }, { "uniqueId": "b2", "title": "Annex.rvt" }] }
+            """);
+        var run = RunRecord.FromJson(dry.RootElement, zone);
+        Assert.Equal("Try it · Dry run · Tower.rvt +1 · Succeeded · 2026-11-25 14:03", run.Label);
+        Assert.Equal("Tower.rvt +1 · Succeeded · 2026-11-25 14:03", run.Detail);
+        Assert.Equal("Dry run · Tower.rvt, Annex.rvt · Succeeded · 2026-11-25 14:03", run.Meta);
+    }
+
     [Fact]
     public void HistoryMeta_LabelsAHeldRun_WithHowLongItHeldRevit()
     {
