@@ -267,7 +267,7 @@ public class OperatorClientTests
     public void HistoryLabel_FallsBackToTheRunId()
     {
         using var json = JsonDocument.Parse("""{ "runId": "7f3c", "status": "denied", "displayName": " " }""");
-        Assert.Equal("7f3c · denied", RunRecord.FromJson(json.RootElement).Label);
+        Assert.Equal("7f3c · Denied", RunRecord.FromJson(json.RootElement).Label);
     }
 
     [Fact]
