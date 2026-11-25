@@ -78,8 +78,10 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
   if (process.platform === "win32") {
     const info = { processId, version: "2026", build: "test" };
     const bridge = createServer(socket => {
-      // Spec #28: get_revit_session now also writes a documents.list to this stand-in, which has already closed.
+      // Spec #28: get_revit_session now also writes a documents.list to this stand-in. It is read and dropped: a socket
+      // holding unread data never emits 'end', so it would never close and the bridge.close below would never return.
       socket.on("error", () => {});
+      socket.resume();
       socket.end(`${JSON.stringify(info)}\n`);
     });
     bridge.listen(String.raw`\\.\pipe\drive-it-${processId}`);
@@ -201,6 +203,7 @@ test("the session tool finds the only Revit and tells the agent where to work", 
     sessionReader: async processId => ({ processId, version: "2026", build: "b", connectionIdentity: `pipe-${processId}` }),
     contentReader: async () => content,
     modeResolver: async () => "standard",
+    documentsReader: async () => [],
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -223,6 +226,7 @@ test("the session tool finds the only Revit and tells the agent where to work", 
     sessionReader: async processId => ({ processId, version: "2026", build: "b", connectionIdentity: `pipe-${processId}` }),
     contentReader: async () => content,
     modeResolver: async () => "dev",
+    documentsReader: async () => [],
   });
   const [freshClientTransport, freshServerTransport] = InMemoryTransport.createLinkedPair();
   await freshServer.connect(freshServerTransport);
