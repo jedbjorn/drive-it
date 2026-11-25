@@ -36,6 +36,12 @@ internal interface IHeldDocuments
 
     /// <summary>The run's id, which its built-in batches carry too.</summary>
     string RunId { get; }
+
+    /// <summary>
+    /// Spec #28: refuses a lasting operation (a direct save, save-as, close, or a family loaded into a document) on a
+    /// document the run did not name and did not make its own, with document_not_targeted.
+    /// </summary>
+    void RequireTargeted(Document document, string operation);
 }
 
 public sealed class HoldSummary
@@ -111,12 +117,15 @@ internal sealed class HeldRun : IHeldDocuments
     private bool recordingChanges = true;
     private JsonObject? dryRunEvidence;
     private UIApplication? application;
+    private DocumentDispatcher? dispatcher;
 
-    public HeldRun(string runId, string? displayName, int? timeLimitMs, bool dryRun = false, RequireDryRunGuard? requireDryRun = null)
+    public HeldRun(string runId, string? displayName, int? timeLimitMs, bool dryRun = false, RequireDryRunGuard? requireDryRun = null,
+        IReadOnlyList<string>? targets = null)
     {
         RunId = runId;
         DryRun = dryRun;
         RequireDryRun = requireDryRun;
+        Targets = targets ?? Array.Empty<string>();
         calls = new BridgeCalls(this, AnyTransactionOpen);
         DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName.Trim();
         requestedLimit = timeLimitMs is > 0 ? TimeSpan.FromMilliseconds(timeLimitMs.Value) : TimeSpan.MaxValue;
@@ -126,6 +135,8 @@ internal sealed class HeldRun : IHeldDocuments
     public string? DisplayName { get; }
     public bool DryRun { get; }
     public RequireDryRunGuard? RequireDryRun { get; }
+    /// <summary>The run's targets as uniqueIds (spec #28); empty when the call named none.</summary>
+    public IReadOnlyList<string> Targets { get; }
     public DateTimeOffset StartedAt { get; private set; }
     public DateTimeOffset Deadline { get; private set; }
     public int Calls { get; private set; }
@@ -209,6 +220,7 @@ internal sealed class HeldRun : IHeldDocuments
 
         StartedAt = DateTimeOffset.Now;
         this.application = application;
+        this.dispatcher = dispatcher;
         var limit = HoldSignal.CurrentTimeLimit();
         Deadline = StartedAt + (requestedLimit < limit ? requestedLimit : limit);
         dispatcher.Held = this;
@@ -535,8 +547,10 @@ internal sealed class HeldRun : IHeldDocuments
         if (groups.Any(entry => entry.Group is not null && SameDocument(entry.Document, document)))
             return;
         // The one place a run first opens a transaction on a document: built-ins, revit.transaction and a Dev Mode
-        // script's own transactions all pass here, so under Require dry run an unrehearsed run changes nothing and a
-        // rehearsed one changes only what its dry run changed (spec #13 D12).
+        // script's own transactions all pass here. A run changes only its targets and its own documents (spec #28),
+        // checked first; then under Require dry run an unrehearsed run changes nothing and a rehearsed one changes only
+        // what its dry run changed (spec #13 D12).
+        RequireTargeted(document, DocumentDispatcher.ChangeOperation);
         if (RequireDryRun is { } guard)
             RequireDryRunRules.RequireRehearsed(guard, RunId, document);
         var entry = groups.FirstOrDefault(candidate => SameDocument(candidate.Document, document));
@@ -552,6 +566,13 @@ internal sealed class HeldRun : IHeldDocuments
             throw new RequestRejectedException("transaction_failed", $"Revit did not start the run's transaction group on {document.Title}.");
         }
         entry.Group = group;
+    }
+
+    public void RequireTargeted(Document document, string operation)
+    {
+        if (dispatcher is null || application is null)
+            throw new RequestRejectedException(DocumentDispatcher.NotTargeted, "Revit is not held for this run, so it cannot change a document.");
+        dispatcher.RequireTargeted(application, Targets, RunId, document, operation);
     }
 
     public bool CommitPoint(Document document)

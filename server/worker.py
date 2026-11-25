@@ -829,9 +829,11 @@ class Revit:
         "find_elements", "get_parameters", "list_types", "list_views", "get_selection", "get_family_parameters",
     }
 
-    def __init__(self, process_id, document, policy_pending, policy_denied):
+    def __init__(self, process_id, document, policy_pending, policy_denied, targets=()):
         self.process_id = process_id
         self._current = document
+        # Spec #28: the call's targets in order, each {uniqueId, title, path, kind}; the first is the current document.
+        self.targets = [dict(target) for target in targets]
         self._policy_pending = policy_pending
         self._policy_denied = policy_denied
 
@@ -1031,7 +1033,7 @@ def main():
             "__name__": "__main__",
             "args": run.get("arguments") or {},
             "files": Files(policy),
-            "revit": Revit(run["processId"], run.get("document"), policy_pending, policy_denied),
+            "revit": Revit(run["processId"], run.get("document"), policy_pending, policy_denied, run.get("targets") or ()),
             "checks": Checks(),
             "units": Units(),
             "DB": _Path("Autodesk.Revit.DB"),

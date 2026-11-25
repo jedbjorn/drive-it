@@ -81,8 +81,11 @@ function Send-Request($Connection, [hashtable]$Request) {
     return (Read-Line $Connection.Reader) | ConvertFrom-Json
 }
 
+# Spec #28: a write names the documents it changes; each request here works on the document it carries, or on one it
+# creates itself, which needs no target.
 function Model-Request([hashtable]$Document, [object[]]$Operations) {
-    return @{ type = "model.execute"; workspaceRoot = $WorkspaceRoot; document = $Document; operations = $Operations }
+    $targets = if ($null -ne $Document -and $Document.uniqueId) { @($Document.uniqueId) } else { @() }
+    return @{ type = "model.execute"; workspaceRoot = $WorkspaceRoot; document = $Document; operations = $Operations; targets = @($targets) }
 }
 
 # One model.execute on its own connection, outside any hold.
@@ -111,7 +114,8 @@ function Invoke-Bridge([hashtable]$Call) {
 
 function Begin-Hold([string]$Name) {
     $script:hold = Open-Connection
-    $begun = Send-Request $script:hold @{ id = "mode-$Name-$runId"; type = "hold.begin"; hold = @{ displayName = "Mode integration: $Name"; timeLimitMs = 120000 } }
+    # Every hold here works on the disposable model, its one target (spec #28).
+    $begun = Send-Request $script:hold @{ id = "mode-$Name-$runId"; type = "hold.begin"; hold = @{ displayName = "Mode integration: $Name"; timeLimitMs = 120000; targets = @($documentId) } }
     Assert-Status $begun "held" "hold.begin $Name"
 }
 

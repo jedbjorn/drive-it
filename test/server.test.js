@@ -88,6 +88,8 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
       workspaceRoot: null,
       mode: "standard",
       requireDryRun: false,
+      // Spec #28: this stand-in closes after the session line, so the document read finds no list.
+      openDocuments: null,
     };
     const result = await call();
     assert.ok(!result.isError, result.content[0].text);

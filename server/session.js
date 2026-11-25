@@ -126,6 +126,43 @@ export async function readSession(processId, { timeoutMs = 4000, connectWaitMs =
   }
 }
 
+// Spec #28 "Open Documents": how long get_revit_session lets the add-in wait for Revit's thread before it answers
+// without the list. The server's own timer adds a margin, and a busy pipe is retried about a second, so the whole read
+// stays under the spec's 5 seconds.
+export const OPEN_DOCUMENTS_WAIT_MS = 2500;
+
+/**
+ * Spec #28: the open documents, read on Revit's thread, and the run's targets resolved by the add-in. The add-in waits
+ * at most waitMs for its thread (or until deadline, for a run) and then answers { status: "busy" }, so a dialog open in
+ * Revit never holds the pipe. targets are uniqueIds; document is execute_script's {path, uniqueId}.
+ */
+export async function readDocuments(processId, { targets, document, waitMs = OPEN_DOCUMENTS_WAIT_MS, deadline, connectWaitMs = 0, connector } = {}) {
+  const connection = await connect(processId, (deadline ? Math.max(1, deadline - Date.now()) : waitMs) + 1000, { connectWaitMs, connector });
+  try {
+    validateSession(await connection.readJson(4096), processId);
+    // A run waits within its own time, counted from now: the pipe may have been busy with another client.
+    const wait = deadline ? Math.max(1, Math.floor(deadline - Date.now())) : waitMs;
+    await connection.writeJson({
+      id: `documents-${process.pid}-${Date.now()}`,
+      type: "documents.list",
+      documents: { waitMs: wait, ...(targets ? { targets } : {}), ...(document ? { document } : {}) },
+    });
+    return await connection.readJson(1024 * 1024);
+  } finally {
+    connection.close();
+  }
+}
+
+/** get_revit_session's openDocuments: the list, or null when Revit is busy or the read fails for any reason. */
+export async function readOpenDocuments(processId, options = {}) {
+  try {
+    const response = await readDocuments(processId, options);
+    return response.status === "succeeded" && Array.isArray(response.openDocuments) ? response.openDocuments : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function executeBroker(processId, envelope, { timeoutMs = 30000, connectWaitMs = 0, signal, connector, onSession } = {}) {
   const connection = await connect(processId, timeoutMs, { connectWaitMs, signal, connector });
   try {
@@ -237,7 +274,7 @@ export async function readHoldResult(processId, runId, { timeoutMs = 4000, conne
 
 // A run's hold: one pipe connection kept from the run's first bridge call to its end. While it is open the
 // add-in serves nothing else, so other clients wait (EBUSY) as they wait behind any Revit work.
-export async function openHold(processId, { runId, displayName, timeLimitMs, dryRun = false, requireDryRun = null, waitMs = timeLimitMs, resultReader = readHoldResult } = {}) {
+export async function openHold(processId, { runId, displayName, timeLimitMs, dryRun = false, requireDryRun = null, targets = [], waitMs = timeLimitMs, resultReader = readHoldResult } = {}) {
   if (process.platform !== "win32") {
     throw new Error("Run the MCP server on the Windows machine hosting Revit.");
   }
@@ -254,7 +291,9 @@ export async function openHold(processId, { runId, displayName, timeLimitMs, dry
     // sends the flag: an add-in from before dry runs refuses a hold with a member it does not know, so a real run's
     // hold.begin stays as it was and only a dry run fails closed against an old add-in.
     // Likewise Require dry run (spec #13), sent only while it is on: { rehearsed } for the add-in's refusals.
-    const hold = { displayName: displayName ?? null, timeLimitMs, ...(dryRun ? { dryRun: true } : {}), ...(requireDryRun ? { requireDryRun } : {}) };
+    // Spec #28: the run's targets, always sent (empty when the call named none): the add-in refuses a change to any
+    // other open document that is not the run's own.
+    const hold = { displayName: displayName ?? null, timeLimitMs, ...(dryRun ? { dryRun: true } : {}), ...(requireDryRun ? { requireDryRun } : {}), targets };
     pipe.write(`${JSON.stringify({ id: runId, type: "hold.begin", hold })}\n`);
     const reply = await lines.next();
     if (reply === null) throw holdError("HOLD_LOST", "Revit closed the connection before the hold began.");

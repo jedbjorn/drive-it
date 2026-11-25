@@ -7,7 +7,7 @@ import { HistoryStore } from "./history.js";
 import { DEV, installMode } from "./mode.js";
 import { ScriptCatalog, validateArguments } from "./library.js";
 import { revitContentFolders } from "./content.js";
-import { executeBroker, openHold, readSession } from "./session.js";
+import { executeBroker, openHold, readDocuments, readSession } from "./session.js";
 import { SettingsStore } from "./settings.js";
 import { defaultDataDir } from "./store.js";
 import { runWorker } from "./worker.js";
@@ -90,6 +90,28 @@ export const REQUIRE_DRY_RUN_MESSAGES = Object.freeze({
   fileWrite: what => `Require dry run is on and this run was not rehearsed, so ${what} is refused: nothing was written. Dry-run the same call first (execute_script with dryRun: true), compare the result with the request, then run the same call again without dryRun.`,
 });
 
+// Spec #28 "The Call": targets names 1 to 50 open documents by uniqueId.
+export const MAX_TARGETS = 50;
+
+function invalidArguments(message) {
+  const error = new Error(message);
+  error.code = "invalid_arguments";
+  return error;
+}
+
+/** execute_script's targets, checked before anything runs: null when the call names none. */
+export function targetIds(input) {
+  if (input.targets === undefined || input.targets === null) return null;
+  if (input.document !== undefined && input.document !== null) throw invalidArguments("Give targets or document, not both: document is the one-target form of targets.");
+  const ids = input.targets;
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > MAX_TARGETS || ids.some(id => typeof id !== "string" || id.length === 0)) {
+    throw invalidArguments(`targets takes 1 to ${MAX_TARGETS} uniqueIds from get_revit_session's openDocuments.`);
+  }
+  const duplicate = ids.find((id, index) => ids.indexOf(id) !== index);
+  if (duplicate !== undefined) throw invalidArguments(`targets names ${duplicate} twice; name each document once.`);
+  return ids;
+}
+
 function documentWithKind(document) {
   if (!document) return null;
   const extension = document.path ? path.extname(document.path).toLowerCase() : "";
@@ -134,7 +156,7 @@ function transactionLine(transaction) {
 }
 
 export class Runtime {
-  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, holdOpener = openHold, sessionReader = readSession, workerRunner = runWorker, scriptResolver, scripts, contentFolders = revitContentFolders, modeResolver = installMode, references = null } = {}) {
+  constructor({ dataDir = defaultDataDir(), pythonPath, brokerExecutor = executeBroker, holdOpener = openHold, sessionReader = readSession, documentReader = readDocuments, workerRunner = runWorker, scriptResolver, scripts, contentFolders = revitContentFolders, modeResolver = installMode, references = null } = {}) {
     this.workspace = new WorkspaceStore(dataDir);
     this.decisions = new DecisionStore(dataDir);
     this.history = new HistoryStore(dataDir);
@@ -145,6 +167,7 @@ export class Runtime {
     this.brokerExecutor = brokerExecutor;
     this.holdOpener = holdOpener;
     this.sessionReader = sessionReader;
+    this.documentReader = documentReader;
     this.workerRunner = workerRunner;
     this.contentFolders = contentFolders;
     // Spec #13 D12: one file per dry run a real run has taken, created exclusively, so one dry run allows one real run.
@@ -175,6 +198,7 @@ export class Runtime {
 
     const idempotencyKey = input.idempotencyKey || randomUUID();
     const dryRun = dryRunOptions(input.dryRun);
+    const targets = targetIds(input);
     // Saved references fingerprint the request as made, so a completed run replays even
     // after its revision is retired or "latest" moves on. A dry run adds its options, so its key never
     // answers a real run, or the reverse; a real run's fingerprint is the call alone (callOf).
@@ -184,6 +208,8 @@ export class Runtime {
       arguments: input.arguments || {},
       processId: input.processId,
       document: input.document || null,
+      // Spec #28: only when given, so a call without targets keeps the fingerprint it had before (stored keys replay).
+      ...(targets ? { targets } : {}),
     };
     const fingerprint = JSON.stringify(dryRun ? { ...call, dryRun } : call);
     const previous = await this.history.findIdempotent(idempotencyKey);
@@ -231,6 +257,8 @@ export class Runtime {
       status: "failed",
       session: null,
       document: documentWithKind(input.document),
+      // Spec #28: the documents this run may change, as revit.targets gives them; [] when the call named none.
+      targets: [],
       workspaceRoot: null,
       arguments: args,
       changes: [],
@@ -269,6 +297,7 @@ export class Runtime {
       workerStatus: null,
       dryRun,
       skippedFileWrites: [],
+      targets: [],
     };
     let temporary;
 
@@ -276,6 +305,10 @@ export class Runtime {
       receipt.workspaceRoot = workspaceRoot || await this.workspace.getRoot();
       // While another run holds Revit the pipe is busy; this run waits for it, within its own time.
       receipt.session = await this.sessionReader(input.processId, { connectWaitMs: Math.max(0, context.deadline - Date.now()) });
+      // Spec #28 "The Call": every target is resolved with the add-in before a line of the script runs, and before a
+      // rehearsal is taken, so a run that cannot start does not use up its dry run.
+      context.targets = receipt.targets = await this.resolveTargets(targets, input.document, context);
+      if (receipt.targets.length && !input.document) receipt.document = documentWithKind(receipt.targets[0]);
       // Spec #13 "Require Dry Run": read as the run starts. A real run under it is rehearsed when it takes an unused
       // dry run of the same call; the worker and the add-in are told, and refuse what an unrehearsed run may not do.
       // A rehearsed run may change only the documents its dry run changed, and those it creates itself (D8, D12): the
@@ -291,7 +324,9 @@ export class Runtime {
         source,
         args,
         processId: input.processId,
-        document: input.document || null,
+        // The first target is the script's current document.
+        document: input.document || (context.targets[0] ? { path: context.targets[0].path, uniqueId: context.targets[0].uniqueId } : null),
+        targets: context.targets,
         runId,
         mode: receipt.mode,
         dryRun: Boolean(dryRun),
@@ -339,6 +374,41 @@ export class Runtime {
     if (receipt.status !== "pending") receipt.completedAt = new Date().toISOString();
     await this.history.save(receipt);
     return receipt;
+  }
+
+  /**
+   * Spec #28 "The Call": the call's targets (or its document, the one-target form) as the add-in resolves them, each
+   * {uniqueId, title, path, kind}; [] when the call names none, or its document is a path no open document has. A
+   * target that is not open, or matches two documents, fails the run before the script starts.
+   */
+  async resolveTargets(ids, document, context) {
+    const named = ids ?? (document?.uniqueId || document?.path ? null : []);
+    if (named?.length === 0) return [];
+    const request = ids ? { targets: ids } : {
+      document: { path: document.path ? await canonicalPath(document.path) : null, uniqueId: document.uniqueId || null },
+    };
+    let response;
+    try {
+      response = await this.documentReader(context.processId, {
+        ...request,
+        deadline: context.deadline,
+        connectWaitMs: Math.max(0, context.deadline - Date.now()),
+      });
+    } catch (error) {
+      if (Date.now() < context.deadline) throw error;
+      response = { status: "busy" };
+    }
+    if (response.status === "busy") {
+      const error = new Error(`Revit did not answer within the run's time limit, so its targets could not be checked and no line of the script ran. A dialog open in Revit is the usual cause: ask the user to close it, then run the call again.`);
+      error.code = "RUN_TIMEOUT";
+      throw error;
+    }
+    if (response.status !== "succeeded") {
+      const error = new Error(response.error?.message || "Revit did not resolve this run's targets.");
+      error.code = response.error?.code || "stale_document_identity";
+      throw error;
+    }
+    return (response.targets ?? []).map(target => ({ uniqueId: target.uniqueId, title: target.title, path: target.path ?? null, kind: target.kind }));
   }
 
   /**
@@ -419,6 +489,8 @@ export class Runtime {
       operations,
       // Only with the setting on: an add-in from before it refuses the member, so the run fails closed.
       ...(context.requireDryRun ? { requireDryRun: context.requireDryRun } : {}),
+      // Spec #28: always sent, empty when the call named none; the add-in refuses a change to any other open document.
+      targets: context.targets.map(target => target.uniqueId),
     };
     // A dry run holds Revit from its first request, built-in or bridge, so every change it makes is rolled back.
     if (context.dryRun && !context.hold) {
@@ -567,6 +639,7 @@ export class Runtime {
         timeLimitMs,
         dryRun: Boolean(context.dryRun),
         requireDryRun: context.requireDryRun,
+        targets: context.targets.map(target => target.uniqueId),
       });
       context.hold = hold;
       context.heldAt = Date.now();

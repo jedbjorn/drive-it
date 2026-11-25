@@ -555,18 +555,26 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
             throw MemberNotFound(type, name, flags);
         var method = SelectOverload(candidates, arguments, out var converted)
             ?? throw NoMatch(type, name, candidates, arguments);
-        // Reached only in Dev Mode (standard refuses these calls): keep the run's changes before a direct save or close, as the built-in does.
+        // Reached only in Dev Mode (standard refuses these calls): a direct save or close of a document the run did not
+        // name is refused (spec #28), then the run's changes before it are kept, as the built-in does.
         if (target is Document document && Guardrails.IsCommitPoint(type, name))
+        {
+            held.RequireTargeted(document, $"Document.{name}");
             held.CommitPoint(document);
+        }
+        // A family document loads itself into the document it is given, in a transaction of Revit's own (spec #28).
+        if (name == "LoadFamily" && target is Document && converted.OfType<Document>().FirstOrDefault() is { } destination)
+            held.RequireTargeted(destination, "Document.LoadFamily");
         // A Dev Mode script's transaction or group starts inside the run's group on its document, every time it starts
         // (Revit lets one start again after a commit point closed that group), so a failed run still rolls it back.
         if (name == "Start" && target is not null && ScriptTransactionDocument(target) is { } owner)
             held.BeforeTransaction(owner);
         Overloads.SupplyOutputs(method, converted, Output);
         var result = Invoke(type, name, () => method.Invoke(target, converted), target, converted);
-        // D8: a document a Dev Mode script creates or opens for family editing is the run's own (spec #13 D12).
-        if (held.RequireDryRun is not null && result is Document created && Guardrails.CreatesDocument(type, name))
-            RunDocuments.Add(held.RunId, created);
+        // A document a Dev Mode script creates or opens for family editing is the run's own (spec #13 D8, D12), and so is
+        // one it opens by path (spec #28).
+        if (result is Document made && (Guardrails.CreatesDocument(type, name) || Guardrails.OpensDocument(type, name)))
+            RunDocuments.Add(held.RunId, made, created: Guardrails.CreatesDocument(type, name));
         // Out parameters come back after the return value, as a Python tuple; a single value comes back as itself.
         return Overloads.Outputs(method, result, converted) switch
         {

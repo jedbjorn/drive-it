@@ -1,10 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
-import { apiReference, apiVersion, BRIDGE_GUIDANCE, BUILT_IN_DOCUMENTS_GUIDANCE, DRY_RUN_GUIDANCE, GUARDRAIL_STATEMENT, SAFETY_AND_ABILITY } from "./reference.js";
-import { DRY_RUN_VIEW_LIMIT, Runtime } from "./runtime.js";
+import { apiReference, apiVersion, BRIDGE_GUIDANCE, BUILT_IN_DOCUMENTS_GUIDANCE, DOCUMENT_DESCRIPTION, DOCUMENTS_GUIDANCE, DRY_RUN_GUIDANCE, GUARDRAIL_STATEMENT, OPEN_DOCUMENTS_DESCRIPTION, SAFETY_AND_ABILITY, TARGETS_DESCRIPTION } from "./reference.js";
+import { DRY_RUN_VIEW_LIMIT, MAX_TARGETS, Runtime } from "./runtime.js";
 import { revitContent } from "./content.js";
-import { executeBroker, readSession, resolveProcessId, REVIT_VERSION_NAMES, sessionError } from "./session.js";
+import { executeBroker, readOpenDocuments, readSession, resolveProcessId, REVIT_VERSION_NAMES, sessionError } from "./session.js";
 import { launchRootFrom, MAX_MARK_CATEGORIES, NOT_MARKED_REASONS, PIXEL_SIZE, ReferenceImages, retentionFrom } from "./capture.js";
 import { defaultDataDir } from "./store.js";
 import { DEV, installMode, STANDARD } from "./mode.js";
@@ -33,6 +33,9 @@ const document = z.object({
   uniqueId: z.string().min(1).nullable().optional(),
   kind: z.enum(["rvt", "rfa", "unknown"]).optional(),
 });
+// Spec #28: a document a run may change, as revit.targets and the receipt give it, and a row of openDocuments.
+const target = z.object({ uniqueId: z.string(), title: z.string(), path: z.string().nullable(), kind: z.string() }).passthrough();
+const openDocument = z.object({ uniqueId: z.string(), title: z.string(), path: z.string().nullable(), kind: z.string(), isActive: z.boolean() }).passthrough();
 const scriptId = z.string().regex(SCRIPT_ID).describe("Stable script identifier");
 const scriptReference = z.object({
   scriptId,
@@ -90,7 +93,7 @@ ${BRIDGE_GUIDANCE.filter(keep).map(line => `- ${line}`).join("\n")}`;
 /** The server instructions for an install mode, standard or dev. */
 export function serverInstructions(mode) {
   const devRule = mode === DEV ? `\n\n${DEV_MODE_RULE}` : "";
-  return `Drive It drives a live Autodesk Revit ${REVIT_VERSION_NAMES} session. Call get_revit_session first (it reports the selected session's version), model with execute_script, and keep its receipts and checks as the authoritative record. When the user refers to the model or family they have open, start the script with revit.get_active_document(), and call get_api_reference for the built-in primitives before writing raw batches. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}${devRule}
+  return `Drive It drives a live Autodesk Revit ${REVIT_VERSION_NAMES} session. Call get_revit_session first (it reports the selected session's version), model with execute_script, and keep its receipts and checks as the authoritative record. ${DOCUMENTS_GUIDANCE} Call get_api_reference for the built-in primitives before writing raw batches. Visual self-QA every modeling turn: ${VISUAL_QA_RULE} ${MARKS_GUIDANCE}${devRule}
 
 ${bridgeInstructions(mode)}
 
@@ -108,6 +111,7 @@ export function createDriveItServer(options = {}) {
   const sessionReader = options.sessionReader || readSession;
   const processResolver = options.processResolver || resolveProcessId;
   const contentReader = options.contentReader || revitContent;
+  const documentsReader = options.documentsReader || readOpenDocuments;
   const modeResolver = options.modeResolver || installMode;
   // options.mode is the resolved install mode (server/index.js); the instructions are fixed when the server starts.
   const server = new McpServer({ name: "drive-it", version: "0.1.0" }, { instructions: serverInstructions(options.mode ?? STANDARD) });
@@ -122,7 +126,7 @@ export function createDriveItServer(options = {}) {
   runtime.references ??= references;
 
   server.registerTool("get_revit_session", {
-    description: "Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user (null until the user picks one in the Drive-It window; ask them to), Revit's installed project templates, family template folders, and library folders, the install mode (standard, or dev: an administrator installed Drive-It with no guardrails), and requireDryRun: true when the user requires a dry run before every change (see get_api_reference's dryRun guidance). Use these real paths instead of guessing file names.",
+    description: `Call this first. Finds the running Revit (processId is optional when only one Revit has Drive It loaded) and returns its version, the workspace root where Drive It saves and reads files without asking the user (null until the user picks one in the Drive-It window; ask them to), Revit's installed project templates, family template folders, and library folders, the install mode (standard, or dev: an administrator installed Drive-It with no guardrails), requireDryRun: true when the user requires a dry run before every change (see get_api_reference's dryRun guidance), ${OPEN_DOCUMENTS_DESCRIPTION}. Use these real paths instead of guessing file names.`,
     inputSchema: { processId: processId.optional().describe("Windows process ID of Revit.exe; omit it to use the only running Revit") },
     outputSchema: {
       processId,
@@ -137,16 +141,18 @@ export function createDriveItServer(options = {}) {
         familyTemplateFolders: stringList,
         libraryFolders: stringList,
       }),
+      openDocuments: z.array(openDocument).nullable(),
     },
     annotations: { readOnlyHint: true },
   }, async ({ processId }) => {
     try {
-      const info = await sessionReader(await processResolver(processId));
+      const selected = await processResolver(processId);
+      const info = await sessionReader(selected);
       const workspaceRoot = await runtime.workspace.getRoot().catch(error => {
         if (error.code === "WORKSPACE_NOT_SELECTED") return null;
         throw error;
       });
-      const value = { ...info, workspaceRoot, mode: await modeResolver(), requireDryRun: await runtime.settings.requireDryRun(), content: await contentReader(info.version) };
+      const value = { ...info, workspaceRoot, mode: await modeResolver(), requireDryRun: await runtime.settings.requireDryRun(), content: await contentReader(info.version), openDocuments: await documentsReader(selected) };
       return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: sessionError(error) }] };
@@ -161,7 +167,8 @@ export function createDriveItServer(options = {}) {
       source: z.string().min(1).optional().describe("Inline Python source; mutually exclusive with script"),
       script: scriptReference.optional().describe("Saved script reference; mutually exclusive with source. An exact draft or active revision, or \"latest\" for the newest active revision. Retired revisions are rejected"),
       arguments: z.record(z.string(), z.unknown()).optional().describe("JSON arguments exposed to Python as args; saved scripts validate them against the revision's inputSchema and apply its defaults"),
-      document: document.optional().describe("Optional model path and broker-issued document handle"),
+      targets: z.array(z.string().min(1)).min(1).max(MAX_TARGETS).optional().describe(TARGETS_DESCRIPTION),
+      document: document.optional().describe(DOCUMENT_DESCRIPTION),
       idempotencyKey: z.string().min(1).max(200).optional().describe("Replay key; completed runs return their original receipt. To resume a run that returned status pending, call again with the same idempotencyKey and the same request; a new key starts a new request that needs a new approval"),
       timeoutMs: z.number().int().positive().max(600000).optional().describe("This run's time limit in ms, default 30000 (or the user's script time limit when that is lower). It may not exceed the script time limit the user sets in the Drive-It window (120 s unless changed, 10 to 600 s); a larger value is rejected with the limit. Run a long task as a chain of scripts, each within the limit"),
       dryRun: z.union([z.boolean(), z.object({
@@ -192,6 +199,8 @@ export function createDriveItServer(options = {}) {
       status: receiptStatus,
       session: z.record(z.string(), z.unknown()).nullable(),
       document: z.record(z.string(), z.unknown()).nullable(),
+      // Spec #28. Optional only so receipts stored before targets still replay (flag #52); new receipts always carry it.
+      targets: z.array(target).optional(),
       workspaceRoot: z.string().nullable(),
       arguments: z.record(z.string(), z.unknown()),
       changes: z.array(z.unknown()),

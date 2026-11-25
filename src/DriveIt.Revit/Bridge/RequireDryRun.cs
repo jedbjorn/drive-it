@@ -55,25 +55,35 @@ internal static class RequireDryRunRules
 }
 
 /// <summary>
-/// The documents a real run under Require dry run created itself (create_document, edit_family and their Dev Mode
-/// members, D8): the run's own to change, whatever its dry run changed. Kept per run id, the most recent few only.
+/// The documents a run made its own: created (create_document, edit_family and their Dev Mode members), which a rehearsed
+/// run under Require dry run may change whatever its dry run changed (spec #13 D8), and opened by path (open_document and
+/// its Dev Mode members), which with the created ones a run may change without naming them (spec #28 "The Rule"). Kept
+/// per run id, the most recent few only.
 /// </summary>
 internal static class RunDocuments
 {
-    private const int Kept = 64;
-    private static readonly List<(string RunId, Document Document)> Own = [];
+    private const int Kept = 256;
+    private static readonly List<(string RunId, Document Document, bool Created)> Own = [];
 
-    public static void Add(string runId, Document document)
+    public static void Add(string runId, Document document, bool created)
     {
         lock (Own)
         {
-            Own.Add((runId, document));
+            Own.Add((runId, document, created));
             if (Own.Count > Kept)
                 Own.RemoveAt(0);
         }
     }
 
+    /// <summary>Spec #13 D8: the run created this document.</summary>
     public static bool IsOwn(string runId, Document document)
+    {
+        lock (Own)
+            return Own.Any(entry => entry.Created && entry.RunId == runId && Same(entry.Document, document));
+    }
+
+    /// <summary>Spec #28: the run created this document or opened it by path.</summary>
+    public static bool BelongsTo(string runId, Document document)
     {
         lock (Own)
             return Own.Any(entry => entry.RunId == runId && Same(entry.Document, document));

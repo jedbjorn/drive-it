@@ -46,8 +46,9 @@ try {
     arguments: { processId, timeoutMs: 120000, displayName: "Read walls with no document target", source: "result = revit.find_elements(category=\"Walls\")" },
   });
   const refusal = untargeted.structuredContent;
-  check("no document target fails with document_not_open naming revit.get_active_document()",
-    refusal?.status === "failed" && refusal.error?.code === "document_not_open" && refusal.error.message.includes("revit.get_active_document()"),
+  // Spec #28: the fix it names is targets on the call, or a document the script opens or creates.
+  check("no document target fails with document_not_open naming targets",
+    refusal?.status === "failed" && refusal.error?.code === "document_not_open" && refusal.error.message.includes("Pass targets on the execute_script call"),
     refusal?.error);
 
   // The model the user has open, reached without a document argument or a path.

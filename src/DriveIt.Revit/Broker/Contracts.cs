@@ -17,6 +17,20 @@ public sealed class BrokerRequest
     public HoldRequest? Hold { get; set; }
     /// <summary>model.execute: present only while Require dry run is on for this real run (spec #13).</summary>
     public RequireDryRunGuard? RequireDryRun { get; set; }
+    /// <summary>model.execute: the run's targets as uniqueIds (spec #28). Absent or empty, the run names none.</summary>
+    public List<string>? Targets { get; set; }
+}
+
+/// <summary>
+/// A documents.list request (spec #28 "Open Documents"): every open document, and a run's targets (or its document) resolved
+/// before its script starts. The add-in waits at most WaitMs for Revit's thread, then answers busy.
+/// </summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class DocumentsRequest
+{
+    public int? WaitMs { get; set; }
+    public List<string>? Targets { get; set; }
+    public DocumentTarget? Document { get; set; }
 }
 
 /// <summary>Require dry run is on for a real run (spec #13): whether the server found an unused dry run of the same call.</summary>
@@ -46,6 +60,8 @@ public sealed class HoldRequest
     public bool DryRun { get; set; }
     /// <summary>Present only while Require dry run is on for this real run (spec #13).</summary>
     public RequireDryRunGuard? RequireDryRun { get; set; }
+    /// <summary>The run's targets as uniqueIds (spec #28). Absent or empty, the run names none.</summary>
+    public List<string>? Targets { get; set; }
 }
 
 /// <summary>

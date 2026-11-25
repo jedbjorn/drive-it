@@ -20,6 +20,9 @@ async function fixture(t, brokerExecutor) {
   const runtime = new Runtime({
     dataDir: path.join(base, "data"),
     sessionReader: async processId => ({ processId, version: "2026", build: "test", connectionIdentity: "test-session" }),
+    // Spec #28: the add-in resolves a run's document before its script starts; this stand-in knows every uniqueId,
+    // and a path names no open document.
+    documentReader: async (processId, { targets, document }) => ({ status: "succeeded", targets: (targets ?? (document.uniqueId ? [document.uniqueId] : [])).map(uniqueId => ({ uniqueId, title: "Fixture", path: null, kind: "rvt" })) }),
     brokerExecutor,
   });
   await runtime.workspace.setRoot(root);
@@ -306,6 +309,9 @@ test("get_api_reference lists every primitive and units with an example that run
   assert.match(apiReference("revit.get_family_parameters")[0].effects, /without changing the current type/);
 });
 
-test("the server instructions start work on an open model with get_active_document", () => {
-  assert.match(SERVER_INSTRUCTIONS, /When the user refers to the model or family they have open, start the script with revit\.get_active_document\(\), and call get_api_reference for the built-in primitives before writing raw batches\./);
+// Spec #28 replaced the instruction to start each script with get_active_document: a task settles its documents once.
+test("the server instructions settle a task's documents once and still send the agent to the primitives' reference", () => {
+  assert.doesNotMatch(SERVER_INSTRUCTIONS, /start the script with revit\.get_active_document\(\)/);
+  assert.match(SERVER_INSTRUCTIONS, /pass those uniqueIds as targets on every execute_script of the task/);
+  assert.match(SERVER_INSTRUCTIONS, /Call get_api_reference for the built-in primitives before writing raw batches\./);
 });

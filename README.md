@@ -31,7 +31,7 @@ purpose: MCP server and Revit add-in
 
 Drive-It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 or Revit 2027 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes these stdio MCP tools:
 
-- `get_revit_session` finds the running Revit (when only one has Drive-It loaded, no process ID is needed) and returns its version, build, named-pipe identity, the workspace root, and Revit's installed project templates, family template folders, and library folders, so the agent uses real paths instead of guessing.
+- `get_revit_session` finds the running Revit (when only one has Drive-It loaded, no process ID is needed) and returns its version, build, named-pipe identity, the workspace root, Revit's installed project templates, family template folders, and library folders, so the agent uses real paths instead of guessing, and the open documents (`openDocuments`), with the one in Revit's window marked.
 - `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker. Every call carries a required `displayName`: one plain-language line the agent writes for you, such as "Add Level 3 at 24 ft to the tower model". It is kept on the run receipt and on any outside-root request, and the operator surface lists runs and requests by it.
 - `save_script`, `search_scripts`, `get_script`, `promote_script`, and `retire_script` manage the workspace script library (see [Script library](#script-library)).
 - `capture_revit_view` exports an existing Revit view to a PNG and returns the image so the agent can check its own work (see [View capture](#view-capture)).
@@ -51,6 +51,8 @@ graph LR
   SERVER --> PIPE["Current-user named pipe"]:::class4
   PIPE --> REVIT["Drive-It add-in in Revit"]:::class3
 ```
+
+A task is tied to the documents it starts with. When you name what to work on, the agent reads the open documents, tells you their titles, and names them as `targets` on every run of the task, so switching windows in Revit while it works does not move the task to another model. A run changes only its targets and the documents it opens or creates: a change, save or close of any other open document is refused with `document_not_targeted`, and that document is left as it was. Run history in the Drive-It window shows each run's target titles.
 
 ## Workspace and outside-root decisions
 
@@ -121,7 +123,7 @@ revit.save_as_document(destinationPath=args["familyPath"])  # an .rfa path in th
 - `edit_family(familyId)` opens a loadable family of the RVT (the `familyId` from `find_elements` or `list_types`) as an unsaved, in-memory family document and returns the full response with it as `document`, so later calls target the family. The project is not modified (`project_unmodified` check). Save the family into the workspace with `save_as_document`. In-place and non-editable families, and ids that are not families (system families such as walls have none), fail with `family_not_editable`. Load the edited family back into the project through the bridge: `revit.document().LoadFamily(project, revit.options.family_load(overwrite=True))`, where `project` is `revit.document(document=...)` with the project's document from an earlier receipt.
 - `units.to_internal(value, unit)` and `units.from_internal(value, unit)` convert lengths (`mm`, `cm`, `m`, `in`, `ft`), areas (`mm2`, `m2`, `in2`, `ft2`), and angles (`deg`, `rad`) to and from Revit's internal feet, square feet, and radians.
 
-Every primitive takes an optional `document`. Without one, it uses the script's current document, which `get_active_document` and `edit_family` set. A script with no current document fails with `document_not_open`, and the message says to call `revit.get_active_document()` first or pass `document=`. Read primitives (`find_elements`, `get_parameters`, `list_types`, `list_views`, `get_selection`, `get_family_parameters`) return their output directly. All other operations return the full broker response. Reads start no transaction and never change the model. `limit` is at most 2000, and so is the number of element ids per call. A larger request fails with `limit_exceeded` and is never silently cut. Element ids are integers. Linked models are not queried.
+Every primitive takes an optional `document`. Without one, it uses the script's current document, which `get_active_document` and `edit_family` set. A script with no current document fails with `document_not_open`, and the message says to pass `targets` on the call, or to open or create a document in the script. With `targets`, the first is the current document and `revit.targets` lists them all, each `{uniqueId, title, path, kind}`. Read primitives (`find_elements`, `get_parameters`, `list_types`, `list_views`, `get_selection`, `get_family_parameters`) return their output directly. All other operations return the full broker response. Reads start no transaction and never change the model. `limit` is at most 2000, and so is the number of element ids per call. A larger request fails with `limit_exceeded` and is never silently cut. Element ids are integers. Linked models are not queried.
 
 ## Revit API bridge
 
@@ -421,9 +423,12 @@ The current-user named pipe `\\.\pipe\drive-it-<pid>` retains its session greeti
   "type": "model.execute",
   "document": { "path": "<canonical path or null>", "uniqueId": "<broker-issued identity or null>" },
   "workspaceRoot": "<canonical root>",
+  "targets": ["<broker-issued identity>"],
   "operations": [{ "type": "read_document", "arguments": {} }]
 }
 ```
+
+`targets` lists the documents the run may change; a change, save, save-as, close or delete of any other open document that the run did not open or create fails with `document_not_targeted`, and so does one from a `hold.begin` whose `hold.targets` does not name it. A `documents.list` request returns `openDocuments` and resolves a run's `targets`; the add-in waits at most its `waitMs` for Revit's thread and otherwise answers `busy`.
 
 Built-in primitives are `get_active_document`, `find_elements`, `get_parameters`, `list_types`, `list_views`, `get_selection`, `set_selection`, `get_family_parameters`, and `edit_family`, which carry no policy paths and start no transaction, and `set_parameters` and `set_family_parameters`, typed model changes. Every `model.execute` response carries `results`, with one entry per operation in batch order: a read primitive's output, or `null` for any other operation and for every operation after a failure. Document operations are `open_document`, `create_document`, `read_document`, `save_document`, `save_as_document`, `close_document`, and `delete_document`. Typed model changes are `create_level`, `create_wall`, `create_3d_view`, `create_family_type`, `delete_element`, `set_parameters`, and `set_family_parameters`. `create_3d_view` creates an isometric 3D view (optional unique `name`) and returns it in `createdViews` as `{id, name, type}` (also collected on the `execute_script` receipt and in run history), so the id can go straight to `capture_revit_view`. An empty name or one with a character Revit forbids in names fails with `invalid_model_change`. A name already used by a 3D view (not a view template; names are case-sensitive, as in Revit) or repeated in the batch fails with `duplicate_view_name`; validation sees the document as it was before the batch, so deleting a view and reusing its name needs two calls. a family in which Revit allows no 3D view (for example an annotation family) fails with `view_creation_not_allowed` and the batch rolls back. Consecutive model changes run in one Revit transaction through `ExternalEvent`. The response's `document.uniqueId` remains bound to the same Revit document across save-as.
 

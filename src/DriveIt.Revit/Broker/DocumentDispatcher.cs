@@ -192,8 +192,9 @@ public sealed partial class DocumentDispatcher
             {
                 current = ExecuteQuery(application, operation, current, response, index);
                 MarkEffects(response, current);
-                if (operation.Type == "edit_family" && request.RequireDryRun is not null && current is not null)
-                    RunDocuments.Add(request.Id, current.Document);
+                // A family opened for editing is the run's own: spec #13 D8 and spec #28 "The Rule".
+                if (operation.Type == "edit_family" && current is not null)
+                    RunDocuments.Add(request.Id, current.Document, created: true);
                 continue;
             }
             if (IsModelChange(operation.Type))
@@ -206,7 +207,7 @@ public sealed partial class DocumentDispatcher
                     index++;
                 }
                 index--;
-                var applied = ApplyModelBatch(current, changes, response, request.RequireDryRun, request.Id);
+                var applied = ApplyModelBatch(application, current, changes, response, request.RequireDryRun, request.Id, request.Targets);
                 MarkEffects(response, current);
                 if (!applied)
                     return;
@@ -219,13 +220,15 @@ public sealed partial class DocumentDispatcher
                 case "open_document":
                     current = Open(application, arguments, response);
                     MarkEffects(response, current);
+                    // Spec #28: a document the run opens by path is its own to change without a target.
+                    RunDocuments.Add(request.Id, current.Document, created: false);
                     break;
                 case "create_document":
                     current = Create(application, arguments, response);
                     MarkEffects(response, current);
-                    // D8: a document the run creates is its own, so a rehearsed run may change it (spec #13 D12).
-                    if (request.RequireDryRun is not null)
-                        RunDocuments.Add(request.Id, current.Document);
+                    // D8: a document the run creates is its own, so a rehearsed run may change it (spec #13 D12), and
+                    // so may a run that does not name it (spec #28).
+                    RunDocuments.Add(request.Id, current.Document, created: true);
                     break;
                 case "read_document":
                     current = RequireDocument(current);
@@ -234,15 +237,18 @@ public sealed partial class DocumentDispatcher
                     break;
                 case "save_document":
                     current = RequireDocument(current);
+                    RequireTargeted(application, request.Targets, request.Id, current.Document, operation.Type);
                     RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
                     KeepThrough(current, response, state => Save(state, response));
                     break;
                 case "save_as_document":
                     current = RequireDocument(current);
+                    RequireTargeted(application, request.Targets, request.Id, current.Document, operation.Type);
                     KeepThrough(current, response, state => SaveAs(state, arguments, response));
                     break;
                 case "close_document":
                     current = RequireDocument(current);
+                    RequireTargeted(application, request.Targets, request.Id, current.Document, operation.Type);
                     // D10: with Require dry run on, only a document with no unsaved changes may be closed.
                     if (request.RequireDryRun is not null && current.Document.IsModified)
                         throw RequireDryRunRules.CloseChanged(operation.Type, current.Document);
@@ -251,6 +257,7 @@ public sealed partial class DocumentDispatcher
                     break;
                 case "delete_document":
                     current = RequireDocument(current);
+                    RequireTargeted(application, request.Targets, request.Id, current.Document, operation.Type);
                     RequireAuthorized(request, response.WorkspaceRoot!, operation.Type, current);
                     KeepThrough(current, response, state => Delete(state, response));
                     current = null;
@@ -418,8 +425,8 @@ public sealed partial class DocumentDispatcher
         response.AffectedFiles.Add(path);
     }
 
-    private bool ApplyModelBatch(DocumentState state, List<ModelChangeRequest> changes, BrokerResponse response,
-        RequireDryRunGuard? requireDryRun, string runId)
+    private bool ApplyModelBatch(UIApplication application, DocumentState state, List<ModelChangeRequest> changes, BrokerResponse response,
+        RequireDryRunGuard? requireDryRun, string runId, IReadOnlyCollection<string>? targets)
     {
         ValidateChanges(state.Document, changes);
         response.Document = Snapshot(state);
@@ -427,11 +434,18 @@ public sealed partial class DocumentDispatcher
         var initialElementCount = response.AffectedElements.Count;
         var initialViewCount = response.CreatedViews?.Count ?? 0;
 
-        // Outside a hold each batch is its own transaction, so the rule is checked before every one (spec #13 D12).
+        // Outside a hold each batch is its own transaction, so the rules are checked before every one: the run's targets
+        // first (spec #28), then the rehearsal (spec #13 D12). A hold checks both in BeforeTransaction.
         if (Held is not null)
+        {
             Held.BeforeTransaction(state.Document);
-        else if (requireDryRun is not null)
-            RequireDryRunRules.RequireRehearsed(requireDryRun, runId, state.Document);
+        }
+        else
+        {
+            RequireTargeted(application, targets, runId, state.Document, ChangeOperation);
+            if (requireDryRun is not null)
+                RequireDryRunRules.RequireRehearsed(requireDryRun, runId, state.Document);
+        }
         using var transaction = new Transaction(state.Document, "Drive It model batch");
         transaction.Start();
         try
@@ -685,8 +699,114 @@ public sealed partial class DocumentDispatcher
         return state;
     }
 
+    /// <summary>The operation a document_not_targeted message names for a transaction: built-in, bridge or script-made.</summary>
+    internal const string ChangeOperation = "a change";
+
+    public const string NotTargeted = "document_not_targeted";
+
+    /// <summary>
+    /// Spec #28 "The Rule": a run may change, save, save-as, close or delete-file a document only if the call named it
+    /// (targets, or its document) or the run opened, created or edit_family'd it itself. Reads never come here.
+    /// </summary>
+    internal void RequireTargeted(UIApplication application, IReadOnlyCollection<string>? targets, string runId, Document document, string operation)
+    {
+        if (RunDocuments.BelongsTo(runId, document))
+            return;
+        foreach (var target in targets ?? Array.Empty<string>())
+        {
+            if (documents.TryGetValue(target, out var state) && SameDocument(state.Document, document))
+                return;
+        }
+        throw new RequestRejectedException(NotTargeted,
+            $"'{document.Title}' is not one of this run's targets, so {operation} is refused: nothing in it was changed. "
+            + $"Open documents: {OpenDocumentsText(application)}. If the user asked for this document, run the call again with its uniqueId in targets.");
+    }
+
+    /// <summary>
+    /// Spec #28 "Open Documents" and "The Call": every open, non-linked document (each registered, so its id works at
+    /// once), isActive for the one in Revit's window now, and the run's targets, or its document, resolved in order. A
+    /// target that is not open, or matches two documents, fails the whole request with that code, naming the id.
+    /// </summary>
+    internal JsonObject ListDocuments(UIApplication application, string id, DocumentsRequest request)
+    {
+        var resolved = new JsonArray();
+        if (request.Targets is { } targets)
+        {
+            foreach (var target in targets)
+                resolved.Add(TargetEntry(ResolveTarget(application, new DocumentTarget { UniqueId = target }, $"Target {target}")));
+        }
+        else if (request.Document is { } named && (!string.IsNullOrWhiteSpace(named.UniqueId) || !string.IsNullOrWhiteSpace(named.Path)))
+        {
+            // The one-target form: a uniqueId must resolve; a path that no open document has names no target.
+            var state = !string.IsNullOrWhiteSpace(named.UniqueId)
+                ? ResolveTarget(application, named, $"document {named.UniqueId}")
+                : TryResolveInitial(application, named);
+            if (state is not null)
+                resolved.Add(TargetEntry(state));
+        }
+        return new JsonObject
+        {
+            ["id"] = id,
+            ["type"] = RevitBroker.DocumentsRequestType,
+            ["status"] = "succeeded",
+            ["openDocuments"] = new JsonArray(OpenDocumentRows(application).Select(row => JsonSerializer.SerializeToNode(row, RevitBroker.JsonOptions)).ToArray()),
+            ["targets"] = resolved,
+        };
+    }
+
+    private DocumentState ResolveTarget(UIApplication application, DocumentTarget target, string named)
+    {
+        try
+        {
+            return Resolve(application, target);
+        }
+        catch (RequestRejectedException exception)
+        {
+            throw new RequestRejectedException(exception.Code,
+                $"{named}: {exception.Message} The run did not start: nothing was changed. Open documents: {OpenDocumentsText(application)}. "
+                + "Read get_revit_session's openDocuments again and pass the uniqueIds of the documents the user asked for.");
+        }
+    }
+
+    private static JsonObject TargetEntry(DocumentState state) => new()
+    {
+        ["uniqueId"] = state.Id,
+        ["title"] = state.Document.Title,
+        ["path"] = CanonicalDocumentPath(state.Document),
+        ["kind"] = DocumentKind(state.Document),
+    };
+
+    /// <summary>Every open, non-linked document, registered, with isActive for the one shown in Revit's window now.</summary>
+    private List<OpenDocumentReceipt> OpenDocumentRows(UIApplication application)
+    {
+        var active = application.ActiveUIDocument?.Document;
+        return OpenDocuments(application).Where(document => !document.IsLinked).Select(document => new OpenDocumentReceipt
+        {
+            UniqueId = Register(document).Id,
+            Title = document.Title,
+            Path = CanonicalDocumentPath(document),
+            Kind = DocumentKind(document),
+            IsActive = active is not null && document.Equals(active),
+        }).ToList();
+    }
+
+    /// <summary>"'Tower' uniqueId 1a2b (in Revit's window), 'Annex' uniqueId 3c4d", or that none is open.</summary>
+    private string OpenDocumentsText(UIApplication application)
+    {
+        try
+        {
+            var rows = OpenDocumentRows(application);
+            return rows.Count == 0 ? "none"
+                : string.Join(", ", rows.Select(row => $"'{row.Title}' uniqueId {row.UniqueId}{(row.IsActive ? " (in Revit's window)" : "")}"));
+        }
+        catch (RequestRejectedException exception)
+        {
+            return $"not listed ({exception.Message})";
+        }
+    }
+
     private static DocumentState RequireDocument(DocumentState? state) => state ??
-        throw new RequestRejectedException("document_not_open", "The requested operation requires an open selected document, and this script has none. Call revit.get_active_document() first to use the model open in Revit's window, or pass document= with a uniqueId from an earlier receipt.");
+        throw new RequestRejectedException("document_not_open", "The requested operation requires an open selected document, and this script has none. Pass targets on the execute_script call (uniqueIds from get_revit_session's openDocuments), or open or create a document in the script.");
 
     private DocumentState Register(Document document, bool created = false)
     {
