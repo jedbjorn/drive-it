@@ -39,7 +39,7 @@ class StubRevit {
           if (message.type === "model.execute") return this.answer(message);
           const { call } = message;
           if (call.op === "document") return { status: "succeeded", value: { $h: 1, type: "Autodesk.Revit.DB.Document" } };
-          if (call.op === "get" && call.member === "Export") return { status: "succeeded", value: { $method: "Export" } };
+          if (call.op === "get" && ["Export", "SaveAs"].includes(call.member)) return { status: "succeeded", value: { $method: call.member } };
           return { status: "succeeded", value: call.op === "tx.start" ? 1 : null };
         },
         end: async (outcome, extra = {}) => ({
@@ -280,6 +280,19 @@ test("an unrehearsed bridge call that writes a file is refused before Revit, wit
   assert.deepEqual(receipt.policyDecisionIds, []);
   assert.equal(revit.holds[0].sent.some(message => message.call?.op === "call"), false, "the export never reached Revit");
   assert.deepEqual(revit.holds[0].options.requireDryRun, { rehearsed: false }, "the hold is told too");
+});
+
+test("a direct save-as is not allowed while the setting is on, before Revit and before the rehearsal rule", async (t) => {
+  const { runtime, revit, root } = await fixture(t, { mode: "dev" });
+  await runtime.settings.setRequireDryRun("on");
+  const target = path.join(root, "copy.rvt");
+  const receipt = await run(runtime, `revit.document().SaveAs(${JSON.stringify(target)})`);
+  assert.equal(receipt.status, "failed");
+  assert.equal(receipt.error.code, "not_allowed_while_dry_run_required");
+  assert.match(receipt.error.message, /Document\.SaveAs is not allowed while Require dry run is on.*ask them to save in Revit/s);
+  assert.deepEqual(receipt.policyDecisionIds, []);
+  assert.equal(revit.holds[0].sent.some(message => message.call?.op === "call"), false, "the save-as never reached Revit");
+  assert.equal(await exists(target), false);
 });
 
 test("Staged Actions shows the newest completed dry run in this workspace, Applied once the same call succeeded for real", async (t) => {

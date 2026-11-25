@@ -68,6 +68,8 @@ export const DRY_RUN_NOTES = Object.freeze({
 
 // Spec #13 "Require Dry Run": what each refusal tells the agent to do next.
 export const REQUIRE_DRY_RUN_MESSAGES = Object.freeze({
+  // The add-in's wording (RequireDryRunRules.NotAllowedMessage), for the save-as the server refuses before Revit.
+  notAllowed: (what, reason) => `${what} is not allowed while Require dry run is on: ${reason}, and Drive-It leaves that to the person. Do not retry it. Tell the user which documents have unsaved changes and ask them to save in Revit, or to turn Require dry run off in the Drive-It window if they want you to save.`,
   fileWrite: what => `Require dry run is on and this run was not rehearsed, so ${what} is refused: nothing was written. Dry-run the same call first (execute_script with dryRun: true), compare the result with the request, then run the same call again without dryRun.`,
 });
 
@@ -88,6 +90,8 @@ const PROVISIONAL = ["changes", "affectedElements", "createdViews", "transaction
 // Bridge members that only read the file a path names, so Revit's installed content passes (decision #23).
 // A path given to any other member is checked as a write.
 const BRIDGE_READS = new Set(["LoadFamily", "LoadFamilySymbol"]);
+// Document members that save to a path (Guardrails.CommitPoints): with Require dry run on, never the agent's, in any run.
+const BRIDGE_SAVES = new Set(["SaveAs", "SaveAsCloud"]);
 
 // A string argument that is an absolute file path goes through the outside-root policy (spec #15 "Guardrails").
 function isAbsoluteFilePath(value) {
@@ -472,6 +476,14 @@ export class Runtime {
             code: "not_allowed_in_dry_run",
             message: `${call.member} would write ${paths.join(", ")}, and a dry run writes no files, so it is not allowed in a dry run. The paths are listed in skippedFileWrites; the real run writes them.`,
           },
+        };
+      }
+      // Spec #13 D13: with Require dry run on, a save-as is not allowed in any run, rehearsed or not; the add-in
+      // refuses a direct Save and Close the same way. Refused here, so the rehearsal rule below does not answer first.
+      if (context.requireDryRun && BRIDGE_SAVES.has(call.member)) {
+        return {
+          status: "failed",
+          error: { code: "not_allowed_while_dry_run_required", message: REQUIRE_DRY_RUN_MESSAGES.notAllowed(`Document.${call.member}`, `it would write ${paths.join(", ")}, a lasting effect a rollback cannot undo`) },
         };
       }
       // Spec #13 D11: with Require dry run on, a file write needs a rehearsal like a model change.
