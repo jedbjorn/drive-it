@@ -231,6 +231,8 @@ export function createDriveItServer(options = {}) {
       dryRun: z.boolean().optional().describe("true on a dry run's receipt: everything it reports was rolled back"),
       rehearsedBy: z.string().nullable().optional().describe("On a real run: the dry run that allowed it, or null"),
       rolledBack: z.boolean().optional().describe("On a dry run: true when every document it touched was restored"),
+      changedDocuments: z.array(z.object({ title: z.string(), path: z.string().nullable() }).passthrough()).optional()
+        .describe("On a dry run: the documents it changed in Revit, by title and path (null for a document never saved), empty when it changed none. With requireDryRun, the real run it rehearses may change only these and the documents it creates. Real runs do not carry it"),
       images: z.array(z.object({
         viewId: z.string().nullable(),
         name: z.string().nullable(),
