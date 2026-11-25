@@ -27,11 +27,15 @@ namespace DriveIt.Operator;
 /// <c>--detect-agents</c> adds AC-11: it presses Detect agents, which writes the current user's MCP
 /// client configurations, so run it only with stand-in or throwaway client files; then it presses it
 /// in a window naming a missing mcp.json, whose failure shows by the row. With <c>--screenshots</c> it
-/// also saves the drawer with the results (<c>light-agents.png</c>, …).
+/// also saves the drawer while Detect runs, with the results and with the failure (<c>light-agents-running.png</c>,
+/// <c>light-agents.png</c>, <c>light-agents-error.png</c>, …).
 /// <c>--staged-actions</c> adds spec #13 AC-18's window half: it turns Require dry run on and off through the
 /// drawer's switch, fails a save, and writes dry-run receipts into run history for Staged Actions mode, so run it
-/// only against a throwaway data directory. With <c>--screenshots</c> it saves the mode (<c>light-staged.png</c>,
-/// <c>light-staged-failed.png</c>, …).
+/// only against a throwaway data directory. With <c>--screenshots</c> it saves every state of the mode
+/// (<c>light-staged-none.png</c>, <c>light-staged.png</c>, <c>light-staged-applied.png</c>,
+/// <c>light-staged-failed.png</c>), the run history with its dry-run rows (<c>light-history.png</c>) and the switch's
+/// failed save (<c>light-settings-require-error.png</c>). <c>--screenshots</c> alone also saves the status window of
+/// a real run and of a dry run (<c>light-status.png</c>, <c>light-status-dry-run.png</c>).
 /// </summary>
 public static class Program
 {
@@ -104,6 +108,7 @@ public static class Program
                     // The limit the window read when it opened, before the drawer reads or saves one.
                     var scriptTimeLimitSeconds = window.ScriptTimeLimitSeconds;
                     if (screenshots is not null) await Screenshots(window, screenshots, theme.ToString().ToLowerInvariant());
+                    if (screenshots is not null) StatusWindows(screenshots, theme.ToString().ToLowerInvariant());
                     var drawer = await DrawerOpenAndClose(window);
                     var writes = drawerWrites ? await DrawerWrites(window) : null;
                     var agents = detectAgents ? await DetectAgents(window, screenshots, theme.ToString().ToLowerInvariant()) : null;
@@ -231,6 +236,7 @@ public static class Program
         await Within(window.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
         var running = window.ClickDetectAgentsAsync();
         var disabledWhileRunning = !window.DetectAgentsEnabled;
+        if (screenshots is not null) Capture(window, Path.Combine(screenshots, theme + "-agents-running.png"));
         await Within(running, "Detect agents did not finish.");
         var results = window.AgentResultRows.Select(row => new { client = row.Client, status = row.Status, message = row.Message }).ToList();
         var error = window.AgentsErrorMessage;
@@ -255,6 +261,7 @@ public static class Program
             await Within(broken.ClickDetectAgentsAsync(), "Detect agents did not finish.");
             broken.UpdateLayout();
             failure = new { error = broken.AgentsErrorMessage, results = broken.AgentResultRows.Count, enabledAfter = broken.DetectAgentsEnabled };
+            if (screenshots is not null) Capture(broken, Path.Combine(screenshots, theme + "-agents-error.png"));
         }
         finally
         {
@@ -283,6 +290,13 @@ public static class Program
         Directory.CreateDirectory(runs);
         foreach (var old in Directory.GetFiles(runs, "self-test-*.json")) File.Delete(old);
         var clock = DateTimeOffset.UtcNow;
+        var plan = Path.Combine(data, "self-test-level-2.png");
+        if (screenshots is not null) DrawPlan(plan);
+        var images = new object[]
+        {
+            new { viewId = "312045", name = "Level 2", type = "FloorPlan", document = "Tower", path = plan },
+            new { viewId = "198877", name = "Door Schedule", type = "Schedule", document = "Tower", error = "UNSUPPORTED_VIEW_TYPE", message = "A schedule cannot be exported as an image." },
+        };
         string Receipt(string runId, bool dryRun, string status, object? error = null, object? actions = null)
         {
             clock = clock.AddSeconds(1);
@@ -299,11 +313,13 @@ public static class Program
                 ["document"] = new { title = "Tower", path = @"C:\models\Tower.rvt" },
                 ["workspaceRoot"] = root,
                 ["error"] = error,
+                ["held"] = new { ms = 1840, calls = 6 },
                 ["startedAt"] = clock.ToString("O"),
                 ["completedAt"] = clock.AddMilliseconds(500).ToString("O"),
             };
             if (dryRun) receipt["rolledBack"] = true;
             if (actions is not null) receipt["actions"] = actions;
+            if (actions is not null && screenshots is not null) receipt["images"] = images;
             if (dryRun && status == "succeeded") receipt["worksharing"] = new[] { new { document = "Tower", released = true } };
             File.WriteAllText(Path.Combine(runs, runId + ".json"), JsonSerializer.Serialize(receipt));
             return runId;
@@ -341,6 +357,7 @@ public static class Program
 
         await Within(window.ClickModeAsync(WindowMode.StagedActions), "Staged Actions mode did not finish reading.");
         var none = new { mode = window.CurrentMode.ToString(), noneShown = window.StagedNoneShown, error = window.StagedErrorMessage };
+        if (screenshots is not null) Capture(window, Path.Combine(screenshots, theme + "-staged-none.png"));
 
         var dry = Receipt("self-test-dry-" + theme, dryRun: true, "succeeded", actions: actions);
         await Within(window.ClickModeAsync(WindowMode.StagedActions), "Staged Actions mode did not finish reading.");
@@ -362,6 +379,11 @@ public static class Program
         Receipt("self-test-real-" + theme, dryRun: false, "succeeded");
         await Within(window.ClickModeAsync(WindowMode.StagedActions), "Staged Actions mode did not finish reading.");
         var applied = new { runId = window.StagedRun?.RunId, applied = window.AppliedShown };
+        if (screenshots is not null)
+        {
+            window.ExpandAlsoTouched();
+            Capture(window, Path.Combine(screenshots, theme + "-staged-applied.png"));
+        }
 
         var failedId = Receipt("self-test-failed-" + theme, dryRun: true, "failed",
             error: new { code = "SCRIPT_FAILED", message = "The door schedule has no level 2 doors." });
@@ -380,6 +402,14 @@ public static class Program
         await writeLater;
         var waited = window.StagedRun?.RunId;
 
+        // Run history labels every dry run (spec #13 "Receipts and the Library").
+        if (screenshots is not null)
+        {
+            await Within(window.ClickModeAsync(WindowMode.Home), "Home did not show.");
+            await Within(window.ClickRefreshAsync(), "Run history did not refresh.");
+            Capture(window, Path.Combine(screenshots, theme + "-history.png"));
+        }
+
         // A save that fails puts the switch back to the stored value and shows the error by the row.
         object failedSave;
         var aside = settingsFile + ".self-test";
@@ -390,6 +420,7 @@ public static class Program
             await Within(window.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
             await Within(window.ClickRequireDryRunAsync(), "The Require dry run switch did not finish saving.");
             failedSave = new { error = window.RequireDryRunError, switchOn = window.RequireDryRunSwitchOn, switcherShown = window.ModeSwitcherShown };
+            if (screenshots is not null) Capture(window, Path.Combine(screenshots, theme + "-settings-require-error.png"));
         }
         finally
         {
@@ -417,14 +448,63 @@ public static class Program
         window.CloseSettingsBy(SettingsCloseRoute.CloseButton);
     }
 
-    /// <summary>Renders the window's client area (its content's size, from the top left) to a PNG.</summary>
-    private static void Capture(OperatorWindow window, string path)
+    /// <summary>
+    /// The status window Revit shows during a hold (spec #15 "Status Window"), for a real run and for a dry run
+    /// (spec #13 "How It Works"), as PNGs. Neither holds anything: Stop does nothing here.
+    /// </summary>
+    private static void StatusWindows(string directory, string theme)
+    {
+        Directory.CreateDirectory(directory);
+        foreach (var dryRun in new[] { false, true })
+        {
+            var status = new HoldStatusWindow("Renumber the level 2 doors", DateTimeOffset.UtcNow.AddSeconds(-4), TimeSpan.FromSeconds(120), () => { }, dryRun);
+            status.Show();
+            try
+            {
+                Capture(status, Path.Combine(directory, theme + (dryRun ? "-status-dry-run.png" : "-status.png")));
+            }
+            finally
+            {
+                status.CloseForHoldEnd();
+            }
+        }
+    }
+
+    /// <summary>A stand-in for a dry run's exported view: a small floor plan drawn here, so Staged Actions mode has an image to show.</summary>
+    private static void DrawPlan(string path)
+    {
+        var visual = new DrawingVisual();
+        using (var context = visual.RenderOpen())
+        {
+            var wall = new Pen(Brushes.Black, 6);
+            var thin = new Pen(Brushes.Gray, 1.5);
+            context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 800, 520));
+            context.DrawRectangle(null, wall, new Rect(60, 60, 680, 400));
+            context.DrawLine(wall, new Point(300, 60), new Point(300, 300));
+            context.DrawLine(wall, new Point(300, 300), new Point(520, 300));
+            context.DrawLine(wall, new Point(520, 300), new Point(520, 460));
+            foreach (var door in new[] { new Point(300, 180), new Point(430, 300), new Point(520, 380) })
+                context.DrawEllipse(null, thin, door, 34, 34);
+        }
+        var bitmap = new RenderTargetBitmap(800, 520, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        Save(bitmap, path);
+    }
+
+    /// <summary>Renders the window's client area (its content and the margin around it, from the top left) to a PNG.</summary>
+    private static void Capture(Window window, string path)
     {
         window.UpdateLayout();
         var content = (FrameworkElement)window.Content;
         var bitmap = new RenderTargetBitmap(
-            (int)Math.Ceiling(content.ActualWidth), (int)Math.Ceiling(content.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+            (int)Math.Ceiling(content.ActualWidth + content.Margin.Left + content.Margin.Right),
+            (int)Math.Ceiling(content.ActualHeight + content.Margin.Top + content.Margin.Bottom), 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(window);
+        Save(bitmap, path);
+    }
+
+    private static void Save(BitmapSource bitmap, string path)
+    {
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var file = File.Create(path);

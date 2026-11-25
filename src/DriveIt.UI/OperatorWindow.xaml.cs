@@ -48,6 +48,7 @@ public partial class OperatorWindow : Window
     private bool _busy;
     private Task _settingsAction = Task.CompletedTask;
     private Task _modeAction = Task.CompletedTask;
+    private Task _refreshAction = Task.CompletedTask;
     private bool _requireDryRun;
     private bool _stagedRequested;
     private string? _stagedRunId;
@@ -502,7 +503,7 @@ public partial class OperatorWindow : Window
 
     private async void OnDeny(object sender, RoutedEventArgs e) => await DecideAsync(approve: false);
 
-    private async void OnRefresh(object sender, RoutedEventArgs e) => await RunAsync(RefreshListsAsync);
+    private void OnRefresh(object sender, RoutedEventArgs e) => _refreshAction = RunAsync(RefreshListsAsync);
 
     private async Task DecideAsync(bool approve)
     {
@@ -651,6 +652,28 @@ public partial class OperatorWindow : Window
         tab.IsChecked = true;
         tab.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, tab));
         return _modeAction;
+    }
+
+    /// <summary>Clicks Refresh and completes once both lists have been read again.</summary>
+    public Task ClickRefreshAsync()
+    {
+        _refreshAction = Task.CompletedTask;
+        RefreshButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, RefreshButton));
+        return _refreshAction;
+    }
+
+    /// <summary>Opens every "Also touched by Revit" line Staged Actions mode shows, as a click on each would.</summary>
+    public void ExpandAlsoTouched()
+    {
+        UpdateLayout();
+        Expand(StagedPanel);
+
+        static void Expand(DependencyObject node)
+        {
+            if (node is ToggleButton toggle) toggle.IsChecked = true;
+            for (var i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+                Expand(VisualTreeHelper.GetChild(node, i));
+        }
     }
 
     /// <summary>Closes the drawer the way a person would: its Close button, Esc, or a click on the dimmed area.</summary>

@@ -3,7 +3,8 @@
 # checks the settings drawer (spec #23): the main window without the time limit (AC-3), and the
 # drawer opened and closed by Close, Esc and a click outside (AC-1). -DrawerWrites adds AC-2 and
 # AC-6; it saves limits, so run it only with DRIVE_IT_DATA_DIR set to a throwaway directory.
-# -Screenshots <dir> saves the window and the open drawer in each theme as PNGs.
+# -Screenshots <dir> saves the window, the open drawer and the status window (a real run's and a dry run's) in each
+# theme as PNGs.
 # -DetectAgents adds AC-11: it presses Detect agents, which writes the current user's MCP client
 # configurations, so pass -ClientProfile <dir> (a throwaway APPDATA and CODEX_HOME for the window's
 # operator.js: Claude Desktop, both builds, and Codex/ChatGPT) unless the caller has put stand-in client
@@ -12,7 +13,8 @@
 # install itself already registers.
 # -StagedActions adds spec #13 AC-18's window half and the Require dry run switch: it turns the setting on
 # and off, fails a save, and writes dry-run receipts into run history, so run it only with DRIVE_IT_DATA_DIR
-# set to a throwaway directory. With -Screenshots it also saves the switch and Staged Actions mode.
+# set to a throwaway directory. With -Screenshots it also saves the switch, its failed save, every state of Staged
+# Actions mode and the run history with its dry-run rows.
 
 function Invoke-OperatorSelfTest {
     # Opens and closes the installed WPF window in both themes against the installed operator.js.
@@ -82,16 +84,18 @@ function Invoke-OperatorSelfTest {
         }
     }
     if ($Screenshots) {
-        $names = @('light-main', 'light-settings', 'dark-main', 'dark-settings')
+        $names = @('main', 'settings', 'status', 'status-dry-run')
         if ($DetectAgents) {
-            $names += @('light-agents', 'dark-agents')
+            $names += @('agents-running', 'agents', 'agents-error')
         }
         if ($StagedActions) {
-            $names += @('light-settings-require', 'light-staged', 'light-staged-failed', 'dark-settings-require', 'dark-staged', 'dark-staged-failed')
+            $names += @('settings-require', 'settings-require-error', 'staged-none', 'staged', 'staged-applied', 'staged-failed', 'history')
         }
-        foreach ($name in $names) {
-            if (-not [IO.File]::Exists((Join-Path $Screenshots "$name.png"))) {
-                throw "The self-test did not save the $name screenshot in $Screenshots."
+        foreach ($theme in @('light', 'dark')) {
+            foreach ($name in $names) {
+                if (-not [IO.File]::Exists((Join-Path $Screenshots "$theme-$name.png"))) {
+                    throw "The self-test did not save the $theme-$name screenshot in $Screenshots."
+                }
             }
         }
     }
