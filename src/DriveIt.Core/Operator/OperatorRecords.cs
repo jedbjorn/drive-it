@@ -94,10 +94,10 @@ public sealed class RunRecord
     /// <summary>The row's first line: the display name, or the run ID for older receipts.</summary>
     public string Title => DisplayName ?? RunId ?? "(unnamed run)";
 
-    /// <summary>The row's second line in words: "Dry run · status · held Revit 12 s · local time" (the first part only for a dry run, the third only for a held run).</summary>
+    /// <summary>The row's second line in words: "Dry run · Succeeded · held Revit 12 s · local time" (the first part only for a dry run, the third only for a held run).</summary>
     public string Meta => OperatorText.HistoryMeta(this);
 
-    /// <summary><see cref="Meta"/> without the dry-run label, which the row shows as a badge: "status · held Revit 12 s · local time".</summary>
+    /// <summary><see cref="Meta"/> without the dry-run label, which the row shows as a badge: "Succeeded · held Revit 12 s · local time".</summary>
     public string Detail => OperatorText.HistoryDetail(this);
 
     /// <summary>The details pane: the receipt as indented JSON.</summary>
@@ -173,12 +173,33 @@ public static class OperatorText
     public static string HistoryDetail(RunRecord run)
     {
         var parts = new List<string>();
-        if (!string.IsNullOrWhiteSpace(run.Status)) parts.Add(run.Status!);
+        if (!string.IsNullOrWhiteSpace(run.Status)) parts.Add(HistoryStatus(run));
         if (run.Held is { } held) parts.Add("held Revit " + HoldText.Duration(held));
         if (run.StartedAt is { } started)
             parts.Add(TimeZoneInfo.ConvertTime(started, run.TimeZone).ToString(TimeFormat, CultureInfo.InvariantCulture));
         return string.Join(HistorySeparator, parts);
     }
+
+    /// <summary>
+    /// A run's status in the words Staged Actions uses ("Succeeded", "Failed", "Stopped", "Timed out", "Denied"),
+    /// and "Pending" and "Partially applied", which only a real run can be. A status not known here is shown as stored.
+    /// </summary>
+    public static string HistoryStatus(RunRecord run)
+    {
+        var status = run.Status ?? "";
+        return status switch
+        {
+            "pending" => "Pending",
+            "partially_applied" => "Partially applied",
+            "succeeded" or "failed" or "timed_out" or "denied" => StagedText.Outcome(status, ErrorCode(run.Receipt)),
+            _ => status,
+        };
+    }
+
+    private static string? ErrorCode(JsonElement receipt) =>
+        receipt.ValueKind == JsonValueKind.Object && receipt.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object
+            ? Json.String(error, "code")
+            : null;
 
     public static string PendingLabel(PendingRequest request)
     {
