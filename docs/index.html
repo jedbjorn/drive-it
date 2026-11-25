@@ -200,9 +200,9 @@
           </article>
           <article class="feature-card">
             <span class="feature-number">02</span>
-            <h3>Rollback</h3>
-            <p>A run that fails, is stopped or times out is rolled back, apart from anything it saved first. A run that succeeds is one undo entry in Revit.</p>
-            <a href="https://github.com/jedbjorn/drive-it#safety-and-ability">Safety and ability <span aria-hidden="true">→</span></a>
+            <h3>Dry run and rollback</h3>
+            <p>The agent can dry-run a script first: it sees what the script would create, change and delete, then every change is rolled back. A real run that fails, is stopped or times out is rolled back too, apart from anything it saved first. A run that succeeds is one undo entry in Revit.</p>
+            <a href="https://github.com/jedbjorn/drive-it#dry-run">Dry run <span aria-hidden="true">→</span></a>
           </article>
           <article class="feature-card">
             <span class="feature-number">03</span>
@@ -277,6 +277,7 @@
           <ul class="check-list">
             <li>Choose the folder scripts may read and change</li>
             <li>Set how long one script may run, from 10 to 600 seconds</li>
+            <li>Require a dry run before the agent changes your model, and see what it would change</li>
             <li>Approve or deny a script that asks to reach outside the folder</li>
             <li>Read the receipt of any run, including the ones that failed</li>
           </ul>
@@ -295,6 +296,7 @@
         </div>
         <div class="doc-links">
           <a href="https://github.com/jedbjorn/drive-it#safety-and-ability"><span><strong>Safety and ability</strong><small>What a script can do, and what it costs</small></span><span aria-hidden="true">↗</span></a>
+          <a href="https://github.com/jedbjorn/drive-it#dry-run"><span><strong>Dry run</strong><small>See what a script would change before it is kept</small></span><span aria-hidden="true">↗</span></a>
           <a href="https://github.com/jedbjorn/drive-it#guardrails"><span><strong>Guardrails</strong><small>What stays out of a script's reach</small></span><span aria-hidden="true">↗</span></a>
           <a href="https://github.com/jedbjorn/drive-it#script-library"><span><strong>Script library</strong><small>Save, promote and reuse scripts</small></span><span aria-hidden="true">↗</span></a>
           <a href="https://github.com/jedbjorn/drive-it#view-capture"><span><strong>View capture</strong><small>How the agent looks at a Revit view</small></span><span aria-hidden="true">↗</span></a>
