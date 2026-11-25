@@ -3,11 +3,29 @@ using System.Text.Json;
 
 namespace DriveIt.Core.Operator;
 
-/// <summary>One readable line of Staged Actions mode, with the lines under it (ids, changed values).</summary>
-public sealed record StagedLine(string Text, IReadOnlyList<string> Details);
+/// <summary>One changed value of a modified element, before and after, as Revit displays them.</summary>
+public sealed record StagedChange(string Name, string Before, string After)
+{
+    /// <summary>"Mark: D12 → D14".</summary>
+    public override string ToString() => StagedText.Change(Name, Before, After);
+}
+
+/// <summary>One readable line of Staged Actions mode, with the plain lines under it (ids, Moved, what was left out).</summary>
+public sealed record StagedLine(string Text, IReadOnlyList<string> Details)
+{
+    /// <summary>"id 1234" for a modified element, shown apart from its name; null on a grouped line.</summary>
+    public string? Id { get; init; }
+
+    /// <summary>The changed values of a modified element, shown before <see cref="Details"/>.</summary>
+    public IReadOnlyList<StagedChange> Changes { get; init; } = [];
+}
 
 /// <summary>Created, Modified or Deleted in one document: a heading with its count, then its lines.</summary>
-public sealed record StagedGroup(string Heading, IReadOnlyList<StagedLine> Lines);
+public sealed record StagedGroup(string Heading, IReadOnlyList<StagedLine> Lines)
+{
+    /// <summary><see cref="StagedText.Created"/>, <see cref="StagedText.Modified"/> or <see cref="StagedText.Deleted"/>: which mark the heading carries.</summary>
+    public string Name { get; init; } = "";
+}
 
 /// <summary>One document a dry run changed: its groups, then "Also touched by Revit" as one collapsed line.</summary>
 public sealed record StagedDocument(string Title, IReadOnlyList<StagedGroup> Groups, string? AlsoTouched, IReadOnlyList<string> AlsoTouchedLines);
@@ -37,6 +55,9 @@ public sealed class StagedDryRun
     public bool Failed { get; init; }
 
     public string? ErrorText { get; init; }
+
+    /// <summary>Every document the dry run touched was restored; false only when Revit could not roll one back.</summary>
+    public bool RolledBack { get; init; } = true;
 
     /// <summary>The same call has since run for real and succeeded.</summary>
     public bool Applied { get; init; }
@@ -78,6 +99,7 @@ public sealed class StagedDryRun
             Outcome = outcome,
             Failed = failed,
             ErrorText = failed ? (error is { } message ? Json.String(message, "message") : null) ?? StagedText.NoError : null,
+            RolledBack = !dry.TryGetProperty("rolledBack", out var rolledBack) || rolledBack.ValueKind != JsonValueKind.False,
             Applied = dry.TryGetProperty("applied", out var applied) && applied.ValueKind == JsonValueKind.True,
             Documents = documents,
             NothingChanged = !failed && documents.All(entry => entry.Groups.Count == 0 && entry.AlsoTouched is null) ? StagedText.NothingChanged : null,
@@ -109,42 +131,44 @@ public sealed class StagedDryRun
         var lines = read(value);
         var listed = name == StagedText.Modified ? lines.Count : CountListed(value);
         if (total > listed) lines.Add(new StagedLine(StagedText.NotListed(total - listed), []));
-        groups.Add(new StagedGroup($"{name} ({total})", lines));
+        groups.Add(new StagedGroup($"{name} ({total})", lines) { Name = name });
     }
 
     private static int CountListed(JsonElement group) => Array(group, "groups").Sum(entry => Array(entry, "elements").Count());
 
-    // Created and Deleted: one line per category and type with its count, then the elements under it.
+    // Created and Deleted: one line per category and type with its count, then the elements under it, named ones by name.
     private static List<StagedLine> GroupedLines(JsonElement group) => Array(group, "groups").Select(entry =>
     {
-        var elements = Array(entry, "elements").Select(element =>
+        var elements = Array(entry, "elements").ToList();
+        var named = elements.Any(element => Json.String(element, "name") is { Length: > 0 } || Json.String(element, "readError") is not null);
+        var listed = elements.Select(element =>
         {
             var id = Id(element);
             if (Json.String(element, "readError") is { } readError) return $"{id}: {StagedText.CouldNotRead} ({readError})";
-            return Json.String(element, "name") is { Length: > 0 } name ? $"{id} {name}" : id;
+            return Json.String(element, "name") is { Length: > 0 } name ? $"{name} ({id})" : id;
         }).ToList();
         var label = Label(entry);
         var count = Int(entry, "count") ?? elements.Count;
-        return new StagedLine(count > 1 ? $"{label} × {count}" : label, elements.Count > 0 ? [string.Join(", ", elements)] : []);
+        var ids = string.Join(", ", listed);
+        return new StagedLine(count > 1 ? $"{label} × {count}" : label, listed.Count > 0 ? [named ? ids : StagedText.Ids(listed.Count, ids)] : []);
     }).ToList();
 
-    // Modified: one line per element, then each changed value as "Mark: D12 → D14", and Moved.
+    // Modified: one line per element with its id apart, then each changed value as "Mark: D12 → D14", and Moved.
     private static List<StagedLine> ModifiedLines(JsonElement group) => Array(group, "elements").Select(element =>
     {
         var details = new List<string>();
         if (Json.String(element, "readError") is { } readError) details.Add($"{StagedText.CouldNotRead} ({readError})");
-        details.AddRange(Array(element, "values").Select(value =>
-            StagedText.Change(Json.String(value, "name") ?? "", Text(value, "before"), Text(value, "after"))));
+        var changes = Array(element, "values").Select(value =>
+            new StagedChange(Json.String(value, "name") ?? "", Text(value, "before"), Text(value, "after"))).ToList();
         if (element.TryGetProperty("moved", out var moved) && moved.ValueKind == JsonValueKind.True) details.Add(StagedText.Moved);
-        var listed = Array(element, "values").Count();
-        if (Int(element, "changedValues") is int changed && changed > listed) details.Add(StagedText.MoreValues(changed - listed));
-        return new StagedLine($"{Label(element)} {Id(element)}", details);
+        if (Int(element, "changedValues") is int changed && changed > changes.Count) details.Add(StagedText.MoreValues(changed - changes.Count));
+        return new StagedLine(Label(element), details) { Id = StagedText.Ids(1, Id(element)), Changes = changes };
     }).ToList();
 
     private static StagedImage ReadImage(JsonElement image)
     {
         var name = Json.String(image, "name") ?? $"View {Id(image, "viewId")}";
-        var caption = Json.String(image, "type") is { Length: > 0 } type ? $"{name} ({type})" : name;
+        var caption = Json.String(image, "type") is { Length: > 0 } type ? $"{name} ({StagedText.ViewType(type)})" : name;
         var error = Json.String(image, "error");
         return new StagedImage(caption, error is null ? Json.String(image, "path") : null,
             error is null ? null : Json.String(image, "message") ?? error);
@@ -206,7 +230,53 @@ public static class StagedText
     public const string NoError = "The dry run did not say why.";
     public const string NoneYet = "No dry run has completed in this workspace yet. When the agent rehearses a script, it shows here.";
     public const string NothingChanged = "This dry run would change no elements.";
-    public const string IdsNote = "Ids are from the dry run: every change was rolled back, so those elements no longer exist.";
+
+    /// <summary>Under the lists. Only what a dry run created is gone after its rollback; what it modified or deleted is in the model as it was.</summary>
+    public const string IdsNote = "Ids are from the dry run. Every change was rolled back, so the elements under Created no longer exist; the others are in the model as they were.";
+
+    /// <summary>Shown while the mode reads a dry run for the first time, or waits for the one that just ended.</summary>
+    public const string Reading = "Reading the dry run…";
+
+    /// <summary>Under the name: what the lists are, for a person who did not ask for this window.</summary>
+    public const string NotAppliedLead = "Nothing has been changed. This is what the script would do when it runs for real.";
+
+    public const string AppliedLead = "The same call has since run for real and succeeded. This is what its dry run showed.";
+
+    public const string AppliedHelp = "The same script, with the same arguments, has run for real since this dry run, and succeeded.";
+
+    public const string ImagesHeading = "Images from the dry run";
+
+    public const string AlsoTouchedHelp = "Elements Revit updated as a side effect, with no parameter value or position changed: a wall re-cut by a new window, for example.";
+
+    /// <summary>The first line of a dry run that did not succeed, above its error.</summary>
+    public static string FailedLead(string outcome) => outcome switch
+    {
+        "Stopped" => "This dry run was stopped.",
+        "Timed out" => "This dry run timed out.",
+        "Denied" => "This dry run was denied.",
+        _ => "This dry run failed.",
+    };
+
+    /// <summary>Under a failed dry run's error: whether the model is as it was.</summary>
+    public static string FailedNote(bool rolledBack) => rolledBack
+        ? "Nothing was changed: the dry run was rolled back."
+        : "Revit could not roll back every change. Check the documents the error names before you go on.";
+
+    /// <summary>Revit's view type in words: "FloorPlan" as "Floor plan", "ThreeD" as "3D view".</summary>
+    public static string ViewType(string type)
+    {
+        if (type == "ThreeD") return "3D view";
+        var words = new System.Text.StringBuilder();
+        foreach (var letter in type)
+        {
+            if (char.IsUpper(letter) && words.Length > 0) words.Append(' ').Append(char.ToLowerInvariant(letter));
+            else words.Append(letter);
+        }
+        return words.ToString();
+    }
+
+    /// <summary>"id 1234" or "ids 1, 2, 3".</summary>
+    public static string Ids(int count, string ids) => $"{(count == 1 ? "id" : "ids")} {ids}";
 
     public static string Outcome(string status, string? code) => (status, code) switch
     {

@@ -2,6 +2,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -29,14 +30,15 @@ namespace DriveIt.UI;
 /// </para>
 /// <para>
 /// The drawer's Agents row runs <c>operator.js clients detect</c> with the mcp.json the window names
-/// and lists one plain line per client; a command that fails shows by the row. Results are cleared
-/// each time the drawer opens.
+/// and lists one plain line per client; a command that fails shows by the row. Results and the error
+/// are cleared each time the drawer opens and each time Detect agents is pressed.
 /// </para>
 /// <para>
 /// Require dry run (spec #13) is a switch in the drawer, saved on click; a failed save puts it back to the stored
 /// value and shows the error by the row. While it is on, a switcher at the top left offers Staged Actions mode, the
 /// whole window for the last dry run that completed (<c>operator.js staged get</c>, read each time the mode is
-/// shown), and Home. Turning it off returns the window to Home and hides the switcher.
+/// shown), and Home. Turning it off returns the window to Home and hides the switcher. While the mode reads a dry
+/// run for the first time, or waits for the one the add-in named, it says so instead of showing an older one.
 /// </para>
 /// </summary>
 public partial class OperatorWindow : Window
@@ -52,9 +54,13 @@ public partial class OperatorWindow : Window
     private bool _requireDryRun;
     private bool _stagedRequested;
     private string? _stagedRunId;
+    private bool _stagedRead;
 
     /// <summary>How long Staged Actions mode waits for a dry run the add-in named to reach run history.</summary>
     private static readonly TimeSpan StagedWait = TimeSpan.FromSeconds(15);
+
+    /// <summary>The Detect agents button while it runs.</summary>
+    private const string DetectingLabel = "Detecting…";
 
     public OperatorWindow(OperatorClient client, string mcpConfigurationPath, DriveItMode mode, ImageSource? icon = null, bool promptForMissingRoot = true)
     {
@@ -78,6 +84,7 @@ public partial class OperatorWindow : Window
         StagedTab.Content = StagedText.StagedActionsMode;
         HomeTab.Content = StagedText.HomeMode;
         StagedNoneText.Text = StagedText.NoneYet;
+        StagedReadingText.Text = StagedText.Reading;
         StagedIdsNote.Text = StagedText.IdsNote;
         AppliedText.Text = StagedText.AppliedBadge;
         if (icon is not null) Icon = icon;
@@ -163,7 +170,7 @@ public partial class OperatorWindow : Window
     public StagedDryRun? StagedRun { get; private set; }
 
     /// <summary>True while Staged Actions mode says no dry run has completed.</summary>
-    public bool StagedNoneShown => StagedNoneText.Visibility == Visibility.Visible;
+    public bool StagedNoneShown => StagedNonePanel.Visibility == Visibility.Visible;
 
     /// <summary>True while the Applied badge is shown.</summary>
     public bool AppliedShown => StagedRunPanel.Visibility == Visibility.Visible && AppliedBadge.Visibility == Visibility.Visible;
@@ -295,6 +302,14 @@ public partial class OperatorWindow : Window
 
     private void OnSaveTimeLimit(object sender, RoutedEventArgs e) => _settingsAction = SaveTimeLimitAsync();
 
+    // Enter in the box is Save limit.
+    private void OnTimeLimitKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        _settingsAction = SaveTimeLimitAsync();
+    }
+
     private Task SaveTimeLimitAsync() => RunAsync(async () =>
     {
         var seconds = ScriptTimeLimit.Parse(TimeLimitText.Text, out var error)
@@ -354,6 +369,10 @@ public partial class OperatorWindow : Window
     {
         if (!_requireDryRun) return;
         ShowMode(WindowMode.StagedActions);
+        // Until the read lands, the mode says it is reading: a first read is not a blank window, and an older dry
+        // run does not pass for the one the add-in named.
+        var reading = !_busy && (!_stagedRead || (runId is not null && StagedRun?.RunId != runId));
+        if (reading) ShowStagedReading(true);
         await RunAsync(async () =>
         {
             var waitUntil = DateTimeOffset.Now + StagedWait;
@@ -365,6 +384,22 @@ public partial class OperatorWindow : Window
             }
             ShowStaged(staged);
         }, ShowStagedError);
+        if (reading) ShowStagedReading(false);
+    }
+
+    /// <summary>The reading line in place of the dry run; when a read failed, what was shown before it comes back.</summary>
+    private void ShowStagedReading(bool reading)
+    {
+        StagedReadingText.Visibility = reading ? Visibility.Visible : Visibility.Collapsed;
+        if (reading)
+        {
+            StagedNonePanel.Visibility = Visibility.Collapsed;
+            StagedRunPanel.Visibility = Visibility.Collapsed;
+        }
+        else if (_stagedRead && StagedNonePanel.Visibility != Visibility.Visible)
+        {
+            StagedRunPanel.Visibility = StagedRun is null ? Visibility.Collapsed : Visibility.Visible;
+        }
     }
 
     private void ShowMode(WindowMode mode)
@@ -378,26 +413,37 @@ public partial class OperatorWindow : Window
 
     private void ShowStaged(StagedDryRun? run)
     {
+        _stagedRead = true;
         StagedRun = run;
-        StagedNoneText.Visibility = run is null ? Visibility.Visible : Visibility.Collapsed;
+        StagedNonePanel.Visibility = run is null ? Visibility.Visible : Visibility.Collapsed;
         StagedRunPanel.Visibility = run is null ? Visibility.Collapsed : Visibility.Visible;
         if (run is null) return;
         StagedTitle.Text = run.Title;
         StagedMeta.Text = run.Meta;
         AppliedBadge.Visibility = run.Applied ? Visibility.Visible : Visibility.Collapsed;
+        StagedFailureLead.Text = StagedText.FailedLead(run.Outcome);
         StagedFailureText.Text = run.ErrorText ?? "";
-        StagedFailurePanel.Visibility = run.Failed ? Visibility.Visible : Visibility.Collapsed;
+        StagedFailurePanel.Visibility = Shown(run.Failed);
+        StagedFailureNote.Text = StagedText.FailedNote(run.RolledBack);
+        StagedFailureNote.Visibility = Shown(run.Failed);
+        var listed = run.Documents.Count > 0 && run.NothingChanged is null;
+        StagedLead.Text = run.Applied ? StagedText.AppliedLead : StagedText.NotAppliedLead;
+        StagedLead.Visibility = Shown(listed);
         StagedNothingText.Text = run.NothingChanged ?? "";
-        StagedNothingText.Visibility = run.NothingChanged is null ? Visibility.Collapsed : Visibility.Visible;
+        StagedNothingText.Visibility = Shown(run.NothingChanged is not null);
         StagedDocuments.ItemsSource = run.Documents;
         StagedImages.ItemsSource = run.Images.Select(image =>
         {
             var picture = LoadImage(image.Path);
             return new StagedImageView(image.Caption, picture, image.Error ?? (image.Path is not null && picture is null ? StagedImageView.NotKept : null));
         }).ToList();
+        StagedImagesPanel.Visibility = Shown(run.Images.Count > 0);
         StagedWorksharing.ItemsSource = run.Worksharing;
-        StagedIdsNote.Visibility = run.Documents.Count > 0 && run.NothingChanged is null ? Visibility.Visible : Visibility.Collapsed;
+        StagedIdsNote.Visibility = Shown(listed);
+        StagedPanel.ScrollToHome();
     }
+
+    private static Visibility Shown(bool shown) => shown ? Visibility.Visible : Visibility.Collapsed;
 
     private void ShowStagedError(string? message)
     {
@@ -433,7 +479,12 @@ public partial class OperatorWindow : Window
 
         void Collect(DependencyObject node)
         {
-            if (node is TextBlock { IsVisible: true } text && text.Text.Length > 0) lines.Add(text.Text);
+            if (node is TextBlock { IsVisible: true } text)
+            {
+                // A line made of runs (a name with its id, a value before and after) has no Text of its own.
+                var shown = text.Text.Length > 0 ? text.Text : string.Concat(text.Inlines.OfType<Run>().Select(run => run.Text)).TrimEnd();
+                if (shown.Length > 0) lines.Add(shown);
+            }
             for (var i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
                 Collect(VisualTreeHelper.GetChild(node, i));
         }
@@ -441,10 +492,21 @@ public partial class OperatorWindow : Window
 
     private void OnDetectAgents(object sender, RoutedEventArgs e) => _settingsAction = DetectAgentsAsync();
 
-    private Task DetectAgentsAsync()
+    /// <summary>Clears the last results and error first, so nothing stale shows while it runs; the button says it is running.</summary>
+    private async Task DetectAgentsAsync()
     {
         ShowAgents(null);
-        return RunAsync(async () => ShowAgents(await _client.DetectAgentsAsync(_mcpConfigurationPath)), ShowAgentsError);
+        ShowAgentsError(null);
+        var label = DetectAgentsButton.Content;
+        DetectAgentsButton.Content = DetectingLabel;
+        try
+        {
+            await RunAsync(async () => ShowAgents(await _client.DetectAgentsAsync(_mcpConfigurationPath)), ShowAgentsError);
+        }
+        finally
+        {
+            DetectAgentsButton.Content = label;
+        }
     }
 
     private void ShowAgents(IReadOnlyList<AgentResult>? rows)

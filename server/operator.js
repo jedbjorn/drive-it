@@ -47,6 +47,8 @@ try {
     process.exitCode = 2;
   }
 } catch (error) {
-  console.error(`${error.code || "OPERATOR_COMMAND_FAILED"}: ${error.message}`);
+  // Node's own errors already begin with their code ("EACCES: permission denied, open ..."); say it once.
+  const code = error.code || "OPERATOR_COMMAND_FAILED";
+  console.error(String(error.message).startsWith(`${code}:`) ? error.message : `${code}: ${error.message}`);
   process.exitCode = 1;
 }

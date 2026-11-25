@@ -47,7 +47,7 @@ internal static class RequireDryRunRules
 
     public static string NotAllowedMessage(string operation, string reason) =>
         $"{operation} is not allowed while Require dry run is on: {reason}, and Drive-It leaves that to the person. "
-        + "Do not retry it. Tell the user which documents have unsaved changes and ask them to save in Revit, or to turn Require dry run off in the Drive-It window if they want you to save.";
+        + "Do not retry it. Tell the user which documents have unsaved changes and ask them to save in Revit, or to turn Require dry run off in the Drive-It window's Settings if they want you to save.";
 
     /// <summary>D10: closing a document that has unsaved changes would discard them for good.</summary>
     public static RequestRejectedException CloseChanged(string operation, Document document) => new(NotAllowed,

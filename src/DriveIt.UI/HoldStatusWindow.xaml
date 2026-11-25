@@ -34,10 +34,19 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
-            <TextBlock x:Name="NameText" Grid.ColumnSpan="2" Style="{StaticResource SectionText}"
+            <TextBlock x:Name="NameText" Style="{StaticResource SectionText}"
                        TextWrapping="Wrap" AutomationProperties.AutomationId="HoldName" />
-            <TextBlock x:Name="PauseText" Grid.Row="1" Grid.ColumnSpan="2" TextWrapping="Wrap"
-                       AutomationProperties.AutomationId="HoldPause" />
+            <!-- A dry run is labelled as one (spec #13 "How It Works"), beside its name. -->
+            <Border x:Name="DryRunBadge" Grid.Column="1" Margin="12,0,0,6" VerticalAlignment="Top" HorizontalAlignment="Right"
+                    Style="{StaticResource Badge}" Visibility="Collapsed"
+                    AutomationProperties.AutomationId="HoldDryRun">
+                <TextBlock x:Name="DryRunBadgeText" Style="{StaticResource BadgeText}" />
+            </Border>
+            <StackPanel Grid.Row="1" Grid.ColumnSpan="2">
+                <TextBlock x:Name="PauseText" TextWrapping="Wrap" AutomationProperties.AutomationId="HoldPause" />
+                <TextBlock x:Name="DryRunNoteText" Margin="0,2,0,0" Style="{StaticResource MutedText}" TextWrapping="Wrap"
+                           Visibility="Collapsed" AutomationProperties.AutomationId="HoldDryRunNote" />
+            </StackPanel>
             <TextBlock x:Name="ProgressText" Grid.Row="2" Margin="0,8,0,0" VerticalAlignment="Center"
                        Style="{StaticResource MutedText}" AutomationProperties.AutomationId="HoldProgress" />
             <Button x:Name="StopButton" Grid.Row="2" Grid.Column="1" Margin="12,8,0,0" MinWidth="88"

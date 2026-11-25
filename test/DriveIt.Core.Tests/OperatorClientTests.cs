@@ -54,7 +54,11 @@ public class OperatorClientTests
     {
         var runner = new FakeRunner().Fail("workspace get", "EACCES: permission denied\n");
         var error = await Assert.ThrowsAsync<OperatorException>(() => new OperatorClient(runner).GetWorkspaceAsync());
-        Assert.Equal("Drive It operator command failed (1): EACCES: permission denied", error.Message);
+        Assert.Equal("Drive-It could not finish that. EACCES: permission denied", error.Message);
+        // The catch-all code says nothing a person can use; with no reason at all, the exit code is what there is.
+        Assert.Equal("Drive-It could not finish that. mcp.json does not exist; reinstall Drive-It",
+            OperatorText.CommandFailed(1, "OPERATOR_COMMAND_FAILED: mcp.json does not exist; reinstall Drive-It\n"));
+        Assert.Equal("Drive-It could not finish that (exit code 2).", OperatorText.CommandFailed(2, " "));
     }
 
     [Fact]
@@ -194,6 +198,8 @@ public class OperatorClientTests
 
         Assert.True(run.DryRun);
         Assert.Equal("Dry run · succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Meta);
+        // The row shows the label as a badge and the rest beside it.
+        Assert.Equal("succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Detail);
         Assert.Equal("Delete the old stair · Dry run · succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Label);
     }
 
@@ -213,8 +219,8 @@ public class OperatorClientTests
     public void HoldText_LabelsADryRun()
     {
         Assert.Equal("Drive-It · Dry run", HoldText.DryRunWindowTitle);
-        Assert.StartsWith("Dry run: Revit is paused until this finishes", HoldText.DryRunPauseSentence);
-        Assert.Contains("rolled back", HoldText.DryRunPauseSentence);
+        Assert.Equal("Dry run", HoldText.DryRunLabel);
+        Assert.Contains("rolled back", HoldText.DryRunNote);
     }
 
     [Fact]

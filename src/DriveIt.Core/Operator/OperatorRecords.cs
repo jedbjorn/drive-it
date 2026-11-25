@@ -94,8 +94,11 @@ public sealed class RunRecord
     /// <summary>The row's first line: the display name, or the run ID for older receipts.</summary>
     public string Title => DisplayName ?? RunId ?? "(unnamed run)";
 
-    /// <summary>The row's second line: "Dry run · status · held Revit 12 s · local time" (the first part only for a dry run, the third only for a held run).</summary>
+    /// <summary>The row's second line in words: "Dry run · status · held Revit 12 s · local time" (the first part only for a dry run, the third only for a held run).</summary>
     public string Meta => OperatorText.HistoryMeta(this);
+
+    /// <summary><see cref="Meta"/> without the dry-run label, which the row shows as a badge: "status · held Revit 12 s · local time".</summary>
+    public string Detail => OperatorText.HistoryDetail(this);
 
     /// <summary>The details pane: the receipt as indented JSON.</summary>
     public string Details => OperatorText.PrettyJson(Receipt);
@@ -162,8 +165,14 @@ public static class OperatorText
 
     public static string HistoryMeta(RunRecord run)
     {
+        var detail = HistoryDetail(run);
+        if (!run.DryRun) return detail;
+        return detail.Length == 0 ? HoldText.DryRunLabel : HoldText.DryRunLabel + HistorySeparator + detail;
+    }
+
+    public static string HistoryDetail(RunRecord run)
+    {
         var parts = new List<string>();
-        if (run.DryRun) parts.Add(HoldText.DryRunLabel);
         if (!string.IsNullOrWhiteSpace(run.Status)) parts.Add(run.Status!);
         if (run.Held is { } held) parts.Add("held Revit " + HoldText.Duration(held));
         if (run.StartedAt is { } started)
@@ -199,4 +208,16 @@ public static class OperatorText
     }
 
     public static string PrettyJson(JsonElement element) => JsonSerializer.Serialize(element, Indented);
+
+    /// <summary>
+    /// What the window shows when an operator.js command fails: its reason in a sentence. operator.js prints
+    /// "CODE: message"; the catch-all code says nothing a person can use and is left out.
+    /// </summary>
+    public static string CommandFailed(int exitCode, string standardError)
+    {
+        const string catchAll = "OPERATOR_COMMAND_FAILED: ";
+        var reason = standardError.Trim();
+        if (reason.StartsWith(catchAll, StringComparison.Ordinal)) reason = reason[catchAll.Length..];
+        return reason.Length == 0 ? $"Drive-It could not finish that (exit code {exitCode})." : "Drive-It could not finish that. " + reason;
+    }
 }

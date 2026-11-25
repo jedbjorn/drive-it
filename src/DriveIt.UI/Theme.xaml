@@ -4,6 +4,7 @@
     Changes: namespaces (DriveIt.UI, DriveIt.Core); comments say Drive-It for Drive-It; the text
     box menu headers come from DriveIt.UI's UiStrings (English constants) instead of splash-it's
     UiStrings.resx. Every style is kept, used or not, so the family theme stays one file.
+    Addition: Badge and BadgeText (the Dry run and Applied labels), after the banners.
 -->
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -637,6 +638,25 @@
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="3" />
         <Setter Property="Padding" Value="10,6" />
+    </Style>
+
+    <!--
+        Badges (a Drive-It addition): a short label on a tinted pill, such as "Dry run" on a run and
+        "Applied" on a dry run. The outline keeps it visible on a selected row, whose fill is the same tint.
+    -->
+    <Style x:Key="Badge" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource InfoSoftBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource InfoBorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="9" />
+        <Setter Property="Padding" Value="8,0,8,1" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+    </Style>
+    <Style x:Key="BadgeText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
     </Style>
 
     <!--

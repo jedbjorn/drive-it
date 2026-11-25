@@ -45,11 +45,11 @@ public sealed class ProcessOperatorRunner(OperatorHost host) : IOperatorRunner
         Process process;
         try
         {
-            process = Process.Start(start) ?? throw new OperatorException($"Drive It could not start {launch.Node}.");
+            process = Process.Start(start) ?? throw new OperatorException($"Drive-It could not start {launch.Node}.");
         }
         catch (System.ComponentModel.Win32Exception exception)
         {
-            throw new OperatorException($"Drive It could not start {launch.Node}: {exception.Message}");
+            throw new OperatorException($"Drive-It could not start {launch.Node}: {exception.Message}");
         }
         using (process)
         {
@@ -71,7 +71,7 @@ public sealed class ProcessOperatorRunner(OperatorHost host) : IOperatorRunner
                     // Already exited.
                 }
                 if (cancellationToken.IsCancellationRequested) throw;
-                throw new OperatorException($"Drive It operator command timed out after {Timeout.TotalSeconds:0} seconds: {string.Join(' ', arguments)}");
+                throw new OperatorException($"Drive-It operator command timed out after {Timeout.TotalSeconds:0} seconds: {string.Join(' ', arguments)}");
             }
         }
     }
@@ -103,7 +103,7 @@ public sealed class OperatorClient(IOperatorRunner runner)
     {
         if (string.IsNullOrWhiteSpace(root)) throw new OperatorException("Choose a workspace folder first.");
         var result = await runner.RunAsync(["workspace", "set", root.Trim()], cancellationToken).ConfigureAwait(false);
-        return ReadRoot(Parse(result)) ?? throw new OperatorException("Drive It did not report the saved workspace root.");
+        return ReadRoot(Parse(result)) ?? throw new OperatorException("Drive-It did not report the saved workspace root.");
     }
 
     /// <summary>The outside-root requests still waiting for a decision, oldest first.</summary>
@@ -170,7 +170,7 @@ public sealed class OperatorClient(IOperatorRunner runner)
         if (document?.RootElement is { ValueKind: JsonValueKind.Object } root
             && root.TryGetProperty(RequireDryRun.PropertyName, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False)
             return value.GetBoolean();
-        throw new OperatorException("Drive It did not report the Require dry run setting.");
+        throw new OperatorException("Drive-It did not report the Require dry run setting.");
     }
 
     /// <summary>The last dry run that completed in this workspace (spec #13 "The dry run shown"), or null when there is none.</summary>
@@ -207,7 +207,7 @@ public sealed class OperatorClient(IOperatorRunner runner)
             foreach (var row in array.EnumerateArray())
                 if (Json.String(row, "message") is { Length: > 0 } message)
                     rows.Add(new AgentResult(Json.String(row, "client") ?? "", Json.String(row, "status") ?? "", message));
-        if (rows.Count == 0) throw new OperatorException("Drive It did not report any agents.");
+        if (rows.Count == 0) throw new OperatorException("Drive-It did not report any agents.");
         return rows;
     }
 
@@ -218,14 +218,14 @@ public sealed class OperatorClient(IOperatorRunner runner)
             && value.ValueKind == JsonValueKind.Number
             && value.TryGetInt32(out var seconds))
             return seconds;
-        throw new OperatorException("Drive It did not report the script time limit.");
+        throw new OperatorException("Drive-It did not report the script time limit.");
     }
 
     /// <summary>The command's JSON, or null for empty output; a non-zero exit is an <see cref="OperatorException"/>.</summary>
     private static JsonDocument? Parse(OperatorResult result)
     {
         if (result.ExitCode != 0)
-            throw new OperatorException($"Drive It operator command failed ({result.ExitCode}): {result.StandardError.Trim()}");
+            throw new OperatorException(OperatorText.CommandFailed(result.ExitCode, result.StandardError));
         if (string.IsNullOrWhiteSpace(result.StandardOutput)) return null;
         try
         {
@@ -233,7 +233,7 @@ public sealed class OperatorClient(IOperatorRunner runner)
         }
         catch (JsonException exception)
         {
-            throw new OperatorException($"Drive It operator returned unreadable output: {exception.Message}");
+            throw new OperatorException($"Drive-It operator returned unreadable output: {exception.Message}");
         }
     }
 

@@ -8,8 +8,8 @@ namespace DriveIt.UI;
 
 /// <summary>
 /// One hold's status window: the run's name, "Revit is paused until this finishes", the time
-/// elapsed and the limit, and Stop. Created, updated and closed only on <see cref="HoldStatus"/>'s
-/// thread.
+/// elapsed and the limit, and Stop. A dry run adds a Dry run badge beside the name and a line saying
+/// nothing is kept. Created, updated and closed only on <see cref="HoldStatus"/>'s thread.
 /// </summary>
 public partial class HoldStatusWindow : Window
 {
@@ -26,10 +26,17 @@ public partial class HoldStatusWindow : Window
         _startedAt = startedAt;
         _limit = limit;
         _stop = stop;
-        // A dry run is labelled as one (spec #13 "How It Works"): its changes are rolled back whatever happens.
         Title = dryRun ? HoldText.DryRunWindowTitle : HoldText.WindowTitle;
         NameText.Text = HoldText.Name(displayName);
-        PauseText.Text = dryRun ? HoldText.DryRunPauseSentence : HoldText.PauseSentence;
+        PauseText.Text = HoldText.PauseSentence;
+        // A dry run is labelled as one (spec #13 "How It Works"): its changes are rolled back whatever happens.
+        if (dryRun)
+        {
+            DryRunBadgeText.Text = HoldText.DryRunLabel;
+            DryRunBadge.Visibility = Visibility.Visible;
+            DryRunNoteText.Text = HoldText.DryRunNote;
+            DryRunNoteText.Visibility = Visibility.Visible;
+        }
         StopButton.Content = HoldText.StopLabel;
         _clock = new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Normal, (_, _) => Tick(), Dispatcher);
         Tick();
