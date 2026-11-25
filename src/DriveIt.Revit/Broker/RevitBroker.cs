@@ -17,12 +17,16 @@ public sealed class RevitBroker
     };
 
     private const int RecentHolds = 32;
+    /// <summary>The longest a documents.list waits for Revit's thread: a run's whole time limit at most (decision #53).</summary>
+    private const int MaximumDocumentsWaitMs = 600_000;
 
     private readonly RevitRequestHandler handler;
     private readonly ExternalEvent externalEvent;
     private readonly HoldHandler holdHandler;
     private readonly ExternalEvent holdEvent;
     private readonly LinkedList<HeldRun> recent = new();
+    private readonly DocumentsHandler documentsHandler;
+    private readonly ExternalEvent documentsEvent;
 
     public RevitBroker(UIControlledApplication application)
     {
@@ -31,6 +35,8 @@ public sealed class RevitBroker
         externalEvent = ExternalEvent.Create(handler);
         holdHandler = new HoldHandler(dispatcher);
         holdEvent = ExternalEvent.Create(holdHandler);
+        documentsHandler = new DocumentsHandler(dispatcher);
+        documentsEvent = ExternalEvent.Create(documentsHandler);
     }
 
     /// <summary>
@@ -49,8 +55,11 @@ public sealed class RevitBroker
 
     public async Task<string> ExecuteAsync(string json, CancellationToken cancellationToken)
     {
-        if (RequestType(json) == "api.describe")
+        var type = RequestType(json);
+        if (type == "api.describe")
             return Describe(json);
+        if (type == DocumentsRequestType)
+            return await ListDocumentsAsync(json, cancellationToken).ConfigureAwait(false);
         BrokerRequest? request;
         try
         {
@@ -120,7 +129,8 @@ public sealed class RevitBroker
             return;
         }
 
-        var run = new HeldRun(request.Id, request.Hold.DisplayName, request.Hold.TimeLimitMs, request.Hold.DryRun, request.Hold.RequireDryRun);
+        var run = new HeldRun(request.Id, request.Hold.DisplayName, request.Hold.TimeLimitMs, request.Hold.DryRun, request.Hold.RequireDryRun,
+            request.Hold.Targets);
         Remember(run);
         holdHandler.Prepare(run);
         var raised = holdEvent.Raise();
@@ -194,6 +204,46 @@ public sealed class RevitBroker
         }.ToJsonString(JsonOptions);
     }
 
+    internal const string DocumentsRequestType = "documents.list";
+
+    /// <summary>
+    /// Spec #28 "Open Documents": the open documents, read on Revit's thread, with a run's targets resolved. The wait for
+    /// Revit's thread is bounded by the request's waitMs: past it the reply is busy and the pipe is free again, so a dialog
+    /// open in Revit never holds it (flag #15). The read stays queued and serves the next documents.list once Revit is free.
+    /// </summary>
+    private async Task<string> ListDocumentsAsync(string json, CancellationToken cancellationToken)
+    {
+        string id;
+        DocumentsRequest request;
+        try
+        {
+            var node = JsonNode.Parse(json)!.AsObject();
+            id = node["id"] is JsonValue value && value.TryGetValue<string>(out var text) ? text : "";
+            request = node["documents"]?.Deserialize<DocumentsRequest>(JsonOptions) ?? new DocumentsRequest();
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return InvalidRequest("", "invalid_request", exception.Message, DocumentsRequestType);
+        }
+        if (string.IsNullOrWhiteSpace(id) || id.Length > 128)
+            return InvalidRequest(id, "invalid_request", "A request id of 1 to 128 characters is required.", DocumentsRequestType);
+
+        var reply = documentsHandler.Prepare(id, request);
+        var raised = documentsEvent.Raise();
+        if (raised is not (ExternalEventRequest.Accepted or ExternalEventRequest.Pending))
+            return Busy(id);
+        var wait = TimeSpan.FromMilliseconds(Math.Clamp(request.WaitMs ?? MaximumDocumentsWaitMs, 1, MaximumDocumentsWaitMs));
+        var answered = await Task.WhenAny(reply, Task.Delay(wait, cancellationToken)).ConfigureAwait(false);
+        return answered == reply ? await reply.ConfigureAwait(false) : Busy(id);
+    }
+
+    private static string Busy(string id) => new JsonObject
+    {
+        ["id"] = id,
+        ["type"] = DocumentsRequestType,
+        ["status"] = "busy",
+    }.ToJsonString();
+
     /// <summary>revit.describe outside a hold: reflection over the loaded RevitAPI, without Revit's thread.</summary>
     private static string Describe(string json)
     {
@@ -258,6 +308,50 @@ public sealed class RevitBroker
         }
 
         public string GetName() => "Drive It hold";
+    }
+
+    /// <summary>
+    /// documents.list on Revit's thread, with its own ExternalEvent so a read left waiting never takes another request's
+    /// place. Only the latest read is served: one that timed out is replaced by the next, and nobody waits on it.
+    /// </summary>
+    private sealed class DocumentsHandler(DocumentDispatcher dispatcher) : IExternalEventHandler
+    {
+        private readonly object gate = new();
+        private (string Id, DocumentsRequest Request, TaskCompletionSource<string> Reply)? next;
+
+        public Task<string> Prepare(string id, DocumentsRequest request)
+        {
+            var reply = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (gate)
+                next = (id, request, reply);
+            return reply.Task;
+        }
+
+        public void Execute(UIApplication application)
+        {
+            (string Id, DocumentsRequest Request, TaskCompletionSource<string> Reply)? taken;
+            lock (gate)
+            {
+                taken = next;
+                next = null;
+            }
+            if (taken is not { } item)
+                return;
+            try
+            {
+                item.Reply.TrySetResult(dispatcher.ListDocuments(application, item.Id, item.Request).ToJsonString());
+            }
+            catch (RequestRejectedException exception)
+            {
+                item.Reply.TrySetResult(InvalidRequest(item.Id, exception.Code, exception.Message, DocumentsRequestType));
+            }
+            catch (Exception exception)
+            {
+                item.Reply.TrySetResult(InvalidRequest(item.Id, "revit_operation_failed", exception.Message, DocumentsRequestType));
+            }
+        }
+
+        public string GetName() => "Drive It open documents";
     }
 
     private sealed class RevitRequestHandler(DocumentDispatcher dispatcher) : IExternalEventHandler

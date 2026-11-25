@@ -60,13 +60,19 @@ function Get-Field($Object, [string]$Name) {
     return $property.Value
 }
 
-function Invoke-Broker([object[]]$Operations, $Document = $null, [string]$Root = $WorkspaceRoot, $Approval = $null) {
+# Spec #28: a write names the documents it changes; by default the one the batch carries. $Targets names them when the
+# batch reaches another one, as get_active_document does.
+function Invoke-Broker([object[]]$Operations, $Document = $null, [string]$Root = $WorkspaceRoot, $Approval = $null, [object[]]$Targets = $null) {
+    if ($null -eq $Targets) {
+        $Targets = if ($null -ne $Document -and $Document.uniqueId) { @($Document.uniqueId) } else { @() }
+    }
     $request = @{
         id = [guid]::NewGuid().ToString("N")
         type = "model.execute"
         workspaceRoot = $Root
         document = $Document
         operations = $Operations
+        targets = @($Targets)
     }
     if ($null -ne $Approval) { $request.outsideRootApproval = $Approval }
     $json = ConvertTo-Json -InputObject $request -Depth 12 -Compress
@@ -652,7 +658,8 @@ Pass "list_views_marks_3d_view_capturable"
 # Bad input fails with its code and no result. No document target: the error names the fix.
 $untargeted = Invoke-Broker @(Op "find_elements" @{ category = "Walls" }) $null
 Assert-Failure $untargeted "document_not_open" "find_elements with no document target"
-Assert-True ($untargeted.error.message -match "revit\.get_active_document\(\)" -and $untargeted.error.message -match "document=") "document_not_open does not name the fix: $($untargeted.error.message)"
+# Spec #28: the fix it names is targets on the call, or a document the script opens or creates.
+Assert-True ($untargeted.error.message -match "Pass targets on the execute_script call" -and $untargeted.error.message -match "open or create a document") "document_not_open does not name the fix: $($untargeted.error.message)"
 Assert-Failure (Invoke-Broker @(Op "find_elements" @{ category = "Wals" }) (Target $documentId)) "unknown_category" "unknown category"
 $unknown = Invoke-Broker @(Op "list_types" @{ category = "OST_NotACategory" }) (Target $documentId)
 Assert-Failure $unknown "unknown_category" "unknown OST_ category"
@@ -720,7 +727,7 @@ try {
             @{ label = "delete after get_active_document"; operation = "delete_document"; target = $null }
         )
         foreach ($case in $cases) {
-            $refused = Invoke-Broker @((Op "get_active_document"), (Op $case.operation)) $case.target $narrowRoot
+            $refused = Invoke-Broker @((Op "get_active_document"), (Op $case.operation)) $case.target $narrowRoot $null @($documentId)
             Assert-Status $refused "policy_required" $case.label
             $requests = @($refused.policyRequests | Where-Object { $_.operation -eq $case.operation })
             Assert-True ($requests.Count -eq 1 -and @($requests[0].paths).Count -eq 1 -and (Same-Path $requests[0].paths[0] $document.path)) "$($case.label): policyRequests $($refused.policyRequests | ConvertTo-Json -Compress -Depth 4)"
@@ -732,10 +739,10 @@ try {
         Pass "outside_root_save_delete_after_get_active_document_policy_required"
 
         $approval = @{ decisionId = "primitives-$([guid]::NewGuid().ToString('N'))"; grants = @(@{ operation = "save_document"; paths = @($document.path) }) }
-        $approved = Invoke-Broker @((Op "get_active_document"), (Op "save_document")) (Target $backgroundId) $narrowRoot $approval
+        $approved = Invoke-Broker @((Op "get_active_document"), (Op "save_document")) (Target $backgroundId) $narrowRoot $approval @($documentId)
         Assert-Status $approved "succeeded" "approved save after get_active_document"
         Assert-True (@($approved.affectedFiles).Count -eq 1 -and (Same-Path $approved.affectedFiles[0] $document.path)) "Approved save affectedFiles: $($approved.affectedFiles -join ', ')"
-        $inside = Invoke-Broker @((Op "get_active_document"), (Op "save_document")) $null
+        $inside = Invoke-Broker @((Op "get_active_document"), (Op "save_document")) $null $WorkspaceRoot $null @($documentId)
         Assert-Status $inside "succeeded" "inside-root save after get_active_document"
         Assert-True (@($inside.affectedFiles).Count -eq 1 -and (Same-Path $inside.affectedFiles[0] $document.path)) "Inside-root save affectedFiles: $($inside.affectedFiles -join ', ')"
         Pass "approved_and_inside_root_save_after_get_active_document"

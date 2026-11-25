@@ -116,6 +116,10 @@ internal static class Guardrails
     public static bool CreatesDocument(Type type, string member) =>
         BuiltInOnly.Any(entry => entry.Instead is ("create_document" or "edit_family") && entry.Member == member && entry.Owner.IsAssignableFrom(type));
 
+    /// <summary>A member that opens a document by path, as open_document does (Dev Mode only).</summary>
+    public static bool OpensDocument(Type type, string member) =>
+        BuiltInOnly.Any(entry => entry.Instead == "open_document" && entry.Member == member && entry.Owner.IsAssignableFrom(type));
+
     /// <summary>True for a Document call that needs the run's group on that document closed first (Dev Mode only).</summary>
     public static bool IsCommitPoint(Type type, string member) => typeof(Document).IsAssignableFrom(type) && CommitPoints.Contains(member);
 

@@ -297,7 +297,10 @@ public static class Program
             new { viewId = "312045", name = "Level 2", type = "FloorPlan", document = "Tower", path = plan },
             new { viewId = "198877", name = "Door Schedule", type = "Schedule", document = "Tower", error = "UNSUPPORTED_VIEW_TYPE", message = "A schedule cannot be exported as an image." },
         };
-        string Receipt(string runId, bool dryRun, string status, object? error = null, object? actions = null)
+        // Spec #28: run history shows each run's target titles, one or the first and a count.
+        object Target(string title) => new { uniqueId = "self-test-" + title, title, path = @"C:\models\" + title, kind = "rvt" };
+        var tower = new[] { Target("Tower.rvt") };
+        string Receipt(string runId, bool dryRun, string status, object? error = null, object? actions = null, object[]? targets = null)
         {
             clock = clock.AddSeconds(1);
             const string call = """{"codeHash":"self-test","script":null,"arguments":{},"processId":1,"document":null}""";
@@ -311,6 +314,7 @@ public static class Program
                 ["status"] = status,
                 ["session"] = new { processId = 1 },
                 ["document"] = new { title = "Tower", path = @"C:\models\Tower.rvt" },
+                ["targets"] = targets ?? tower,
                 ["workspaceRoot"] = root,
                 ["error"] = error,
                 ["held"] = new { ms = 1840, calls = 6 },
@@ -396,7 +400,7 @@ public static class Program
         var writeLater = Task.Run(async () =>
         {
             await Task.Delay(1500);
-            Receipt(laterId, dryRun: true, "succeeded", actions: actions);
+            Receipt(laterId, dryRun: true, "succeeded", actions: actions, targets: [Target("Tower.rvt"), Target("Annex.rvt"), Target("Site.rvt")]);
         });
         await Within(window.ShowStagedAsync(laterId), "Staged Actions mode did not wait for the named dry run.");
         await writeLater;

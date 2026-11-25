@@ -24,7 +24,7 @@ function workerLaunch(mode) {
   };
 }
 
-export function runWorker({ source, args, processId, document, runId, pythonPath, cwd, timeoutMs, onRequest, signal, mode = STANDARD, dryRun = false, requireDryRun = null }) {
+export function runWorker({ source, args, processId, document, runId, pythonPath, cwd, timeoutMs, onRequest, signal, mode = STANDARD, dryRun = false, requireDryRun = null, targets = [] }) {
   return new Promise((resolve, reject) => {
     const launch = workerLaunch(mode);
     const child = spawn(pythonPath || defaultPythonPath(), launch.args, {
@@ -119,6 +119,6 @@ export function runWorker({ source, args, processId, document, runId, pythonPath
     child.stdin.on("error", error => {
       if (!settled && error.code !== "EPIPE") finish(error);
     });
-    child.stdin.write(`${JSON.stringify({ type: "run", source, arguments: args, processId, document, runId, mode, dryRun, requireDryRun })}\n`);
+    child.stdin.write(`${JSON.stringify({ type: "run", source, arguments: args, processId, document, targets, runId, mode, dryRun, requireDryRun })}\n`);
   });
 }

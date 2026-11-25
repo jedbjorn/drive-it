@@ -27,6 +27,9 @@ async function fixture(t) {
   const make = () => new Runtime({
     dataDir,
     sessionReader: async processId => ({ processId, version: "2026", build: "test", connectionIdentity: "test-session" }),
+    // Spec #28: the add-in resolves a run's document before its script starts; this stand-in knows every uniqueId,
+    // and a path names no open document.
+    documentReader: async (processId, { targets, document }) => ({ status: "succeeded", targets: (targets ?? (document.uniqueId ? [document.uniqueId] : [])).map(uniqueId => ({ uniqueId, title: "Fixture", path: null, kind: "rvt" })) }),
   });
   const runtime = make();
   await runtime.workspace.setRoot(root);

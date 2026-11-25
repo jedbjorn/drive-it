@@ -67,6 +67,11 @@ function Invoke-Broker([hashtable]$Request, [string]$Type = "model.execute") {
     $Request.type = $Type
     if ($Type -eq "model.execute") {
         $Request.workspaceRoot = $WorkspaceRoot
+        # Spec #28: a write names the documents it changes. Each request here works on the document it carries, or on
+        # one it opens or creates itself, which needs no target.
+        if (-not $Request.ContainsKey("targets")) {
+            $Request.targets = @(Document-Targets $Request.document)
+        }
     }
     $json = $Request | ConvertTo-Json -Depth 12 -Compress
     $pipe = $null
@@ -106,6 +111,11 @@ function Invoke-Broker([hashtable]$Request, [string]$Type = "model.execute") {
 
 function Document-Target([string]$UniqueId) {
     return @{ uniqueId = $UniqueId; path = $null }
+}
+
+function Document-Targets($Document) {
+    if ($null -ne $Document -and $Document.uniqueId) { return @($Document.uniqueId) }
+    return @()
 }
 
 # view.capture mirrors the MCP server's file handoff: an empty staging directory under

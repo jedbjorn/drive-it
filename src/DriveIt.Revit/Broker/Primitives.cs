@@ -330,7 +330,7 @@ public sealed partial class DocumentDispatcher
         var uiDocument = application.ActiveUIDocument;
         if (uiDocument is null || !uiDocument.Document.Equals(state.Document))
             throw new RequestRejectedException("document_not_active",
-                $"{operation} needs the active document, and '{state.Document.Title}' is not the document shown in Revit's window; Revit keeps a selection only for that document. Call revit.get_active_document() to target it.");
+                $"{operation} needs the document shown in Revit's window, and '{state.Document.Title}' is not it. Revit keeps a selection only for the document in its window; ask the user to bring '{state.Document.Title}' to the front.");
         return uiDocument;
     }
 

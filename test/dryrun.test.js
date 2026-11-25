@@ -165,6 +165,9 @@ async function fixture(t, revit = new StubRevit(), options = {}) {
   const runtime = new Runtime({
     dataDir: path.join(base, "data"),
     sessionReader: async processId => ({ processId, version: "2026", build: "test", connectionIdentity: "test-session" }),
+    // Spec #28: the add-in resolves a run's document before its script starts; this stand-in knows every uniqueId,
+    // and a path names no open document.
+    documentReader: async (processId, { targets, document }) => ({ status: "succeeded", targets: (targets ?? (document.uniqueId ? [document.uniqueId] : [])).map(uniqueId => ({ uniqueId, title: "Fixture", path: null, kind: "rvt" })) }),
     brokerExecutor: revit.brokerExecutor(),
     holdOpener: revit.opener(),
     references,

@@ -25,6 +25,22 @@ export const SAFETY_AND_ABILITY = [
   "A long task runs as many scripts. The time limit applies to each one, Revit is free between them, and each is its own undo entry. The limit is set in the Drive-It window.",
 ];
 
+// Spec #28 "Model Guidance": the words are the contract, each within its limit (MODEL_GUIDANCE_LIMITS).
+export const DOCUMENTS_GUIDANCE = "Documents: get_revit_session lists the open documents and marks the one in Revit's window. When the user names what to work on, read the list then, tell them the titles, and pass those uniqueIds as targets on every execute_script of the task (and as document on capture_revit_view). A run changes only its targets and the documents it opens or creates, whatever window the user switches to.";
+export const TARGETS_DESCRIPTION = "Open documents this run may change: uniqueIds from get_revit_session's openDocuments. The first is the script's current document; revit.targets lists them all. Reads, and documents the script opens or creates, need none. Changing, saving or closing any other document fails with document_not_targeted.";
+export const DOCUMENT_DESCRIPTION = "One target as {uniqueId} or {path}; the same as a one-item targets. Give one or the other.";
+export const OPEN_DOCUMENTS_DESCRIPTION = "and openDocuments: each open document's uniqueId, title, path, kind and isActive (shown in Revit's window now); null if Revit is busy";
+export const TARGETS_REFERENCE = "The run's targets in order, each {uniqueId, title, path, kind}; the first is the current document. Loop over it instead of naming a document in a saved script.";
+export const ACTIVE_DOCUMENT_NOTE = "It reports what is in Revit's window at this moment; it does not add a target.";
+export const MODEL_GUIDANCE_LIMITS = Object.freeze([
+  [DOCUMENTS_GUIDANCE, 400],
+  [TARGETS_DESCRIPTION, 320],
+  [DOCUMENT_DESCRIPTION, 100],
+  [OPEN_DOCUMENTS_DESCRIPTION, 150],
+  [TARGETS_REFERENCE, 170],
+  [ACTIVE_DOCUMENT_NOTE, 90],
+]);
+
 // Spec #15 "Agent Guidance": in the server instructions and get_api_reference.
 export const BRIDGE_GUIDANCE = [
   "Use built-in primitives where they cover the task; use the bridge for anything else.",
@@ -84,7 +100,7 @@ const targetsActive = "Later calls in the same script target the returned docume
 const revitPrimitives = {
   get_active_document: [withCurrentDocument({}),
     "Full response; document is the active document's snapshot plus isModified, activeView {id, name, viewType} or null, and openDocuments [{uniqueId, title, path, kind, isActive}] for every open, non-linked document",
-    `Resolves the document shown in Revit's window (RVT or RFA) and registers it and every open document. ${targetsActive}. No transaction, no policy paths, no change to the active document or view; fails with no_active_document, listing openDocuments, when none is active`,
+    `Resolves the document shown in Revit's window (RVT or RFA) and registers it and every open document. ${targetsActive}. No transaction, no policy paths, no change to the active document or view; fails with no_active_document, listing openDocuments, when none is active. ${ACTIVE_DOCUMENT_NOTE}`,
     "doc = revit.get_active_document()[\"document\"]"],
   find_elements: [withCurrentDocument({
     category: "Required: BuiltInCategory name (\"OST_Walls\") or the category name the document shows (\"Walls\"); unknown names fail with unknown_category and the closest names",
@@ -167,6 +183,10 @@ const bridgeEntries = {
     "A with block. Each committed one adds a receipt transactions entry {name, document, added, changed, deleted, totals, truncated} (id lists capped at 1000 and marked truncated), a changes line such as \"Place desks in Tower.rvt: 5 added, 0 changed, 0 deleted.\", and its added and changed ids in affectedElements",
     `${holds}. Leaving the block commits; an exception inside rolls it back and keeps raising. Every bridge change goes inside one; a change outside fails with modification_outside_transaction. One may be open per document at a time. Revit warnings go to the receipt's warnings without a dialog; an error rolls that transaction back and raises RevitError transaction_failed with Revit's message. The run's transactions on a document become one undo entry, Drive-It: <displayName>. A run that fails, is stopped (stopped_by_user) or times out is rolled back whole, except what came before a save_document or save_as_document in it`,
     "with revit.transaction(\"Place desks\"):\n    desk = doc.Create.NewFamilyInstance(DB.XYZ(0, 0, 0), symbol, level, DB.Structure.StructuralType.NonStructural)"],
+  "revit.targets": [{},
+    "list",
+    TARGETS_REFERENCE,
+    "for target in revit.targets:\n    with revit.transaction(\"Add level\", document=target):\n        DB.Level.Create(revit.document(target), 10.0)"],
   "revit.describe": [{ name: "Required: Revit API type name, short (\"FamilyItemFactory\") or qualified (\"DB.Structure.StructuralType\")" },
     "{name, kind, baseType, constructors, properties, methods, fields} as signature strings (out parameters marked out, obsolete members marked [obsolete]), or {name, kind, values} for an enum; type_not_found lists similar names and ambiguous_type lists the matches",
     "Reads the running Revit's own API; does not hold Revit and does not change the model",
