@@ -112,6 +112,10 @@ internal static class Guardrails
             RequireDryRunRules.NotAllowedMessage($"{BridgeCalls.TypeName(type)}.{member}", reason));
     }
 
+    /// <summary>A member that makes a new document, as create_document and edit_family do (Dev Mode only).</summary>
+    public static bool CreatesDocument(Type type, string member) =>
+        BuiltInOnly.Any(entry => entry.Instead is ("create_document" or "edit_family") && entry.Member == member && entry.Owner.IsAssignableFrom(type));
+
     /// <summary>True for a Document call that needs the run's group on that document closed first (Dev Mode only).</summary>
     public static bool IsCommitPoint(Type type, string member) => typeof(Document).IsAssignableFrom(type) && CommitPoints.Contains(member);
 

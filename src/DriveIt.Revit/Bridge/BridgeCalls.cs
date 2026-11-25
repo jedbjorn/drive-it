@@ -564,6 +564,9 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
             held.BeforeTransaction(owner);
         Overloads.SupplyOutputs(method, converted, Output);
         var result = Invoke(type, name, () => method.Invoke(target, converted), target, converted);
+        // D8: a document a Dev Mode script creates or opens for family editing is the run's own (spec #13 D12).
+        if (held.RequireDryRun is not null && result is Document created && Guardrails.CreatesDocument(type, name))
+            RunDocuments.Add(held.RunId, created);
         // Out parameters come back after the return value, as a Python tuple; a single value comes back as itself.
         return Overloads.Outputs(method, result, converted) switch
         {

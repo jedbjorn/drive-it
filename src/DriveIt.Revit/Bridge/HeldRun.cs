@@ -33,6 +33,9 @@ internal interface IHeldDocuments
 
     /// <summary>Require dry run is on for this real run (spec #13), or null: unrehearsed changes and lasting operations are refused.</summary>
     RequireDryRunGuard? RequireDryRun { get; }
+
+    /// <summary>The run's id, which its built-in batches carry too.</summary>
+    string RunId { get; }
 }
 
 public sealed class HoldSummary
@@ -532,9 +535,10 @@ internal sealed class HeldRun : IHeldDocuments
         if (groups.Any(entry => entry.Group is not null && SameDocument(entry.Document, document)))
             return;
         // The one place a run first opens a transaction on a document: built-ins, revit.transaction and a Dev Mode
-        // script's own transactions all pass here, so an unrehearsed run under Require dry run changes nothing (spec #13).
-        if (RequireDryRun is { Rehearsed: false })
-            throw RequireDryRunRules.Unrehearsed(document);
+        // script's own transactions all pass here, so under Require dry run an unrehearsed run changes nothing and a
+        // rehearsed one changes only what its dry run changed (spec #13 D12).
+        if (RequireDryRun is { } guard)
+            RequireDryRunRules.RequireRehearsed(guard, RunId, document);
         var entry = groups.FirstOrDefault(candidate => SameDocument(candidate.Document, document));
         if (entry is null)
         {

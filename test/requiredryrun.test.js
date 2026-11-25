@@ -21,11 +21,14 @@ import { stagedDryRun } from "../server/staged.js";
 const execute = promisify(execFile);
 const operator = fileURLToPath(new URL("../server/operator.js", import.meta.url));
 
-// The add-in's side, as far as the rule needs it: it records each hold and batch with what it was told.
+// The add-in's side, as far as the rule needs it: it records each hold and batch with what it was told. A change
+// lands on the document active in Revit's window (a call that names no document), and a hold reports the documents
+// it changed by title and path, as the add-in's hold summary does.
 class StubRevit {
   constructor() {
     this.holds = [];
     this.batches = [];
+    this.active = { title: "Tower", path: "C:\\Models\\Tower.rvt" };
   }
 
   opener() {
@@ -33,10 +36,11 @@ class StubRevit {
       const hold = {
         options,
         sent: [],
+        changed: [],
         onLost() {},
         send: async message => {
           hold.sent.push(message);
-          if (message.type === "model.execute") return this.answer(message);
+          if (message.type === "model.execute") return this.answer(message, hold);
           const { call } = message;
           if (call.op === "document") return { status: "succeeded", value: { $h: 1, type: "Autodesk.Revit.DB.Document" } };
           if (call.op === "get" && ["Export", "SaveAs"].includes(call.member)) return { status: "succeeded", value: { $method: call.member } };
@@ -47,7 +51,7 @@ class StubRevit {
           ms: 5,
           calls: hold.sent.length,
           warnings: [],
-          documents: [{ title: "Tower", state: outcome === "commit" ? "committed" : "rolled_back", commitPoint: false }],
+          documents: hold.changed.map(document => ({ ...document, state: outcome === "commit" ? "committed" : "rolled_back", commitPoint: false })),
           ...(extra.dryRun ? { actions: [] } : {}),
         }),
       };
@@ -63,12 +67,16 @@ class StubRevit {
     };
   }
 
-  // Refuses an unrehearsed change as the add-in does, so a script sees the code.
-  answer(envelope) {
+  // Refuses a change as the add-in does at a document's first transaction: in an unrehearsed run, and in a rehearsed
+  // one on a document its dry run did not change (D12). So a script sees the code.
+  answer(envelope, hold) {
     const changes = envelope.operations.some(operation => operation.type === "create_level");
-    if (changes && envelope.requireDryRun?.rehearsed === false) {
-      return { id: envelope.id, status: "failed", error: { code: "dry_run_required", message: "Require dry run is on and this run was not rehearsed." } };
+    const guard = envelope.requireDryRun;
+    const document = this.active;
+    if (changes && guard && !(guard.rehearsed && guard.documents.some(known => known.title === document.title && known.path === document.path))) {
+      return { id: envelope.id, status: "failed", error: { code: "dry_run_required", message: guard.rehearsed ? `This run's dry run did not change ${document.title}.` : "Require dry run is on and this run was not rehearsed." } };
     }
+    if (changes && hold && !hold.changed.includes(document)) hold.changed.push(document);
     return { id: envelope.id, status: "succeeded", changes: changes ? ["Created level 'L3' (100)."] : [], affectedFiles: [], affectedElements: changes ? [100] : [], checks: [], results: envelope.operations.map(() => null) };
   }
 }
@@ -166,7 +174,8 @@ test("one succeeded, rolled-back dry run allows one real run of the same call, n
   const real = await run(runtime);
   assert.equal(real.status, "succeeded", real.error?.message);
   assert.equal(real.rehearsedBy, dry.runId);
-  assert.deepEqual(revit.batches.at(-1).requireDryRun, { rehearsed: true });
+  assert.deepEqual(dry.changedDocuments, [{ title: "Tower", path: "C:\\Models\\Tower.rvt" }]);
+  assert.deepEqual(revit.batches.at(-1).requireDryRun, { rehearsed: true, documents: dry.changedDocuments });
 
   const again = await run(runtime);
   assert.equal(again.rehearsedBy, null, "the dry run allows no further run");
@@ -176,6 +185,42 @@ test("one succeeded, rolled-back dry run allows one real run of the same call, n
   const changed = await run(runtime, LEVEL, { arguments: { floor: 4 } });
   assert.equal(changed.rehearsedBy, null, "one argument changed is a different call");
   assert.equal(changed.error?.code, "dry_run_required");
+});
+
+test("a rehearsal is bound to the documents its dry run changed: a call that names no document, run for real on another, is refused", async (t) => {
+  const { runtime, revit } = await fixture(t);
+  await runtime.settings.setRequireDryRun("on");
+  const dry = await run(runtime, LEVEL, { dryRun: true });
+  assert.equal(dry.status, "succeeded", dry.error?.message);
+  assert.deepEqual(dry.changedDocuments, [{ title: "Tower", path: "C:\\Models\\Tower.rvt" }]);
+
+  revit.active = { title: "Annex", path: "C:\\Models\\Annex.rvt" }; // the person switches models in Revit
+  const real = await run(runtime);
+  assert.equal(real.rehearsedBy, dry.runId, "the call matched, and the dry run is spent");
+  assert.deepEqual(revit.batches.at(-1).requireDryRun, { rehearsed: true, documents: [{ title: "Tower", path: "C:\\Models\\Tower.rvt" }] });
+  assert.equal(real.status, "failed");
+  assert.equal(real.error.code, "dry_run_required");
+  assert.deepEqual(real.changes, [], "nothing changed in the model nobody rehearsed");
+
+  // A dry run on the model now active rehearses it.
+  const again = await run(runtime, LEVEL, { dryRun: true });
+  assert.deepEqual(again.changedDocuments, [{ title: "Annex", path: "C:\\Models\\Annex.rvt" }]);
+  const applied = await run(runtime);
+  assert.equal(applied.status, "succeeded", applied.error?.message);
+  assert.equal(applied.rehearsedBy, again.runId);
+});
+
+test("a dry run recorded without the documents it changed rehearses nothing", async (t) => {
+  const { runtime, dataDir, revit } = await fixture(t);
+  await runtime.settings.setRequireDryRun("on");
+  const dry = await run(runtime, LEVEL, { dryRun: true });
+  const file = path.join(dataDir, "runs", `${dry.runId}.json`);
+  const { changedDocuments, ...older } = JSON.parse(await readFile(file, "utf8"));
+  assert.ok(changedDocuments);
+  await writeFile(file, JSON.stringify(older));
+  const real = await run(runtime);
+  assert.equal(real.rehearsedBy, null, "fails closed");
+  assert.deepEqual(revit.batches.at(-1).requireDryRun, { rehearsed: false });
 });
 
 test("only a succeeded, rolled-back dry run in the same Revit process rehearses", async (t) => {
@@ -206,7 +251,7 @@ test("two real runs at once take one dry run between them", async (t) => {
 });
 
 test("a real run pending on an outside-root decision keeps its dry run when retried under the same key", async (t) => {
-  const { runtime, outside } = await fixture(t);
+  const { runtime, outside, revit } = await fixture(t);
   await runtime.settings.setRequireDryRun("on");
   const target = path.join(outside, "read.txt");
   await writeFile(target, "x");
@@ -224,6 +269,7 @@ test("a real run pending on an outside-root decision keeps its dry run when retr
   const retried = await run(runtime, source, { idempotencyKey: "pending-real" });
   assert.equal(retried.status, "succeeded", retried.error?.message);
   assert.equal(retried.rehearsedBy, retriedDry.runId, "the retry keeps the dry run it took");
+  assert.deepEqual(revit.batches.at(-1).requireDryRun, { rehearsed: true, documents: retriedDry.changedDocuments }, "and the documents it changed");
 });
 
 test("an unrehearsed workspace file write is refused by the worker and nothing is written; a rehearsed one writes", async (t) => {

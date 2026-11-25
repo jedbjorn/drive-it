@@ -24,6 +24,16 @@ public sealed class BrokerRequest
 public sealed class RequireDryRunGuard
 {
     public bool Rehearsed { get; set; }
+    /// <summary>A rehearsed run: the documents its dry run changed (D12). Any other document it did not create is refused.</summary>
+    public List<RehearsedDocument>? Documents { get; set; }
+}
+
+/// <summary>A document a dry run changed, as its hold summary names it: title, and path when saved.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class RehearsedDocument
+{
+    public string Title { get; set; } = "";
+    public string? Path { get; set; }
 }
 
 /// <summary>A hold.begin request's hold object. The add-in bounds the hold by the smaller of TimeLimitMs and its own limit.</summary>

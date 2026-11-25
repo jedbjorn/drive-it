@@ -192,6 +192,8 @@ public sealed partial class DocumentDispatcher
             {
                 current = ExecuteQuery(application, operation, current, response, index);
                 MarkEffects(response, current);
+                if (operation.Type == "edit_family" && request.RequireDryRun is not null && current is not null)
+                    RunDocuments.Add(request.Id, current.Document);
                 continue;
             }
             if (IsModelChange(operation.Type))
@@ -204,7 +206,7 @@ public sealed partial class DocumentDispatcher
                     index++;
                 }
                 index--;
-                var applied = ApplyModelBatch(current, changes, response, request.RequireDryRun);
+                var applied = ApplyModelBatch(current, changes, response, request.RequireDryRun, request.Id);
                 MarkEffects(response, current);
                 if (!applied)
                     return;
@@ -221,6 +223,9 @@ public sealed partial class DocumentDispatcher
                 case "create_document":
                     current = Create(application, arguments, response);
                     MarkEffects(response, current);
+                    // D8: a document the run creates is its own, so a rehearsed run may change it (spec #13 D12).
+                    if (request.RequireDryRun is not null)
+                        RunDocuments.Add(request.Id, current.Document);
                     break;
                 case "read_document":
                     current = RequireDocument(current);
@@ -414,7 +419,7 @@ public sealed partial class DocumentDispatcher
     }
 
     private bool ApplyModelBatch(DocumentState state, List<ModelChangeRequest> changes, BrokerResponse response,
-        RequireDryRunGuard? requireDryRun)
+        RequireDryRunGuard? requireDryRun, string runId)
     {
         ValidateChanges(state.Document, changes);
         response.Document = Snapshot(state);
@@ -422,11 +427,11 @@ public sealed partial class DocumentDispatcher
         var initialElementCount = response.AffectedElements.Count;
         var initialViewCount = response.CreatedViews?.Count ?? 0;
 
-        // Outside a hold each batch is its own transaction, so an unrehearsed run is refused before every one (spec #13).
+        // Outside a hold each batch is its own transaction, so the rule is checked before every one (spec #13 D12).
         if (Held is not null)
             Held.BeforeTransaction(state.Document);
-        else if (requireDryRun is { Rehearsed: false })
-            throw RequireDryRunRules.Unrehearsed(state.Document);
+        else if (requireDryRun is not null)
+            RequireDryRunRules.RequireRehearsed(requireDryRun, runId, state.Document);
         using var transaction = new Transaction(state.Document, "Drive It model batch");
         transaction.Start();
         try
