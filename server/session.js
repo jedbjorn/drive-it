@@ -101,8 +101,21 @@ async function connect(processId, timeoutMs, { connectWaitMs = 0, signal, connec
 
   return {
     readJson,
+    // A Windows pipe the add-in has already closed may never call back on a write; its close settles the write too.
     writeJson(value) {
-      return new Promise((resolve, reject) => pipe.write(`${JSON.stringify(value)}\n`, error => error ? reject(error) : resolve()));
+      return new Promise((resolve, reject) => {
+        if (pipe.destroyed) {
+          reject(new Error("Revit disconnected before the request was sent."));
+          return;
+        }
+        const closed = () => reject(new Error("Revit disconnected before the request was sent."));
+        pipe.once("close", closed);
+        pipe.write(`${JSON.stringify(value)}\n`, error => {
+          pipe.off("close", closed);
+          if (error) reject(error);
+          else resolve();
+        });
+      });
     },
     close() {
       clearTimeout(timeout);
@@ -136,8 +149,10 @@ export const OPEN_DOCUMENTS_WAIT_MS = 2500;
  * at most waitMs for its thread (or until deadline, for a run) and then answers { status: "busy" }, so a dialog open in
  * Revit never holds the pipe. targets are uniqueIds; document is execute_script's {path, uniqueId}.
  */
-export async function readDocuments(processId, { targets, document, waitMs = OPEN_DOCUMENTS_WAIT_MS, deadline, connectWaitMs = 0, connector } = {}) {
-  const connection = await connect(processId, (deadline ? Math.max(1, deadline - Date.now()) : waitMs) + 1000, { connectWaitMs, connector });
+export async function readDocuments(processId, { targets, document, waitMs = OPEN_DOCUMENTS_WAIT_MS, deadline, connectWaitMs = 0, connector, signal } = {}) {
+  const connection = await connect(processId, (deadline ? Math.max(1, deadline - Date.now()) : waitMs) + 1000, { connectWaitMs, connector, signal });
+  const abort = () => connection.close();
+  signal?.addEventListener("abort", abort, { once: true });
   try {
     validateSession(await connection.readJson(4096), processId);
     // A run waits within its own time, counted from now: the pipe may have been busy with another client.
@@ -149,17 +164,30 @@ export async function readDocuments(processId, { targets, document, waitMs = OPE
     });
     return await connection.readJson(1024 * 1024);
   } finally {
+    signal?.removeEventListener("abort", abort);
     connection.close();
   }
 }
 
-/** get_revit_session's openDocuments: the list, or null when Revit is busy or the read fails for any reason. */
-export async function readOpenDocuments(processId, options = {}) {
+/**
+ * get_revit_session's openDocuments: the list, or null when Revit is busy or the read fails for any reason. The whole
+ * read, a busy pipe included, is bounded by waitMs plus 2 seconds (under the spec's 5): it never hangs the call.
+ */
+export async function readOpenDocuments(processId, { waitMs = OPEN_DOCUMENTS_WAIT_MS, ...options } = {}) {
+  const stop = new AbortController();
+  let timer;
+  const bound = new Promise(resolve => {
+    timer = setTimeout(() => {
+      stop.abort(new Error("The open documents were not read in time."));
+      resolve(null);
+    }, waitMs + 2000);
+  });
+  const read = readDocuments(processId, { ...options, waitMs, signal: stop.signal })
+    .then(response => response.status === "succeeded" && Array.isArray(response.openDocuments) ? response.openDocuments : null, () => null);
   try {
-    const response = await readDocuments(processId, options);
-    return response.status === "succeeded" && Array.isArray(response.openDocuments) ? response.openDocuments : null;
-  } catch {
-    return null;
+    return await Promise.race([read, bound]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
