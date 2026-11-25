@@ -87,6 +87,7 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
       connectionIdentity: `current-user:named-pipe:drive-it-${processId}`,
       workspaceRoot: null,
       mode: "standard",
+      requireDryRun: false,
     };
     const result = await call();
     assert.ok(!result.isError, result.content[0].text);

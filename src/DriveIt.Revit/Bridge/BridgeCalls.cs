@@ -545,6 +545,8 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
         // First, so a dry run names the same refusal in both install modes.
         if (held.DryRun)
             Guardrails.RequireNotLasting(type, name);
+        if (held.RequireDryRun is not null)
+            Guardrails.RequireNotLastingWhileRequired(type, name, target);
         Guardrails.RequireCallable(type, name);
         var candidates = type.GetMethods(BindingFlags.Public | flags)
             .Where(method => method.Name == name && !method.ContainsGenericParameters)
@@ -562,6 +564,9 @@ internal sealed class BridgeCalls(IHeldDocuments held, Func<bool> transactionOpe
             held.BeforeTransaction(owner);
         Overloads.SupplyOutputs(method, converted, Output);
         var result = Invoke(type, name, () => method.Invoke(target, converted), target, converted);
+        // D8: a document a Dev Mode script creates or opens for family editing is the run's own (spec #13 D12).
+        if (held.RequireDryRun is not null && result is Document created && Guardrails.CreatesDocument(type, name))
+            RunDocuments.Add(held.RunId, created);
         // Out parameters come back after the return value, as a Python tuple; a single value comes back as itself.
         return Overloads.Outputs(method, result, converted) switch
         {

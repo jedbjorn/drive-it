@@ -387,6 +387,17 @@ Assert-MsiTest ([IO.File]::ReadAllText($claudeCode) -eq $codeBefore -and [IO.Fil
 foreach ($window in @($selfTest.windows)) {
     Assert-MsiTest ($window.mode -eq 'standard' -and -not $window.devModeBanner -and $window.requestsShown) "The standard install's window is not in standard mode: $($window | ConvertTo-Json -Compress)"
 }
+# Spec #13 AC-18: the Require dry run switch and Staged Actions mode in a standard install, against a throwaway data
+# directory so the install's own settings and history stay untouched; screenshots beside the window's.
+$stagedData = Join-Path $LogDirectory 'staged-data-standard'
+[IO.Directory]::CreateDirectory($stagedData) | Out-Null
+$savedData = $env:DRIVE_IT_DATA_DIR
+$env:DRIVE_IT_DATA_DIR = $stagedData
+try {
+    Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test-staged-standard.json') -Screenshots (Join-Path $LogDirectory 'window-screens\standard') -StagedActions | Out-Null
+} finally {
+    $env:DRIVE_IT_DATA_DIR = $savedData
+}
 Assert-MsiTest (-not (Get-ChildItem -LiteralPath $install -Filter '.staging-*' -Force)) 'The in-place registration left a staging directory.'
 
 Assert-MsiTest ((Get-Content -LiteralPath $claudeDesktop -Raw | ConvertFrom-Json).mcpServers.'drive-it'.command -eq $node) 'Claude Desktop was not registered.'

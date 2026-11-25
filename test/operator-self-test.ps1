@@ -10,12 +10,15 @@
 # files in place. USERPROFILE is not redirected: Windows expands the window's own LocalAppData from it,
 # where the window reads the install mode, so Claude Code's ~\.claude.json stays the real one, which the
 # install itself already registers.
+# -StagedActions adds spec #13 AC-18's window half and the Require dry run switch: it turns the setting on
+# and off, fails a save, and writes dry-run receipts into run history, so run it only with DRIVE_IT_DATA_DIR
+# set to a throwaway directory. With -Screenshots it also saves the switch and Staged Actions mode.
 
 function Invoke-OperatorSelfTest {
     # Opens and closes the installed WPF window in both themes against the installed operator.js.
     # With -Dotnet, $Exe is the window's DLL, run through that dotnet.exe.
     param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Report, [string]$Dotnet, [switch]$DrawerWrites, [string]$Screenshots,
-        [switch]$DetectAgents, [string]$ClientProfile)
+        [switch]$DetectAgents, [string]$ClientProfile, [switch]$StagedActions)
     if ([IO.File]::Exists($Report)) {
         Remove-Item -LiteralPath $Report -Force
     }
@@ -29,6 +32,9 @@ function Invoke-OperatorSelfTest {
     }
     if ($DetectAgents) {
         $arguments += '--detect-agents'
+    }
+    if ($StagedActions) {
+        $arguments += '--staged-actions'
     }
     if ($Dotnet) {
         $file = $Dotnet
@@ -71,11 +77,17 @@ function Invoke-OperatorSelfTest {
         if ($DetectAgents) {
             Assert-OperatorAgents -Window $window -Text $text
         }
+        if ($StagedActions) {
+            Assert-OperatorStaged -Window $window -Text $text
+        }
     }
     if ($Screenshots) {
         $names = @('light-main', 'light-settings', 'dark-main', 'dark-settings')
         if ($DetectAgents) {
             $names += @('light-agents', 'dark-agents')
+        }
+        if ($StagedActions) {
+            $names += @('light-settings-require', 'light-staged', 'light-staged-failed', 'dark-settings-require', 'dark-staged', 'dark-staged-failed')
         }
         foreach ($name in $names) {
             if (-not [IO.File]::Exists((Join-Path $Screenshots "$name.png"))) {
@@ -178,6 +190,42 @@ function Assert-OperatorAgents {
     $failed = @($checks.Keys | Where-Object { -not $checks[$_] })
     if ($failed.Count -gt 0) {
         throw "Detect agents ($($Window.theme)) failed $($failed -join ', '): $($agents | ConvertTo-Json -Compress -Depth 5)"
+    }
+}
+
+function Assert-OperatorStaged {
+    # Spec #13 AC-18 (the window's half) and "The drawer row": off shows no switcher; the switch saves on and
+    # shows the switcher; Staged Actions says there is no dry run, then shows one as readable lines with no
+    # JSON, the same one after Home and back, Applied after the same call ran for real, a newer failed one with
+    # its error, and the dry run the add-in names once it lands; a failed save reverts the switch with the
+    # error by the row; off hides the switcher and returns to Home.
+    param([Parameter(Mandatory)]$Window, [Parameter(Mandatory)][string]$Text)
+    $staged = $Window.staged
+    if ($null -eq $staged) {
+        throw "The self-test did not run Staged Actions ($($Window.theme)): $Text"
+    }
+    $firstText = @($staged.first.text)
+    $failedText = @($staged.failed.text)
+    $checks = [ordered]@{
+        offNoSwitcher       = -not $staged.off.switcherShown -and $staged.off.mode -eq 'Home'
+        switchRow           = @($staged.turnedOn.rows) -contains 'Require dry run'
+        savedOn             = -not $staged.turnedOn.switchBefore -and [bool]$staged.turnedOn.switchOn -and [bool]$staged.turnedOn.stored -and $null -eq $staged.turnedOn.error
+        switcherOnHome      = [bool]$staged.on.switcherShown -and $staged.on.mode -eq 'Home'
+        noneYet             = $staged.none.mode -eq 'StagedActions' -and [bool]$staged.none.noneShown -and $null -eq $staged.none.error
+        showsDryRun         = $staged.first.runId -eq $staged.dry -and -not $staged.first.applied -and $null -eq $staged.first.error
+        readableGroups      = ($firstText -contains 'Created (3)') -and ($firstText -contains 'Modified (2)') -and ($firstText -contains 'Deleted (1)') -and ($firstText -contains 'Mark: D12 → D14')
+        noJson              = [bool]$staged.first.noJson
+        homeAndBack         = $staged.home -eq 'Home' -and $staged.back -eq $staged.dry
+        appliedBadge        = $staged.applied.runId -eq $staged.dry -and [bool]$staged.applied.applied
+        failedReplaces      = $staged.failed.runId -eq $staged.failedId -and [bool]$staged.failed.failed -and -not $staged.failed.applied -and ($failedText -contains 'The door schedule has no level 2 doors.')
+        waitsForNamedRun    = $staged.waited -eq $staged.laterId
+        failedSaveReverts   = -not [string]::IsNullOrEmpty($staged.failedSave.error) -and [bool]$staged.failedSave.switchOn -and [bool]$staged.failedSave.switcherShown
+        savedOff            = -not $staged.turnedOff.switchOn -and -not $staged.turnedOff.stored -and $null -eq $staged.turnedOff.error
+        offReturnsHome      = -not $staged.offAgain.switcherShown -and $staged.offAgain.mode -eq 'Home'
+    }
+    $failed = @($checks.Keys | Where-Object { -not $checks[$_] })
+    if ($failed.Count -gt 0) {
+        throw "Staged Actions ($($Window.theme)) failed $($failed -join ', '): $($staged | ConvertTo-Json -Compress -Depth 6)"
     }
 }
 

@@ -54,6 +54,20 @@ public static class OperatorLauncher
     }
 
     /// <summary>
+    /// Spec #13 "It opens itself": opens the window, or brings the open one forward, in Staged Actions mode on the dry
+    /// run <paramref name="runId"/> once it reaches run history. The window does nothing more while Require dry run is
+    /// off. Call on the UI thread.
+    /// </summary>
+    public static OperatorWindow ShowStaged(IntPtr owner, UiTheme? theme, string? runId)
+    {
+        var existing = _open;
+        var window = Show(owner, theme);
+        if (ReferenceEquals(existing, window)) _ = window.ShowStagedAsync(runId);
+        else window.RequestStaged(runId);
+        return window;
+    }
+
+    /// <summary>
     /// A new window wired to the installed operator.js (found from this assembly's folder,
     /// <c>app\addin\&lt;year&gt;</c> or <c>app\operator</c>), in <see cref="DriveItTheme.Current"/>.
     /// </summary>

@@ -15,6 +15,25 @@ public sealed class BrokerRequest
     public CaptureRequest? Capture { get; set; }
     /// <summary>hold.begin only: the run's display name and the time it has left.</summary>
     public HoldRequest? Hold { get; set; }
+    /// <summary>model.execute: present only while Require dry run is on for this real run (spec #13).</summary>
+    public RequireDryRunGuard? RequireDryRun { get; set; }
+}
+
+/// <summary>Require dry run is on for a real run (spec #13): whether the server found an unused dry run of the same call.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class RequireDryRunGuard
+{
+    public bool Rehearsed { get; set; }
+    /// <summary>A rehearsed run: the documents its dry run changed (D12). Any other document it did not create is refused.</summary>
+    public List<RehearsedDocument>? Documents { get; set; }
+}
+
+/// <summary>A document a dry run changed, as its hold summary names it: title, and path when saved.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class RehearsedDocument
+{
+    public string Title { get; set; } = "";
+    public string? Path { get; set; }
 }
 
 /// <summary>A hold.begin request's hold object. The add-in bounds the hold by the smaller of TimeLimitMs and its own limit.</summary>
@@ -25,6 +44,8 @@ public sealed class HoldRequest
     public int? TimeLimitMs { get; set; }
     /// <summary>A dry run (spec #13): never committed, refuses lasting operations, and labelled in the status window.</summary>
     public bool DryRun { get; set; }
+    /// <summary>Present only while Require dry run is on for this real run (spec #13).</summary>
+    public RequireDryRunGuard? RequireDryRun { get; set; }
 }
 
 /// <summary>

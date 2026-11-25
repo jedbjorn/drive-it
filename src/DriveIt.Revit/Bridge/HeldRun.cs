@@ -30,6 +30,12 @@ internal interface IHeldDocuments
 
     /// <summary>A dry run (spec #13): every group is rolled back, and operations with lasting effects are refused.</summary>
     bool DryRun { get; }
+
+    /// <summary>Require dry run is on for this real run (spec #13), or null: unrehearsed changes and lasting operations are refused.</summary>
+    RequireDryRunGuard? RequireDryRun { get; }
+
+    /// <summary>The run's id, which its built-in batches carry too.</summary>
+    string RunId { get; }
 }
 
 public sealed class HoldSummary
@@ -106,10 +112,11 @@ internal sealed class HeldRun : IHeldDocuments
     private JsonObject? dryRunEvidence;
     private UIApplication? application;
 
-    public HeldRun(string runId, string? displayName, int? timeLimitMs, bool dryRun = false)
+    public HeldRun(string runId, string? displayName, int? timeLimitMs, bool dryRun = false, RequireDryRunGuard? requireDryRun = null)
     {
         RunId = runId;
         DryRun = dryRun;
+        RequireDryRun = requireDryRun;
         calls = new BridgeCalls(this, AnyTransactionOpen);
         DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName.Trim();
         requestedLimit = timeLimitMs is > 0 ? TimeSpan.FromMilliseconds(timeLimitMs.Value) : TimeSpan.MaxValue;
@@ -118,6 +125,7 @@ internal sealed class HeldRun : IHeldDocuments
     public string RunId { get; }
     public string? DisplayName { get; }
     public bool DryRun { get; }
+    public RequireDryRunGuard? RequireDryRun { get; }
     public DateTimeOffset StartedAt { get; private set; }
     public DateTimeOffset Deadline { get; private set; }
     public int Calls { get; private set; }
@@ -526,6 +534,11 @@ internal sealed class HeldRun : IHeldDocuments
     {
         if (groups.Any(entry => entry.Group is not null && SameDocument(entry.Document, document)))
             return;
+        // The one place a run first opens a transaction on a document: built-ins, revit.transaction and a Dev Mode
+        // script's own transactions all pass here, so under Require dry run an unrehearsed run changes nothing and a
+        // rehearsed one changes only what its dry run changed (spec #13 D12).
+        if (RequireDryRun is { } guard)
+            RequireDryRunRules.RequireRehearsed(guard, RunId, document);
         var entry = groups.FirstOrDefault(candidate => SameDocument(candidate.Document, document));
         if (entry is null)
         {

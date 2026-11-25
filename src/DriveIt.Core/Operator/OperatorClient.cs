@@ -81,7 +81,8 @@ public sealed class ProcessOperatorRunner(OperatorHost host) : IOperatorRunner
 /// The operator.js contract the window uses, with the PowerShell module's behavior
 /// (<c>operator/DriveIt.Operator.psm1</c>): <c>workspace get|set</c>, <c>decisions list|approve|deny</c>
 /// (only <c>pending</c> rows are listed), <c>history list</c> (newest first, at most 100),
-/// <c>settings get|set-time-limit</c> (the Script time limit) and <c>clients detect</c> (Detect agents).
+/// <c>settings get|set-time-limit|set-require-dry-run</c> (the Script time limit and Require dry run),
+/// <c>staged get</c> (the dry run Staged Actions mode shows) and <c>clients detect</c> (Detect agents).
 /// </summary>
 public sealed class OperatorClient(IOperatorRunner runner)
 {
@@ -147,7 +148,37 @@ public sealed class OperatorClient(IOperatorRunner runner)
     public async Task<int> GetScriptTimeLimitAsync(CancellationToken cancellationToken = default)
     {
         var result = await runner.RunAsync(["settings", "get"], cancellationToken).ConfigureAwait(false);
-        return ReadTimeLimit(Parse(result));
+        using var document = Parse(result);
+        return ReadTimeLimit(document);
+    }
+
+    /// <summary>Both settings from one <c>settings get</c>: the Script time limit and Require dry run.</summary>
+    public async Task<OperatorSettings> GetSettingsAsync(CancellationToken cancellationToken = default)
+    {
+        var result = await runner.RunAsync(["settings", "get"], cancellationToken).ConfigureAwait(false);
+        using var document = Parse(result);
+        var requireDryRun = document?.RootElement is { ValueKind: JsonValueKind.Object } root
+            && root.TryGetProperty(RequireDryRun.PropertyName, out var value) && value.ValueKind == JsonValueKind.True;
+        return new OperatorSettings(ReadTimeLimit(document), requireDryRun);
+    }
+
+    /// <summary>Turns Require dry run on or off for runs that start after it (spec #13); returns the value operator.js stored.</summary>
+    public async Task<bool> SetRequireDryRunAsync(bool on, CancellationToken cancellationToken = default)
+    {
+        var result = await runner.RunAsync(["settings", "set-require-dry-run", on ? "on" : "off"], cancellationToken).ConfigureAwait(false);
+        using var document = Parse(result);
+        if (document?.RootElement is { ValueKind: JsonValueKind.Object } root
+            && root.TryGetProperty(RequireDryRun.PropertyName, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            return value.GetBoolean();
+        throw new OperatorException("Drive It did not report the Require dry run setting.");
+    }
+
+    /// <summary>The last dry run that completed in this workspace (spec #13 "The dry run shown"), or null when there is none.</summary>
+    public async Task<StagedDryRun?> GetStagedDryRunAsync(CancellationToken cancellationToken = default)
+    {
+        var result = await runner.RunAsync(["staged", "get"], cancellationToken).ConfigureAwait(false);
+        using var document = Parse(result);
+        return document is null ? null : StagedDryRun.FromJson(document.RootElement);
     }
 
     /// <summary>Saves the Script time limit for future runs; returns the value operator.js stored.</summary>
@@ -158,7 +189,8 @@ public sealed class OperatorClient(IOperatorRunner runner)
         var result = await runner.RunAsync(
             ["settings", "set-time-limit", seconds.ToString(System.Globalization.CultureInfo.InvariantCulture)], cancellationToken)
             .ConfigureAwait(false);
-        return ReadTimeLimit(Parse(result));
+        using var document = Parse(result);
+        return ReadTimeLimit(document);
     }
 
     /// <summary>
@@ -181,14 +213,11 @@ public sealed class OperatorClient(IOperatorRunner runner)
 
     private static int ReadTimeLimit(JsonDocument? document)
     {
-        using (document)
-        {
-            if (document?.RootElement is { ValueKind: JsonValueKind.Object } root
-                && root.TryGetProperty(ScriptTimeLimit.PropertyName, out var value)
-                && value.ValueKind == JsonValueKind.Number
-                && value.TryGetInt32(out var seconds))
-                return seconds;
-        }
+        if (document?.RootElement is { ValueKind: JsonValueKind.Object } root
+            && root.TryGetProperty(ScriptTimeLimit.PropertyName, out var value)
+            && value.ValueKind == JsonValueKind.Number
+            && value.TryGetInt32(out var seconds))
+            return seconds;
         throw new OperatorException("Drive It did not report the script time limit.");
     }
 
@@ -214,6 +243,9 @@ public sealed class OperatorClient(IOperatorRunner runner)
             return document is null ? null : Json.String(document.RootElement, "root");
     }
 }
+
+/// <summary>The stored settings the drawer shows.</summary>
+public sealed record OperatorSettings(int ScriptTimeLimitSeconds, bool RequireDryRun);
 
 /// <summary>Tolerant reads of operator.js JSON: unknown fields are ignored and wrong types read as absent.</summary>
 internal static class Json

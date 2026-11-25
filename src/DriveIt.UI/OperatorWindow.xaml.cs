@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using DriveIt.Core.Mode;
 using DriveIt.Core.Operator;
@@ -31,6 +32,12 @@ namespace DriveIt.UI;
 /// and lists one plain line per client; a command that fails shows by the row. Results are cleared
 /// each time the drawer opens.
 /// </para>
+/// <para>
+/// Require dry run (spec #13) is a switch in the drawer, saved on click; a failed save puts it back to the stored
+/// value and shows the error by the row. While it is on, a switcher at the top left offers Staged Actions mode, the
+/// whole window for the last dry run that completed (<c>operator.js staged get</c>, read each time the mode is
+/// shown), and Home. Turning it off returns the window to Home and hides the switcher.
+/// </para>
 /// </summary>
 public partial class OperatorWindow : Window
 {
@@ -40,6 +47,13 @@ public partial class OperatorWindow : Window
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool _busy;
     private Task _settingsAction = Task.CompletedTask;
+    private Task _modeAction = Task.CompletedTask;
+    private bool _requireDryRun;
+    private bool _stagedRequested;
+    private string? _stagedRunId;
+
+    /// <summary>How long Staged Actions mode waits for a dry run the add-in named to reach run history.</summary>
+    private static readonly TimeSpan StagedWait = TimeSpan.FromSeconds(15);
 
     public OperatorWindow(OperatorClient client, string mcpConfigurationPath, DriveItMode mode, ImageSource? icon = null, bool promptForMissingRoot = true)
     {
@@ -59,6 +73,12 @@ public partial class OperatorWindow : Window
         McpText.Text = "MCP configuration: " + mcpConfigurationPath;
         McpText.ToolTip = mcpConfigurationPath;
         TimeLimitHelp.Text = ScriptTimeLimit.HelpText;
+        RequireDryRunHelp.Text = RequireDryRun.HelpText;
+        StagedTab.Content = StagedText.StagedActionsMode;
+        HomeTab.Content = StagedText.HomeMode;
+        StagedNoneText.Text = StagedText.NoneYet;
+        StagedIdsNote.Text = StagedText.IdsNote;
+        AppliedText.Text = StagedText.AppliedBadge;
         if (icon is not null) Icon = icon;
         Loaded += OnLoaded;
         PreviewKeyDown += OnPreviewKeyDown;
@@ -123,6 +143,44 @@ public partial class OperatorWindow : Window
     /// <summary>The headings of the drawer's rows, top to bottom.</summary>
     public IReadOnlyList<string> SettingsRowNames => SectionHeadings(SettingsRows);
 
+    /// <summary>The Require dry run setting operator.js last reported or saved.</summary>
+    public bool RequireDryRunOn => _requireDryRun;
+
+    /// <summary>The Require dry run switch as shown.</summary>
+    public bool RequireDryRunSwitchOn => RequireDryRunSwitch.IsChecked == true;
+
+    /// <summary>The drawer's error next to Require dry run; null when none is shown.</summary>
+    public string? RequireDryRunError => RequireDryRunErrorLine.Visibility == Visibility.Visible ? RequireDryRunErrorLine.Text : null;
+
+    /// <summary>True while the mode switcher is shown at the top left.</summary>
+    public bool ModeSwitcherShown => ModeSwitcher.Visibility == Visibility.Visible;
+
+    /// <summary>The mode the window shows.</summary>
+    public WindowMode CurrentMode => StagedPanel.Visibility == Visibility.Visible ? WindowMode.StagedActions : WindowMode.Home;
+
+    /// <summary>The dry run Staged Actions mode last showed; null when there is none.</summary>
+    public StagedDryRun? StagedRun { get; private set; }
+
+    /// <summary>True while Staged Actions mode says no dry run has completed.</summary>
+    public bool StagedNoneShown => StagedNoneText.Visibility == Visibility.Visible;
+
+    /// <summary>True while the Applied badge is shown.</summary>
+    public bool AppliedShown => StagedRunPanel.Visibility == Visibility.Visible && AppliedBadge.Visibility == Visibility.Visible;
+
+    /// <summary>The error Staged Actions mode shows for its own read, or null.</summary>
+    public string? StagedErrorMessage => StagedErrorPanel.Visibility == Visibility.Visible ? StagedErrorText.Text : null;
+
+    /// <summary>Every line of text Staged Actions mode shows, top to bottom (the self-test checks there is no JSON).</summary>
+    public IReadOnlyList<string> StagedTextShown
+    {
+        get
+        {
+            // The lists' rows exist only once layout has generated them.
+            UpdateLayout();
+            return VisibleText(StagedPanel);
+        }
+    }
+
     public int PendingCount => RequestList.Items.Count;
 
     public int HistoryCount => HistoryList.Items.Count;
@@ -138,10 +196,11 @@ public partial class OperatorWindow : Window
                 WorkspaceRoot = await _client.GetWorkspaceAsync();
                 RootText.Text = WorkspaceRoot ?? "";
                 found = true;
-                ShowTimeLimit(await _client.GetScriptTimeLimitAsync());
+                ShowSettings(await _client.GetSettingsAsync());
                 await RefreshListsAsync();
             });
-            if (found && WorkspaceRoot is null && _promptForMissingRoot && BrowseForRoot()) await SaveRootAsync();
+            if (_stagedRequested) await ShowStagedAsync(_stagedRunId);
+            else if (found && WorkspaceRoot is null && _promptForMissingRoot && BrowseForRoot()) await SaveRootAsync();
         }
         finally
         {
@@ -195,13 +254,14 @@ public partial class OperatorWindow : Window
     {
         if (_busy || SettingsOpen) return;
         ShowTimeLimitError(null);
+        ShowRequireDryRunError(null);
         ShowAgents(null);
         ShowAgentsError(null);
         MainContent.IsEnabled = false;
         DrawerScrim.Visibility = Visibility.Visible;
         Drawer.Visibility = Visibility.Visible;
         MoveFocus(Drawer);
-        await RunAsync(async () => ShowTimeLimit(await _client.GetScriptTimeLimitAsync()), ShowTimeLimitError);
+        await RunAsync(async () => ShowSettings(await _client.GetSettingsAsync()), ShowTimeLimitError);
         if (SettingsOpen) MoveFocus(TimeLimitText);
     }
 
@@ -240,6 +300,143 @@ public partial class OperatorWindow : Window
             ?? throw new OperatorException(error!);
         ShowTimeLimit(await _client.SetScriptTimeLimitAsync(seconds));
     }, ShowTimeLimitError);
+
+    private void OnRequireDryRunClicked(object sender, RoutedEventArgs e) =>
+        _settingsAction = SaveRequireDryRunAsync(RequireDryRunSwitch.IsChecked == true);
+
+    /// <summary>Saves the switch's new position at once; a failure puts it back to the stored value (spec #13 "The drawer row").</summary>
+    private Task SaveRequireDryRunAsync(bool on) =>
+        RunAsync(async () => ApplyRequireDryRun(await _client.SetRequireDryRunAsync(on)), ShowRequireDryRunError);
+
+    private void ShowSettings(OperatorSettings settings)
+    {
+        ShowTimeLimit(settings.ScriptTimeLimitSeconds);
+        ApplyRequireDryRun(settings.RequireDryRun);
+    }
+
+    /// <summary>The stored setting: the switch, and the mode switcher shown only while it is on.</summary>
+    private void ApplyRequireDryRun(bool on)
+    {
+        _requireDryRun = on;
+        RequireDryRunSwitch.IsChecked = on;
+        ModeSwitcher.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (!on) ShowMode(WindowMode.Home);
+    }
+
+    private void ShowRequireDryRunError(string? message)
+    {
+        RequireDryRunErrorLine.Text = message ?? "";
+        RequireDryRunErrorLine.Visibility = string.IsNullOrEmpty(message) ? Visibility.Collapsed : Visibility.Visible;
+        if (!string.IsNullOrEmpty(message)) RequireDryRunSwitch.IsChecked = _requireDryRun;
+    }
+
+    private void OnStagedTab(object sender, RoutedEventArgs e) => _modeAction = ShowStagedAsync(null);
+
+    private void OnHomeTab(object sender, RoutedEventArgs e) => ShowMode(WindowMode.Home);
+
+    /// <summary>
+    /// Asks for Staged Actions mode as the window opens (the add-in after a dry run): shown once the window has read the
+    /// setting, and only if it is on. <paramref name="runId"/> is the dry run that just ended, waited for briefly.
+    /// </summary>
+    public void RequestStaged(string? runId)
+    {
+        _stagedRequested = true;
+        _stagedRunId = runId;
+    }
+
+    /// <summary>
+    /// Shows Staged Actions mode with the last completed dry run, read now. With <paramref name="runId"/> it waits, up to
+    /// a few seconds, for that dry run to reach run history: the add-in opens the window as the hold ends, before the
+    /// server has written the receipt. Nothing happens while Require dry run is off.
+    /// </summary>
+    public async Task ShowStagedAsync(string? runId)
+    {
+        if (!_requireDryRun) return;
+        ShowMode(WindowMode.StagedActions);
+        await RunAsync(async () =>
+        {
+            var waitUntil = DateTimeOffset.Now + StagedWait;
+            var staged = await _client.GetStagedDryRunAsync();
+            while (runId is not null && staged?.RunId != runId && DateTimeOffset.Now < waitUntil)
+            {
+                await Task.Delay(500);
+                staged = await _client.GetStagedDryRunAsync();
+            }
+            ShowStaged(staged);
+        }, ShowStagedError);
+    }
+
+    private void ShowMode(WindowMode mode)
+    {
+        var staged = mode == WindowMode.StagedActions;
+        HomeContent.Visibility = staged ? Visibility.Collapsed : Visibility.Visible;
+        StagedPanel.Visibility = staged ? Visibility.Visible : Visibility.Collapsed;
+        StagedTab.IsChecked = staged;
+        HomeTab.IsChecked = !staged;
+    }
+
+    private void ShowStaged(StagedDryRun? run)
+    {
+        StagedRun = run;
+        StagedNoneText.Visibility = run is null ? Visibility.Visible : Visibility.Collapsed;
+        StagedRunPanel.Visibility = run is null ? Visibility.Collapsed : Visibility.Visible;
+        if (run is null) return;
+        StagedTitle.Text = run.Title;
+        StagedMeta.Text = run.Meta;
+        AppliedBadge.Visibility = run.Applied ? Visibility.Visible : Visibility.Collapsed;
+        StagedFailureText.Text = run.ErrorText ?? "";
+        StagedFailurePanel.Visibility = run.Failed ? Visibility.Visible : Visibility.Collapsed;
+        StagedNothingText.Text = run.NothingChanged ?? "";
+        StagedNothingText.Visibility = run.NothingChanged is null ? Visibility.Collapsed : Visibility.Visible;
+        StagedDocuments.ItemsSource = run.Documents;
+        StagedImages.ItemsSource = run.Images.Select(image =>
+        {
+            var picture = LoadImage(image.Path);
+            return new StagedImageView(image.Caption, picture, image.Error ?? (image.Path is not null && picture is null ? StagedImageView.NotKept : null));
+        }).ToList();
+        StagedWorksharing.ItemsSource = run.Worksharing;
+        StagedIdsNote.Visibility = run.Documents.Count > 0 && run.NothingChanged is null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ShowStagedError(string? message)
+    {
+        StagedErrorText.Text = message ?? "";
+        StagedErrorPanel.Visibility = string.IsNullOrEmpty(message) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>A dry run's PNG, read into memory so the file stays free; null when it is gone (images follow the capture retention).</summary>
+    private static ImageSource? LoadImage(string? path)
+    {
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+        try
+        {
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.UriSource = new Uri(path);
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch (Exception exception) when (exception is IOException or NotSupportedException or UriFormatException)
+        {
+            return null;
+        }
+    }
+
+    private static List<string> VisibleText(DependencyObject root)
+    {
+        var lines = new List<string>();
+        Collect(root);
+        return lines;
+
+        void Collect(DependencyObject node)
+        {
+            if (node is TextBlock { IsVisible: true } text && text.Text.Length > 0) lines.Add(text.Text);
+            for (var i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+                Collect(VisualTreeHelper.GetChild(node, i));
+        }
+    }
 
     private void OnDetectAgents(object sender, RoutedEventArgs e) => _settingsAction = DetectAgentsAsync();
 
@@ -399,6 +596,7 @@ public partial class OperatorWindow : Window
         TimeLimitText.IsEnabled = !_busy;
         SaveTimeLimitButton.IsEnabled = !_busy;
         DetectAgentsButton.IsEnabled = !_busy;
+        RequireDryRunSwitch.IsEnabled = !_busy;
         CloseSettingsButton.IsEnabled = !_busy;
     }
 
@@ -436,6 +634,25 @@ public partial class OperatorWindow : Window
         return _settingsAction;
     }
 
+    /// <summary>Clicks the Require dry run switch and completes once the save has finished (or failed and reverted).</summary>
+    public Task ClickRequireDryRunAsync()
+    {
+        _settingsAction = Task.CompletedTask;
+        RequireDryRunSwitch.IsChecked = RequireDryRunSwitch.IsChecked != true;
+        RequireDryRunSwitch.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, RequireDryRunSwitch));
+        return _settingsAction;
+    }
+
+    /// <summary>Clicks Staged Actions or Home in the mode switcher; completes once Staged Actions mode has read its dry run.</summary>
+    public Task ClickModeAsync(WindowMode mode)
+    {
+        _modeAction = Task.CompletedTask;
+        var tab = mode == WindowMode.StagedActions ? StagedTab : HomeTab;
+        tab.IsChecked = true;
+        tab.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, tab));
+        return _modeAction;
+    }
+
     /// <summary>Closes the drawer the way a person would: its Close button, Esc, or a click on the dimmed area.</summary>
     public void CloseSettingsBy(SettingsCloseRoute route)
     {
@@ -454,6 +671,19 @@ public partial class OperatorWindow : Window
                 break;
         }
     }
+}
+
+/// <summary>The window's two modes (spec #13 "The mode switcher"): Staged Actions exists only while Require dry run is on.</summary>
+public enum WindowMode
+{
+    Home,
+    StagedActions,
+}
+
+/// <summary>One dry run image as Staged Actions mode shows it: the picture, or why there is none.</summary>
+public sealed record StagedImageView(string Caption, ImageSource? Image, string? Error)
+{
+    public const string NotKept = "This image is no longer kept: dry run images are deleted with the agent's session unless kept.";
 }
 
 /// <summary>How the settings drawer was closed.</summary>

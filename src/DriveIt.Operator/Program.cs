@@ -28,6 +28,10 @@ namespace DriveIt.Operator;
 /// client configurations, so run it only with stand-in or throwaway client files; then it presses it
 /// in a window naming a missing mcp.json, whose failure shows by the row. With <c>--screenshots</c> it
 /// also saves the drawer with the results (<c>light-agents.png</c>, …).
+/// <c>--staged-actions</c> adds spec #13 AC-18's window half: it turns Require dry run on and off through the
+/// drawer's switch, fails a save, and writes dry-run receipts into run history for Staged Actions mode, so run it
+/// only against a throwaway data directory. With <c>--screenshots</c> it saves the mode (<c>light-staged.png</c>,
+/// <c>light-staged-failed.png</c>, …).
 /// </summary>
 public static class Program
 {
@@ -41,6 +45,7 @@ public static class Program
                 args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal) ? args[1] : null,
                 drawerWrites: args.Contains("--drawer-writes"),
                 detectAgents: args.Contains("--detect-agents"),
+                stagedActions: args.Contains("--staged-actions"),
                 screenshots: ValueAfter(args, "--screenshots"));
 
         using var instance = new Mutex(initiallyOwned: true, InstanceName, out var first);
@@ -70,7 +75,7 @@ public static class Program
         return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
     }
 
-    private static int SelfTest(string? reportPath, bool drawerWrites, bool detectAgents, string? screenshots)
+    private static int SelfTest(string? reportPath, bool drawerWrites, bool detectAgents, bool stagedActions, string? screenshots)
     {
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var windows = new List<object>();
@@ -102,6 +107,7 @@ public static class Program
                     var drawer = await DrawerOpenAndClose(window);
                     var writes = drawerWrites ? await DrawerWrites(window) : null;
                     var agents = detectAgents ? await DetectAgents(window, screenshots, theme.ToString().ToLowerInvariant()) : null;
+                    var staged = stagedActions ? await StagedActions(window, screenshots, theme.ToString().ToLowerInvariant()) : null;
                     windows.Add(new
                     {
                         theme = theme.ToString(),
@@ -119,6 +125,7 @@ public static class Program
                         drawer,
                         drawerWrites = writes,
                         agents,
+                        staged,
                     });
                     window.Close();
                 }
@@ -255,6 +262,149 @@ public static class Program
         }
 
         return new { rows, disabledWhileRunning, results, error, enabledAfter, failure };
+    }
+
+    /// <summary>
+    /// Spec #13 AC-18 (the window's half) and the drawer row: Require dry run off shows no switcher; the switch saves on;
+    /// Staged Actions mode says there is no dry run, then shows one as readable lines with no JSON, keeps it across
+    /// Home and back, adds Applied once the same call ran for real, is replaced by a newer failed dry run showing its
+    /// error, and waits for a dry run the add-in names; a failed save puts the switch back; off hides the switcher and
+    /// returns to Home. The receipts it writes are this self-test's own, in a throwaway data directory.
+    /// </summary>
+    private static async Task<object> StagedActions(OperatorWindow window, string? screenshots, string theme)
+    {
+        var host = OperatorLauncher.InstalledHost();
+        var data = OperatorLocator.DataDirectory(host);
+        var runs = Path.Combine(data, "runs");
+        var settingsFile = Path.Combine(data, ScriptTimeLimit.FileName);
+        var client = new OperatorClient(new ProcessOperatorRunner(host));
+        var root = await client.GetWorkspaceAsync()
+            ?? await client.SetWorkspaceAsync(Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "drive-it-self-test-root")).FullName);
+        Directory.CreateDirectory(runs);
+        foreach (var old in Directory.GetFiles(runs, "self-test-*.json")) File.Delete(old);
+        var clock = DateTimeOffset.UtcNow;
+        string Receipt(string runId, bool dryRun, string status, object? error = null, object? actions = null)
+        {
+            clock = clock.AddSeconds(1);
+            const string call = """{"codeHash":"self-test","script":null,"arguments":{},"processId":1,"document":null}""";
+            var receipt = new Dictionary<string, object?>
+            {
+                ["runId"] = runId,
+                ["displayName"] = dryRun ? "Renumber the level 2 doors" : "Renumber the level 2 doors for real",
+                ["idempotencyKey"] = runId,
+                ["fingerprint"] = dryRun ? call[..^1] + ""","dryRun":{"views":[],"createdViews":false,"pixelSize":1024}}""" : call,
+                ["dryRun"] = dryRun,
+                ["status"] = status,
+                ["session"] = new { processId = 1 },
+                ["document"] = new { title = "Tower", path = @"C:\models\Tower.rvt" },
+                ["workspaceRoot"] = root,
+                ["error"] = error,
+                ["startedAt"] = clock.ToString("O"),
+                ["completedAt"] = clock.AddMilliseconds(500).ToString("O"),
+            };
+            if (dryRun) receipt["rolledBack"] = true;
+            if (actions is not null) receipt["actions"] = actions;
+            if (dryRun && status == "succeeded") receipt["worksharing"] = new[] { new { document = "Tower", released = true } };
+            File.WriteAllText(Path.Combine(runs, runId + ".json"), JsonSerializer.Serialize(receipt));
+            return runId;
+        }
+        var actions = new[]
+        {
+            new Dictionary<string, object>
+            {
+                ["document"] = "Tower",
+                ["created"] = new { total = 3, truncated = false, groups = new[] { new { category = "Walls", family = "Basic Wall", type = "Generic - 200mm", count = 3, elements = new[] { new { id = 312045 }, new { id = 312046 }, new { id = 312047 } } } } },
+                ["modified"] = new { total = 2, truncated = false, elements = new object[] {
+                    new { id = 1234, category = "Doors", family = "Single-Flush", type = "0915 x 2134mm", values = new[] { new { name = "Mark", before = "D12", after = "D14" } } },
+                    new { id = 1235, category = "Doors", family = "Single-Flush", type = "0915 x 2134mm", values = Array.Empty<object>(), moved = true } } },
+                ["deleted"] = new { total = 1, truncated = false, groups = new[] { new { category = "Windows", family = "Fixed", type = "0915 x 1220mm", count = 1, elements = new[] { new { id = 777 } } } } },
+                ["alsoTouched"] = new { total = 1, categories = new[] { new { category = "Walls", count = 1 } } },
+            },
+        };
+
+        if (window.RequireDryRunOn)
+        {
+            await Within(window.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
+            await Within(window.ClickRequireDryRunAsync(), "The Require dry run switch did not finish saving.");
+            window.CloseSettingsBy(SettingsCloseRoute.CloseButton);
+        }
+        var off = new { switcherShown = window.ModeSwitcherShown, mode = window.CurrentMode.ToString() };
+
+        await Within(window.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
+        var rows = window.SettingsRowNames;
+        var switchBefore = window.RequireDryRunSwitchOn;
+        await Within(window.ClickRequireDryRunAsync(), "The Require dry run switch did not finish saving.");
+        var turnedOn = new { switchBefore, rows, switchOn = window.RequireDryRunSwitchOn, error = window.RequireDryRunError, stored = RequireDryRun.Read(data) };
+        if (screenshots is not null) Capture(window, Path.Combine(screenshots, theme + "-settings-require.png"));
+        window.CloseSettingsBy(SettingsCloseRoute.CloseButton);
+        var on = new { switcherShown = window.ModeSwitcherShown, mode = window.CurrentMode.ToString() };
+
+        await Within(window.ClickModeAsync(WindowMode.StagedActions), "Staged Actions mode did not finish reading.");
+        var none = new { mode = window.CurrentMode.ToString(), noneShown = window.StagedNoneShown, error = window.StagedErrorMessage };
+
+        var dry = Receipt("self-test-dry-" + theme, dryRun: true, "succeeded", actions: actions);
+        await Within(window.ClickModeAsync(WindowMode.StagedActions), "Staged Actions mode did not finish reading.");
+        var shown = window.StagedTextShown;
+        var first = new
+        {
+            runId = window.StagedRun?.RunId,
+            applied = window.AppliedShown,
+            text = shown,
+            noJson = !shown.Any(line => line.Contains('{') || line.Contains('"')),
+            error = window.StagedErrorMessage,
+        };
+        if (screenshots is not null) Capture(window, Path.Combine(screenshots, theme + "-staged.png"));
+        await Within(window.ClickModeAsync(WindowMode.Home), "Home did not show.");
+        var home = window.CurrentMode.ToString();
+        await Within(window.ClickModeAsync(WindowMode.StagedActions), "Staged Actions mode did not finish reading.");
+        var back = window.StagedRun?.RunId;
+
+        Receipt("self-test-real-" + theme, dryRun: false, "succeeded");
+        await Within(window.ClickModeAsync(WindowMode.StagedActions), "Staged Actions mode did not finish reading.");
+        var applied = new { runId = window.StagedRun?.RunId, applied = window.AppliedShown };
+
+        var failedId = Receipt("self-test-failed-" + theme, dryRun: true, "failed",
+            error: new { code = "SCRIPT_FAILED", message = "The door schedule has no level 2 doors." });
+        await Within(window.ClickModeAsync(WindowMode.StagedActions), "Staged Actions mode did not finish reading.");
+        var failed = new { runId = window.StagedRun?.RunId, failed = window.StagedRun?.Failed, text = window.StagedTextShown, applied = window.AppliedShown };
+        if (screenshots is not null) Capture(window, Path.Combine(screenshots, theme + "-staged-failed.png"));
+
+        // The add-in opens the window as the hold ends, before the server has written the receipt: it waits for it.
+        var laterId = "self-test-later-" + theme;
+        var writeLater = Task.Run(async () =>
+        {
+            await Task.Delay(1500);
+            Receipt(laterId, dryRun: true, "succeeded", actions: actions);
+        });
+        await Within(window.ShowStagedAsync(laterId), "Staged Actions mode did not wait for the named dry run.");
+        await writeLater;
+        var waited = window.StagedRun?.RunId;
+
+        // A save that fails puts the switch back to the stored value and shows the error by the row.
+        object failedSave;
+        var aside = settingsFile + ".self-test";
+        File.Move(settingsFile, aside, overwrite: true);
+        Directory.CreateDirectory(settingsFile);
+        try
+        {
+            await Within(window.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
+            await Within(window.ClickRequireDryRunAsync(), "The Require dry run switch did not finish saving.");
+            failedSave = new { error = window.RequireDryRunError, switchOn = window.RequireDryRunSwitchOn, switcherShown = window.ModeSwitcherShown };
+        }
+        finally
+        {
+            Directory.Delete(settingsFile);
+            File.Move(aside, settingsFile);
+        }
+        window.CloseSettingsBy(SettingsCloseRoute.CloseButton);
+
+        await Within(window.ClickSettingsAsync(), "The settings drawer did not finish reading the settings.");
+        await Within(window.ClickRequireDryRunAsync(), "The Require dry run switch did not finish saving.");
+        var turnedOff = new { switchOn = window.RequireDryRunSwitchOn, error = window.RequireDryRunError, stored = RequireDryRun.Read(data) };
+        window.CloseSettingsBy(SettingsCloseRoute.CloseButton);
+        var offAgain = new { switcherShown = window.ModeSwitcherShown, mode = window.CurrentMode.ToString() };
+
+        return new { off, turnedOn, on, none, dry, first, home, back, applied, failedId, failed, laterId, waited, failedSave, turnedOff, offAgain };
     }
 
     /// <summary>The window, then the window with the drawer open, as PNGs (spec #23 AC-3 and AC-7).</summary>

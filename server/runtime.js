@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DecisionStore } from "./decisions.js";
@@ -66,6 +66,13 @@ export const DRY_RUN_NOTES = Object.freeze({
   notReleased: document => `Drive-It could not release the elements this dry run borrowed in ${document}; colleagues cannot edit them until you use Relinquish All Mine or Synchronize with Central in Revit.`,
 });
 
+// Spec #13 "Require Dry Run": what each refusal tells the agent to do next.
+export const REQUIRE_DRY_RUN_MESSAGES = Object.freeze({
+  // The add-in's wording (RequireDryRunRules.NotAllowedMessage), for the save-as the server refuses before Revit.
+  notAllowed: (what, reason) => `${what} is not allowed while Require dry run is on: ${reason}, and Drive-It leaves that to the person. Do not retry it. Tell the user which documents have unsaved changes and ask them to save in Revit, or to turn Require dry run off in the Drive-It window if they want you to save.`,
+  fileWrite: what => `Require dry run is on and this run was not rehearsed, so ${what} is refused: nothing was written. Dry-run the same call first (execute_script with dryRun: true), compare the result with the request, then run the same call again without dryRun.`,
+});
+
 function documentWithKind(document) {
   if (!document) return null;
   const extension = document.path ? path.extname(document.path).toLowerCase() : "";
@@ -83,6 +90,8 @@ const PROVISIONAL = ["changes", "affectedElements", "createdViews", "transaction
 // Bridge members that only read the file a path names, so Revit's installed content passes (decision #23).
 // A path given to any other member is checked as a write.
 const BRIDGE_READS = new Set(["LoadFamily", "LoadFamilySymbol"]);
+// Document members that save to a path (Guardrails.CommitPoints): with Require dry run on, never the agent's, in any run.
+const BRIDGE_SAVES = new Set(["SaveAs", "SaveAsCloud"]);
 
 // A string argument that is an absolute file path goes through the outside-root policy (spec #15 "Guardrails").
 function isAbsoluteFilePath(value) {
@@ -121,6 +130,8 @@ export class Runtime {
     this.sessionReader = sessionReader;
     this.workerRunner = workerRunner;
     this.contentFolders = contentFolders;
+    // Spec #13 D12: one file per dry run a real run has taken, created exclusively, so one dry run allows one real run.
+    this.rehearsals = path.join(dataDir, "rehearsals");
     this.scripts = scripts || new ScriptCatalog({ workspace: this.workspace, history: this.history });
     this.scriptResolver = scriptResolver || ((reference, root) => this.scripts.resolve(reference, root));
     // Where a dry run's images are published (capture.js ReferenceImages); the MCP server sets it.
@@ -248,6 +259,16 @@ export class Runtime {
       receipt.workspaceRoot = workspaceRoot || await this.workspace.getRoot();
       // While another run holds Revit the pipe is busy; this run waits for it, within its own time.
       receipt.session = await this.sessionReader(input.processId, { connectWaitMs: Math.max(0, context.deadline - Date.now()) });
+      // Spec #13 "Require Dry Run": read as the run starts. A real run under it is rehearsed when it takes an unused
+      // dry run of the same call; the worker and the add-in are told, and refuse what an unrehearsed run may not do.
+      // A rehearsed run may change only the documents its dry run changed, and those it creates itself (D8, D12): the
+      // add-in checks each document at its first transaction, so a call that names no document is bound to the
+      // document it actually reaches, not to whichever one was active when the dry run ran.
+      if (!dryRun && await this.settings.requireDryRun()) {
+        const rehearsal = await this.takeRehearsal(fingerprint, receipt, previous);
+        receipt.rehearsedBy = rehearsal?.runId ?? null;
+        context.requireDryRun = rehearsal ? { rehearsed: true, documents: rehearsal.changedDocuments } : { rehearsed: false };
+      }
       temporary = await mkdtemp(path.join(tmpdir(), "drive-it-"));
       const workerReceipt = await this.workerRunner({
         source,
@@ -257,6 +278,7 @@ export class Runtime {
         runId,
         mode: receipt.mode,
         dryRun: Boolean(dryRun),
+        requireDryRun: context.requireDryRun,
         pythonPath: this.pythonPath,
         cwd: temporary,
         timeoutMs: input.timeoutMs || 30000,
@@ -293,13 +315,39 @@ export class Runtime {
     }
     if (context.holdPromise) await this.endHold(receipt, context);
     if (dryRun) this.completeDryRun(receipt, context);
-    else receipt.rehearsedBy = null;
+    else receipt.rehearsedBy ??= null;
 
     receipt.policyDecisionIds = [...context.decisionIds];
     receipt.policyRequests = context.policyRequests;
     if (receipt.status !== "pending") receipt.completedAt = new Date().toISOString();
     await this.history.save(receipt);
     return receipt;
+  }
+
+  /**
+   * Spec #13 D12: the dry run that rehearses this real run, or null. It has the same call (fingerprint without its dry
+   * run options), ran in the same Revit process, succeeded, was rolled back, and no other real run has taken it. A
+   * run that ended pending keeps its dry run when retried under the same idempotency key. No timer. Returns the dry
+   * run's id and the documents it changed; a dry run recorded before changedDocuments existed rehearses nothing.
+   */
+  async takeRehearsal(fingerprint, receipt, previous) {
+    if (previous?.rehearsedBy) {
+      const kept = await this.history.get(previous.rehearsedBy).catch(() => null);
+      return { runId: previous.rehearsedBy, changedDocuments: kept?.changedDocuments ?? [] };
+    }
+    const candidates = (await this.history.list()).filter(run => run.dryRun === true && run.status === "succeeded"
+      && run.rolledBack === true && callOf(run.fingerprint) === fingerprint
+      && run.session?.processId === receipt.session?.processId && Array.isArray(run.changedDocuments));
+    await mkdir(this.rehearsals, { recursive: true });
+    for (const dry of candidates) {
+      try {
+        await writeFile(path.join(this.rehearsals, `${dry.runId}.json`), `${JSON.stringify({ dryRun: dry.runId, runId: receipt.runId, takenAt: new Date().toISOString() })}\n`, { flag: "wx" });
+        return { runId: dry.runId, changedDocuments: dry.changedDocuments };
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+    }
+    return null;
   }
 
   readableRoots(context) {
@@ -352,6 +400,8 @@ export class Runtime {
       document: { path: documentPath, uniqueId: params.document?.uniqueId || null },
       workspaceRoot: context.workspaceRoot,
       operations,
+      // Only with the setting on: an add-in from before it refuses the member, so the run fails closed.
+      ...(context.requireDryRun ? { requireDryRun: context.requireDryRun } : {}),
     };
     // A dry run holds Revit from its first request, built-in or bridge, so every change it makes is rolled back.
     if (context.dryRun && !context.hold) {
@@ -436,6 +486,21 @@ export class Runtime {
           },
         };
       }
+      // Spec #13 D13: with Require dry run on, a save-as is not allowed in any run, rehearsed or not; the add-in
+      // refuses a direct Save and Close the same way. Refused here, so the rehearsal rule below does not answer first.
+      if (context.requireDryRun && BRIDGE_SAVES.has(call.member)) {
+        return {
+          status: "failed",
+          error: { code: "not_allowed_while_dry_run_required", message: REQUIRE_DRY_RUN_MESSAGES.notAllowed(`Document.${call.member}`, `it would write ${paths.join(", ")}, a lasting effect a rollback cannot undo`) },
+        };
+      }
+      // Spec #13 D11: with Require dry run on, a file write needs a rehearsal like a model change.
+      if (context.requireDryRun?.rehearsed === false && operation === "write_file") {
+        return {
+          status: "failed",
+          error: { code: "dry_run_required", message: REQUIRE_DRY_RUN_MESSAGES.fileWrite(`${call.member}, which would write ${paths.join(", ")},`) },
+        };
+      }
       const decision = await this.policy.authorize(context.runId, [{ operation, paths }], context.workspaceRoot, context.receipt.displayName, this.readableRoots(context));
       this.recordPolicy(context.receipt, context, decision);
       if (decision.status === "pending" || decision.status === "denied") return decision;
@@ -484,6 +549,7 @@ export class Runtime {
         displayName: context.receipt.displayName,
         timeLimitMs,
         dryRun: Boolean(context.dryRun),
+        requireDryRun: context.requireDryRun,
       });
       context.hold = hold;
       context.heldAt = Date.now();
@@ -609,6 +675,8 @@ export class Runtime {
       && (summary.documents || []).every(document => document.state === "rolled_back");
     if (receipt.status === "succeeded" && summary?.outcome !== "rolled_back") this.holdEndedEarly(receipt, context, summary);
     if (failedDocuments.length) this.documentsFailed(receipt, failedDocuments);
+    // Spec #13 D12: what this dry run rehearses, as the add-in identifies a document (title and path).
+    receipt.changedDocuments = (summary?.documents || []).map(document => ({ title: document.title, path: document.path ?? null }));
     if (receipt.status === "succeeded") receipt.actions = summary?.actions ?? [];
     if (summary?.worksharing?.length) receipt.worksharing = summary.worksharing;
     receipt.images = slots ? await this.publishDryRunImages(receipt, context, summary?.images ?? [], slots) : [];
@@ -657,6 +725,7 @@ export class Runtime {
   completeDryRun(receipt, context) {
     // A dry run that never reached Revit changed nothing there.
     receipt.rolledBack = context.rolledBack ?? true;
+    receipt.changedDocuments ??= [];
     receipt.warnings ??= [];
     receipt.images ??= [];
     receipt.skippedFileWrites = context.skippedFileWrites;

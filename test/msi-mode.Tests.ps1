@@ -147,6 +147,17 @@ try {
     foreach ($window in @($selfTest.windows)) {
         Assert-ModeTest ($window.mode -eq 'dev' -and $window.devModeBanner -and -not $window.requestsShown) "The Dev Mode window does not show Dev Mode: $($window | ConvertTo-Json -Compress)"
     }
+    # Spec #13 AC-18: the Require dry run switch and Staged Actions mode in Dev Mode, against a throwaway data
+    # directory so the install's own settings and history stay untouched; screenshots beside the window's.
+    $stagedData = Join-Path $LogDirectory 'staged-data-dev'
+    [IO.Directory]::CreateDirectory($stagedData) | Out-Null
+    $savedData = $env:DRIVE_IT_DATA_DIR
+    $env:DRIVE_IT_DATA_DIR = $stagedData
+    try {
+        Invoke-OperatorSelfTest -Exe $operatorExe -Report (Join-Path $LogDirectory 'operator-self-test-staged-dev.json') -Screenshots (Join-Path $LogDirectory 'window-screens\dev') -StagedActions | Out-Null
+    } finally {
+        $env:DRIVE_IT_DATA_DIR = $savedData
+    }
     $windows = @($selfTest.windows)
     $agents = (@($windows | ForEach-Object { (Get-OperatorAgentStatus -Window $_ -Client 'claude-desktop') -join ',' }) -join ' then ')
     Assert-ModeTest ($agents -eq 'added then already') "Detect agents in Dev Mode reported Claude Desktop as $agents, expected added then already."
