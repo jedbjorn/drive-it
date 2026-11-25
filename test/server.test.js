@@ -77,7 +77,11 @@ test("get_revit_session reports disconnect and validates a Windows pipe", async 
 
   if (process.platform === "win32") {
     const info = { processId, version: "2026", build: "test" };
-    const bridge = createServer(socket => socket.end(`${JSON.stringify(info)}\n`));
+    const bridge = createServer(socket => {
+      // Spec #28: get_revit_session now also writes a documents.list to this stand-in, which has already closed.
+      socket.on("error", () => {});
+      socket.end(`${JSON.stringify(info)}\n`);
+    });
     bridge.listen(String.raw`\\.\pipe\drive-it-${processId}`);
     await once(bridge, "listening");
     t.after(() => new Promise(resolve => bridge.close(resolve)));

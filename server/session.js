@@ -82,6 +82,9 @@ async function connect(processId, timeoutMs, { connectWaitMs = 0, signal, connec
   }
   const pipe = await openPipe(processId, { waitMs: connectWaitMs, signal, connector });
   pipe.setEncoding("utf8");
+  // A Windows pipe the add-in closes may still report EPIPE after the reply was read; reads and writes report their
+  // own failures, so a late error event must not end the server (as lineReader does for a hold).
+  pipe.on("error", () => {});
   const iterator = pipe[Symbol.asyncIterator]();
   let buffered = "";
   const timeout = setTimeout(() => pipe.destroy(new Error("Revit connection timed out.")), timeoutMs);
