@@ -112,16 +112,21 @@ public class StagedActionsTests
         Assert.Equal(["Created (3)", "Modified (2)", "Deleted (1)"], document.Groups.Select(group => group.Heading));
         var created = Assert.Single(document.Groups[0].Lines);
         Assert.Equal("Walls · Basic Wall: Generic - 200mm × 3", created.Text);
-        Assert.Equal(["312045, 312046, 312047 North"], created.Details);
-        Assert.Equal("Doors · Single-Flush: 0915 x 2134mm 1234", document.Groups[1].Lines[0].Text);
-        Assert.Equal(["Mark: D12 → D14"], document.Groups[1].Lines[0].Details);
+        Assert.Equal(["312045, 312046, North (312047)"], created.Details);
+        Assert.Equal("Doors · Single-Flush: 0915 x 2134mm", document.Groups[1].Lines[0].Text);
+        Assert.Equal("id 1234", document.Groups[1].Lines[0].Id);
+        Assert.Equal([new StagedChange("Mark", "D12", "D14")], document.Groups[1].Lines[0].Changes);
+        Assert.Equal("Mark: D12 → D14", document.Groups[1].Lines[0].Changes[0].ToString());
+        Assert.Empty(document.Groups[1].Lines[0].Details);
         Assert.Equal(["Moved"], document.Groups[1].Lines[1].Details);
+        Assert.Equal([StagedText.Created, StagedText.Modified, StagedText.Deleted], document.Groups.Select(group => group.Name));
         Assert.Equal("Windows · Fixed: 0915 x 1220mm", document.Groups[2].Lines[0].Text);
         Assert.Equal("Also touched by Revit: 2 elements", document.AlsoTouched);
         Assert.Equal(["Walls: 2"], document.AlsoTouchedLines);
 
-        Assert.Equal(new StagedImage("Level 2 (FloorPlan)", @"C:\ref\a.png", null), run.Images[0]);
-        Assert.Equal(new StagedImage("Sheet A1 (DrawingSheet)", null, "A sheet cannot be captured."), run.Images[1]);
+        Assert.Equal(new StagedImage("Level 2 (Floor plan)", @"C:\ref\a.png", null), run.Images[0]);
+        Assert.Equal(new StagedImage("Sheet A1 (Drawing sheet)", null, "A sheet cannot be captured."), run.Images[1]);
+        Assert.Equal("3D view", StagedText.ViewType("ThreeD"));
         Assert.StartsWith("Borrowed elements in Tower were released", run.Worksharing[0]);
         Assert.StartsWith("Borrowed elements in Annex could not be released. Use Relinquish All Mine", run.Worksharing[1]);
 
@@ -145,6 +150,9 @@ public class StagedActionsTests
         Assert.Empty(run.Documents);
         Assert.Null(run.NothingChanged);
         Assert.EndsWith("· Stopped", run.Meta);
+        Assert.True(run.RolledBack);
+        Assert.Equal("This dry run was stopped.", StagedText.FailedLead(run.Outcome));
+        Assert.StartsWith("Nothing was changed", StagedText.FailedNote(run.RolledBack));
     }
 
     [Fact]
@@ -161,7 +169,9 @@ public class StagedActionsTests
         var document = Assert.Single(run.Documents);
         Assert.Equal(["Created (250)", "Modified (5)"], document.Groups.Select(group => group.Heading));
         Assert.Equal("and 248 more not listed", document.Groups[0].Lines[^1].Text);
-        Assert.Equal(["Mark: (empty) → D1", "and 22 more values"], document.Groups[1].Lines[0].Details);
+        Assert.Equal(["ids 1, 2"], document.Groups[0].Lines[0].Details);
+        Assert.Equal(["Mark: (empty) → D1"], document.Groups[1].Lines[0].Changes.Select(change => change.ToString()));
+        Assert.Equal(["and 22 more values"], document.Groups[1].Lines[0].Details);
         Assert.Equal("and 4 more not listed", document.Groups[1].Lines[^1].Text);
         Assert.Null(document.AlsoTouched);
         Assert.Equal("Dry run", run.Title);

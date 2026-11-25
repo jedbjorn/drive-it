@@ -235,6 +235,7 @@ public static class UiPalette
         new(AccentForeground, Window, 3, "focus ring"),
         new(AccentForeground, Surface, 3, "focus ring, today in the calendar, drop marker"),
         new(AccentForeground, SurfaceAlt, 3, "New chart glyph"),
+        new(AccentForeground, InfoSoft, 4.5, "badges (Dry run, Applied) and the selected mode"),
         new(StrongBorder, Surface, 3, "check box outline"),
         new(CheckFill, Surface, 3, "checked check box"),
         new(CheckFill, ErrorRow, 3, "checked check box in an invalid row"),

@@ -14,6 +14,7 @@
 <Window x:Class="DriveIt.UI.OperatorWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:core="clr-namespace:DriveIt.Core.Operator;assembly=DriveIt.Core"
         Title="Drive-It"
         Width="920" Height="780" MinWidth="720" MinHeight="640"
         WindowStartupLocation="CenterOwner"
@@ -91,7 +92,10 @@
                 </Setter>
             </Style>
 
-            <!-- The mode switcher's two choices (spec #13): flat segments in palette colors; lane D finishes the look. -->
+            <!--
+                The mode switcher's two choices (spec #13): flat segments in palette colors. The hidden semibold
+                copy of the label holds each segment at its selected width, so choosing one moves nothing.
+            -->
             <Style x:Key="ModeTab" TargetType="RadioButton">
                 <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
                 <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}" />
@@ -100,14 +104,18 @@
                     <Setter.Value>
                         <ControlTemplate TargetType="RadioButton">
                             <Border x:Name="Segment" Background="Transparent" CornerRadius="3" Padding="12,4" SnapsToDevicePixels="True">
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                <Grid>
+                                    <TextBlock Text="{TemplateBinding Content}" FontWeight="SemiBold" Visibility="Hidden" />
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Grid>
                             </Border>
                             <ControlTemplate.Triggers>
                                 <Trigger Property="IsMouseOver" Value="True">
                                     <Setter TargetName="Segment" Property="Background" Value="{StaticResource HoverBrush}" />
+                                    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
                                 </Trigger>
                                 <Trigger Property="IsChecked" Value="True">
-                                    <Setter TargetName="Segment" Property="Background" Value="{StaticResource AccentSoftBrush}" />
+                                    <Setter TargetName="Segment" Property="Background" Value="{StaticResource InfoSoftBrush}" />
                                     <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
                                     <Setter Property="FontWeight" Value="SemiBold" />
                                 </Trigger>
@@ -117,9 +125,20 @@
                 </Setter>
             </Style>
 
+            <Style x:Key="SwitchFocusRing">
+                <Setter Property="Control.Template">
+                    <Setter.Value>
+                        <ControlTemplate>
+                            <Rectangle Margin="-3" RadiusX="13" RadiusY="13" StrokeThickness="1.5"
+                                       Stroke="{StaticResource AccentForegroundBrush}" SnapsToDevicePixels="True" />
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
             <!-- The Require dry run switch: a track and a knob, on when checked. -->
             <Style x:Key="SwitchToggle" TargetType="CheckBox">
-                <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}" />
+                <Setter Property="FocusVisualStyle" Value="{StaticResource SwitchFocusRing}" />
                 <Setter Property="Cursor" Value="Hand" />
                 <Setter Property="Template">
                     <Setter.Value>
@@ -131,12 +150,23 @@
                                          Fill="{StaticResource MutedTextBrush}" />
                             </Border>
                             <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Track" Property="BorderBrush" Value="{StaticResource AccentForegroundBrush}" />
+                                </Trigger>
                                 <Trigger Property="IsChecked" Value="True">
                                     <Setter TargetName="Track" Property="Background" Value="{StaticResource CheckFillBrush}" />
                                     <Setter TargetName="Track" Property="BorderBrush" Value="{StaticResource CheckFillBrush}" />
                                     <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right" />
-                                    <Setter TargetName="Knob" Property="Fill" Value="{StaticResource OnAccentBrush}" />
+                                    <Setter TargetName="Knob" Property="Fill" Value="{StaticResource CheckMarkBrush}" />
                                 </Trigger>
+                                <MultiTrigger>
+                                    <MultiTrigger.Conditions>
+                                        <Condition Property="IsChecked" Value="True" />
+                                        <Condition Property="IsMouseOver" Value="True" />
+                                    </MultiTrigger.Conditions>
+                                    <Setter TargetName="Track" Property="Background" Value="{StaticResource CheckFillHoverBrush}" />
+                                    <Setter TargetName="Track" Property="BorderBrush" Value="{StaticResource CheckFillHoverBrush}" />
+                                </MultiTrigger>
                                 <Trigger Property="IsEnabled" Value="False">
                                     <Setter Property="Opacity" Value="0.45" />
                                 </Trigger>
@@ -210,11 +240,10 @@
                 </StackPanel>
             </Border>
 
-            <!-- Settings: opens the drawer. Disabled while the window is busy. -->
+            <!-- Settings: opens the drawer. Disabled while the window is busy. Its label is its name, so it has no tooltip. -->
             <Button x:Name="SettingsButton" Grid.Row="0" HorizontalAlignment="Right" Margin="0,0,0,8"
                     Style="{StaticResource IconButton}" Click="OnOpenSettings"
-                    AutomationProperties.Name="Settings" AutomationProperties.AutomationId="SettingsButton"
-                    ToolTip="Settings">
+                    AutomationProperties.Name="Settings" AutomationProperties.AutomationId="SettingsButton">
                 <StackPanel Orientation="Horizontal">
                     <TextBlock FontFamily="{StaticResource IconFont}" FontSize="14" VerticalAlignment="Center" Text="&#xE713;" />
                     <TextBlock Margin="6,0,0,0" VerticalAlignment="Center" Text="Settings" />
@@ -326,8 +355,15 @@
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel AutomationProperties.Name="{Binding Label}">
-                                    <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" />
-                                    <TextBlock Text="{Binding Meta}" Style="{StaticResource MutedText}" />
+                                    <!-- A dry run carries its label as a badge beside its name (spec #13 "Receipts and the Library"). -->
+                                    <DockPanel>
+                                        <Border DockPanel.Dock="Right" Margin="8,0,0,0" Style="{StaticResource Badge}"
+                                                Visibility="{Binding DryRun, Converter={StaticResource BoolToVisible}}">
+                                            <TextBlock Style="{StaticResource BadgeText}" Text="{x:Static core:HoldText.DryRunLabel}" />
+                                        </Border>
+                                        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" />
+                                    </DockPanel>
+                                    <TextBlock Margin="0,1,0,0" Text="{Binding Detail}" Style="{StaticResource MutedText}" ToolTip="{Binding Meta}" />
                                 </StackPanel>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -350,95 +386,158 @@
                 the images and the workshared release line. No JSON; the receipt stays in run history.
             -->
             <ScrollViewer x:Name="StagedPanel" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"
-                          HorizontalScrollBarVisibility="Disabled" Focusable="False"
+                          HorizontalScrollBarVisibility="Disabled" Focusable="True" FocusVisualStyle="{StaticResource FocusRing}"
                           AutomationProperties.Name="Staged Actions" AutomationProperties.AutomationId="StagedActions">
                 <StackPanel Margin="0,4,4,0">
                     <Border x:Name="StagedErrorPanel" Margin="0,0,0,10" Style="{StaticResource ErrorBanner}" Visibility="Collapsed">
                         <TextBlock x:Name="StagedErrorText" Style="{StaticResource ErrorText}" />
                     </Border>
-                    <TextBlock x:Name="StagedNoneText" Style="{StaticResource MutedText}" TextWrapping="Wrap" Visibility="Collapsed"
-                               AutomationProperties.AutomationId="StagedNone" />
+                    <TextBlock x:Name="StagedReadingText" Style="{StaticResource MutedText}" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="StagedReading" />
+                    <Border x:Name="StagedNonePanel" Style="{StaticResource Panel}" Padding="16,14" Visibility="Collapsed">
+                        <TextBlock x:Name="StagedNoneText" Style="{StaticResource MutedText}" TextWrapping="Wrap"
+                                   AutomationProperties.AutomationId="StagedNone" />
+                    </Border>
                     <StackPanel x:Name="StagedRunPanel" Visibility="Collapsed">
                         <DockPanel LastChildFill="True">
-                            <Border x:Name="AppliedBadge" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="12,0,0,0"
-                                    Padding="10,2" CornerRadius="10" Background="{StaticResource AccentSoftBrush}"
-                                    Visibility="Collapsed" AutomationProperties.Name="Applied">
-                                <TextBlock x:Name="AppliedText" FontWeight="SemiBold" Foreground="{StaticResource AccentForegroundBrush}" />
+                            <Border x:Name="AppliedBadge" DockPanel.Dock="Right" Margin="12,3,0,0" VerticalAlignment="Top"
+                                    Style="{StaticResource Badge}" Padding="10,1,10,2" Visibility="Collapsed"
+                                    AutomationProperties.Name="Applied" ToolTip="{x:Static core:StagedText.AppliedHelp}">
+                                <TextBlock x:Name="AppliedText" Style="{StaticResource BadgeText}" FontSize="12" />
                             </Border>
                             <TextBlock x:Name="StagedTitle" Style="{StaticResource HeadingText}" TextWrapping="Wrap" />
                         </DockPanel>
                         <TextBlock x:Name="StagedMeta" Margin="0,4,0,0" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+                        <!-- A dry run that did not succeed: what happened, its error, and whether the model is as it was. -->
                         <Border x:Name="StagedFailurePanel" Margin="0,12,0,0" Style="{StaticResource ErrorBanner}" Visibility="Collapsed">
-                            <TextBlock x:Name="StagedFailureText" Style="{StaticResource ErrorText}" />
+                            <StackPanel>
+                                <TextBlock x:Name="StagedFailureLead" Style="{StaticResource ErrorText}" FontWeight="SemiBold" />
+                                <TextBlock x:Name="StagedFailureText" Margin="0,2,0,0" Style="{StaticResource ErrorText}" />
+                            </StackPanel>
                         </Border>
+                        <TextBlock x:Name="StagedFailureNote" Margin="0,8,0,0" Style="{StaticResource MutedText}" TextWrapping="Wrap"
+                                   Visibility="Collapsed" />
+                        <!-- What the lists are: nothing has been changed yet, or the same call has since run for real. -->
+                        <TextBlock x:Name="StagedLead" Margin="0,12,0,0" TextWrapping="Wrap" Visibility="Collapsed" />
                         <TextBlock x:Name="StagedNothingText" Margin="0,12,0,0" TextWrapping="Wrap" Visibility="Collapsed" />
                         <ItemsControl x:Name="StagedDocuments" Margin="0,12,0,0" Focusable="False">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Border Style="{StaticResource Panel}" Margin="0,0,0,12">
+                                    <Border Style="{StaticResource Panel}" Padding="0" Margin="0,0,0,12">
                                         <StackPanel>
-                                            <TextBlock Style="{StaticResource SectionText}" Text="{Binding Title}" />
-                                            <ItemsControl ItemsSource="{Binding Groups}" Focusable="False">
-                                                <ItemsControl.ItemTemplate>
-                                                    <DataTemplate>
-                                                        <StackPanel Margin="0,4,0,8">
-                                                            <TextBlock FontWeight="SemiBold" Text="{Binding Heading}" />
-                                                            <ItemsControl ItemsSource="{Binding Lines}" Focusable="False">
-                                                                <ItemsControl.ItemTemplate>
-                                                                    <DataTemplate>
-                                                                        <StackPanel Margin="12,4,0,0">
-                                                                            <TextBlock TextWrapping="Wrap" Text="{Binding Text}" />
-                                                                            <ItemsControl ItemsSource="{Binding Details}" Margin="16,1,0,0" Focusable="False">
-                                                                                <ItemsControl.ItemTemplate>
-                                                                                    <DataTemplate>
-                                                                                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Text="{Binding}" />
-                                                                                    </DataTemplate>
-                                                                                </ItemsControl.ItemTemplate>
-                                                                            </ItemsControl>
-                                                                        </StackPanel>
-                                                                    </DataTemplate>
-                                                                </ItemsControl.ItemTemplate>
-                                                            </ItemsControl>
-                                                        </StackPanel>
-                                                    </DataTemplate>
-                                                </ItemsControl.ItemTemplate>
-                                            </ItemsControl>
-                                            <StackPanel Visibility="{Binding AlsoTouched, Converter={StaticResource NullToCollapsed}}">
-                                                <ToggleButton x:Name="AlsoTouchedToggle" Style="{StaticResource Disclosure}" Content="{Binding AlsoTouched}" />
-                                                <ItemsControl ItemsSource="{Binding AlsoTouchedLines}" Margin="18,2,0,0" Focusable="False"
-                                                              Visibility="{Binding IsChecked, ElementName=AlsoTouchedToggle, Converter={StaticResource BoolToVisible}}">
+                                            <!-- The document, as a header band over its lists. -->
+                                            <Border Padding="12,8" CornerRadius="3,3,0,0" BorderThickness="0,0,0,1"
+                                                    BorderBrush="{StaticResource DividerBrush}" Background="{StaticResource SurfaceAltBrush}">
+                                                <DockPanel>
+                                                    <TextBlock DockPanel.Dock="Left" Margin="0,0,8,0" VerticalAlignment="Center"
+                                                               FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                               Foreground="{StaticResource MutedTextBrush}" Text="&#xE8A5;" />
+                                                    <TextBlock Style="{StaticResource SectionText}" Margin="0" TextTrimming="CharacterEllipsis"
+                                                               Text="{Binding Title}" />
+                                                </DockPanel>
+                                            </Border>
+                                            <StackPanel Margin="12,12,12,4">
+                                                <ItemsControl ItemsSource="{Binding Groups}" Focusable="False">
                                                     <ItemsControl.ItemTemplate>
                                                         <DataTemplate>
-                                                            <TextBlock Style="{StaticResource MutedText}" Text="{Binding}" />
+                                                            <StackPanel Margin="0,0,0,12">
+                                                                <!-- Created, Modified or Deleted, each with its own mark so deletions are found at a glance. -->
+                                                                <DockPanel>
+                                                                    <TextBlock x:Name="Mark" DockPanel.Dock="Left" Width="20" VerticalAlignment="Center"
+                                                                               FontFamily="{StaticResource IconFont}" FontSize="11" Text="&#xE710;"
+                                                                               Foreground="{StaticResource AccentForegroundBrush}" />
+                                                                    <TextBlock FontWeight="SemiBold" Text="{Binding Heading}" />
+                                                                </DockPanel>
+                                                                <ItemsControl ItemsSource="{Binding Lines}" Margin="20,0,0,0" Focusable="False">
+                                                                    <ItemsControl.ItemTemplate>
+                                                                        <DataTemplate>
+                                                                            <StackPanel Margin="0,5,0,0">
+                                                                                <!-- Runs on one line of XAML: a break between them would show as a space. -->
+                                                                                <TextBlock TextWrapping="Wrap"><Run Text="{Binding Text, Mode=OneWay}" /><Run Text="   " /><Run Text="{Binding Id, Mode=OneWay}" Foreground="{StaticResource MutedTextBrush}" /></TextBlock>
+                                                                                <ItemsControl ItemsSource="{Binding Changes}" Margin="14,1,0,0" Focusable="False">
+                                                                                    <ItemsControl.ItemTemplate>
+                                                                                        <DataTemplate>
+                                                                                            <!-- "Mark: D12 → D14": the name and the old value muted, the new value in full. -->
+                                                                                            <TextBlock TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}"><Run Text="{Binding Name, Mode=OneWay}" /><Run Text=": " /><Run Text="{Binding Before, Mode=OneWay}" /><Run Text=" → " /><Run Text="{Binding After, Mode=OneWay}" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" /></TextBlock>
+                                                                                        </DataTemplate>
+                                                                                    </ItemsControl.ItemTemplate>
+                                                                                </ItemsControl>
+                                                                                <ItemsControl ItemsSource="{Binding Details}" Margin="14,1,0,0" Focusable="False">
+                                                                                    <ItemsControl.ItemTemplate>
+                                                                                        <DataTemplate>
+                                                                                            <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Text="{Binding}" />
+                                                                                        </DataTemplate>
+                                                                                    </ItemsControl.ItemTemplate>
+                                                                                </ItemsControl>
+                                                                            </StackPanel>
+                                                                        </DataTemplate>
+                                                                    </ItemsControl.ItemTemplate>
+                                                                </ItemsControl>
+                                                            </StackPanel>
+                                                            <DataTemplate.Triggers>
+                                                                <DataTrigger Binding="{Binding Name}" Value="{x:Static core:StagedText.Modified}">
+                                                                    <Setter TargetName="Mark" Property="Text" Value="&#xE70F;" />
+                                                                    <Setter TargetName="Mark" Property="Foreground" Value="{StaticResource WarningTextBrush}" />
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding Name}" Value="{x:Static core:StagedText.Deleted}">
+                                                                    <Setter TargetName="Mark" Property="Text" Value="&#xE74D;" />
+                                                                    <Setter TargetName="Mark" Property="Foreground" Value="{StaticResource DangerForegroundBrush}" />
+                                                                </DataTrigger>
+                                                            </DataTemplate.Triggers>
                                                         </DataTemplate>
                                                     </ItemsControl.ItemTemplate>
                                                 </ItemsControl>
+                                                <StackPanel Margin="0,0,0,8" Visibility="{Binding AlsoTouched, Converter={StaticResource NullToCollapsed}}">
+                                                    <ToggleButton x:Name="AlsoTouchedToggle" Style="{StaticResource Disclosure}" Content="{Binding AlsoTouched}"
+                                                                  ToolTip="{x:Static core:StagedText.AlsoTouchedHelp}" />
+                                                    <ItemsControl ItemsSource="{Binding AlsoTouchedLines}" Margin="20,2,0,0" Focusable="False"
+                                                                  Visibility="{Binding IsChecked, ElementName=AlsoTouchedToggle, Converter={StaticResource BoolToVisible}}">
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <TextBlock Style="{StaticResource MutedText}" Text="{Binding}" />
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                </StackPanel>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                        <ItemsControl x:Name="StagedImages" Focusable="False">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <WrapPanel />
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <StackPanel Width="400" Margin="0,0,12,12">
-                                        <Border BorderThickness="1" BorderBrush="{StaticResource BorderBrush}"
-                                                Visibility="{Binding Image, Converter={StaticResource NullToCollapsed}}">
-                                            <Image Source="{Binding Image}" Stretch="Uniform" MaxHeight="300" />
+                        <!-- The dry run's images: one card each, the same size whether the view was exported or not. -->
+                        <StackPanel x:Name="StagedImagesPanel" Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource SectionText}" Margin="0,0,0,8" Text="{x:Static core:StagedText.ImagesHeading}" />
+                            <ItemsControl x:Name="StagedImages" Focusable="False">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Width="400" Margin="0,0,12,12" Padding="0" Style="{StaticResource Panel}">
+                                            <StackPanel>
+                                                <Grid Height="260">
+                                                    <Image Margin="1" Source="{Binding Image}" Stretch="Uniform" />
+                                                    <StackPanel Margin="24,0" VerticalAlignment="Center"
+                                                                Visibility="{Binding Error, Converter={StaticResource NullToCollapsed}}">
+                                                        <TextBlock HorizontalAlignment="Center" FontFamily="{StaticResource IconFont}" FontSize="20"
+                                                                   Foreground="{StaticResource MutedTextBrush}" Text="&#xE8B9;" />
+                                                        <TextBlock Margin="0,8,0,0" Style="{StaticResource MutedText}" TextWrapping="Wrap"
+                                                                   TextAlignment="Center" Text="{Binding Error}" />
+                                                    </StackPanel>
+                                                </Grid>
+                                                <Border Padding="12,7" CornerRadius="0,0,3,3" BorderThickness="0,1,0,0"
+                                                        BorderBrush="{StaticResource DividerBrush}" Background="{StaticResource SurfaceAltBrush}">
+                                                    <TextBlock TextTrimming="CharacterEllipsis" Text="{Binding Caption}" ToolTip="{Binding Caption}" />
+                                                </Border>
+                                            </StackPanel>
                                         </Border>
-                                        <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" Text="{Binding Caption}" />
-                                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Text="{Binding Error}"
-                                                   Visibility="{Binding Error, Converter={StaticResource NullToCollapsed}}" />
-                                    </StackPanel>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
                         <ItemsControl x:Name="StagedWorksharing" Focusable="False">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
@@ -448,7 +547,7 @@
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                        <TextBlock x:Name="StagedIdsNote" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
+                        <TextBlock x:Name="StagedIdsNote" Margin="0,0,0,8" Style="{StaticResource MutedText}" TextWrapping="Wrap" />
                     </StackPanel>
                 </StackPanel>
             </ScrollViewer>
@@ -500,6 +599,7 @@
                                 </Grid.RowDefinitions>
                                 <TextBlock Grid.ColumnSpan="4" Style="{StaticResource SectionText}" Text="Script time limit" />
                                 <TextBox x:Name="TimeLimitText" Grid.Row="1" Width="72" HorizontalContentAlignment="Right"
+                                         KeyDown="OnTimeLimitKeyDown"
                                          AutomationProperties.Name="Script time limit in seconds" />
                                 <TextBlock Grid.Row="1" Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center" Text="seconds" />
                                 <Button x:Name="SaveTimeLimitButton" Grid.Row="1" Grid.Column="3" Margin="8,0,0,0"
@@ -546,15 +646,35 @@
                         <Border x:Name="AgentsRow" Style="{StaticResource Panel}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Style="{StaticResource SectionText}" Text="Agents" />
-                                <Button x:Name="DetectAgentsButton" HorizontalAlignment="Left" MinWidth="96"
+                                <Button x:Name="DetectAgentsButton" HorizontalAlignment="Left" MinWidth="112"
                                         Content="Detect agents" Click="OnDetectAgents" />
                                 <TextBlock x:Name="AgentsError" Margin="0,6,0,0" Style="{StaticResource ErrorText}"
                                            Visibility="Collapsed" AutomationProperties.Name="Detect agents error" />
-                                <ItemsControl x:Name="AgentResults" Margin="0,6,0,0" Visibility="Collapsed" Focusable="False"
+                                <!-- One line per client, with a mark for how it went: added, already there, not installed, could not add. -->
+                                <ItemsControl x:Name="AgentResults" Margin="0,8,0,2" Visibility="Collapsed" Focusable="False"
                                               AutomationProperties.Name="Detect agents results">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
-                                            <TextBlock Margin="0,2,0,0" TextWrapping="Wrap" Text="{Binding Message}" />
+                                            <DockPanel Margin="0,0,0,4">
+                                                <TextBlock x:Name="Mark" DockPanel.Dock="Left" Width="20" Margin="0,3,0,0" VerticalAlignment="Top"
+                                                           FontFamily="{StaticResource IconFont}" FontSize="11" Text="&#xE73E;"
+                                                           Foreground="{StaticResource AccentForegroundBrush}" />
+                                                <TextBlock TextWrapping="Wrap" Text="{Binding Message}" />
+                                            </DockPanel>
+                                            <DataTemplate.Triggers>
+                                                <DataTrigger Binding="{Binding Status}" Value="already">
+                                                    <Setter TargetName="Mark" Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding Status}" Value="not_installed">
+                                                    <Setter TargetName="Mark" Property="Text" Value="&#xE738;" />
+                                                    <Setter TargetName="Mark" Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding Status}" Value="failed">
+                                                    <Setter TargetName="Mark" Property="Text" Value="&#xE783;" />
+                                                    <Setter TargetName="Mark" Property="FontSize" Value="12" />
+                                                    <Setter TargetName="Mark" Property="Foreground" Value="{StaticResource ErrorBrush}" />
+                                                </DataTrigger>
+                                            </DataTemplate.Triggers>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>

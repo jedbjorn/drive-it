@@ -116,14 +116,14 @@ public class OperatorLocatorTests
     public void MissingNode_HasTheModulesMessage()
     {
         var error = Assert.Throws<OperatorException>(() => OperatorLocator.Locate(Host([BundledScript])));
-        Assert.Equal("Drive It could not locate its Node.js runtime.", error.Message);
+        Assert.Equal("Drive-It could not locate its Node.js runtime.", error.Message);
     }
 
     [Fact]
     public void MissingScript_NamesTheExpectedPath()
     {
         var error = Assert.Throws<OperatorException>(() => OperatorLocator.Locate(Host([BundledNode])));
-        Assert.Equal($"Drive It operator runtime is not installed: {BundledScript}", error.Message);
+        Assert.Equal($"Drive-It operator runtime is not installed: {BundledScript}", error.Message);
     }
 
     [Fact]

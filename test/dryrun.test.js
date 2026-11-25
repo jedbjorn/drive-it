@@ -12,7 +12,7 @@ import { createDriveItServer, SERVER_INSTRUCTIONS } from "../server/app.js";
 import { ReferenceImages } from "../server/capture.js";
 import { checkedSuccess } from "../server/library.js";
 import { DRY_RUN_GUIDANCE } from "../server/reference.js";
-import { callOf, DRY_RUN_NOTES, dryRunOptions, Runtime } from "../server/runtime.js";
+import { callOf, DRY_RUN_NOTES, dryRunOpening, dryRunOptions, Runtime } from "../server/runtime.js";
 
 function chunk(type, data) {
   const length = Buffer.alloc(4);
@@ -273,6 +273,22 @@ test("a dry run that fails is rolled back, never partially applied, and has no a
   assert.deepEqual(receipt.changes, ["Created level 'Inside' (100)."]);
   assert.equal(receipt.actions, undefined);
   assert.deepEqual(receipt.images, []);
+  assert.deepEqual(receipt.notes, [DRY_RUN_NOTES.failed, DRY_RUN_NOTES.ids, DRY_RUN_NOTES.realRun]);
+});
+
+test("a dry run's first note follows its outcome: only a succeeded one says its changes were applied", () => {
+  const opening = (status, code, rolledBack = true) => dryRunOpening({ status, rolledBack, error: code ? { code } : null });
+  assert.equal(opening("succeeded"), DRY_RUN_NOTES.rolledBack);
+  assert.equal(opening("failed", "SCRIPT_FAILED"), DRY_RUN_NOTES.failed);
+  assert.equal(opening("failed", "stopped_by_user"), DRY_RUN_NOTES.stopped);
+  assert.equal(opening("timed_out", "RUN_TIMEOUT"), DRY_RUN_NOTES.timedOut);
+  assert.equal(opening("denied"), DRY_RUN_NOTES.denied);
+  assert.equal(opening("pending"), DRY_RUN_NOTES.pending);
+  assert.equal(opening("failed", "rollback_failed", false), DRY_RUN_NOTES.notRolledBack);
+  for (const note of [DRY_RUN_NOTES.failed, DRY_RUN_NOTES.timedOut, DRY_RUN_NOTES.stopped, DRY_RUN_NOTES.denied, DRY_RUN_NOTES.pending]) {
+    assert.doesNotMatch(note, /applied/);
+    assert.match(note, /rolled back: nothing was kept and nothing was saved\.$/);
+  }
 });
 
 test("a save in a dry run fails with not_allowed_in_dry_run, rolled back", async (t) => {

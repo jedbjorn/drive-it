@@ -12,12 +12,13 @@ public static class HoldText
 
     public const string PauseSentence = "Revit is paused until this finishes";
 
-    /// <summary>A dry run's status window title and run history label (spec #13).</summary>
+    /// <summary>A dry run's badge in the status window and in run history, and its status window title (spec #13).</summary>
     public const string DryRunLabel = "Dry run";
 
     public const string DryRunWindowTitle = WindowTitle + " · " + DryRunLabel;
 
-    public const string DryRunPauseSentence = "Dry run: Revit is paused until this finishes, then every change is rolled back";
+    /// <summary>A dry run's second line in the status window, under <see cref="PauseSentence"/>.</summary>
+    public const string DryRunNote = "Nothing is kept: every change is rolled back";
 
     public const string StopLabel = "Stop";
 

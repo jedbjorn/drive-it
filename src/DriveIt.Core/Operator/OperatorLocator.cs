@@ -88,7 +88,7 @@ public static class OperatorLocator
         if (node is null || !host.FileExists(node))
         {
             node = entry?.Command is { } command && host.FileExists(command) ? command : FindOnPath(host, "node.exe");
-            if (node is null) throw new OperatorException("Drive It could not locate its Node.js runtime.");
+            if (node is null) throw new OperatorException("Drive-It could not locate its Node.js runtime.");
         }
 
         var script = host.GetEnvironmentVariable(ScriptVariable) is { } s && !string.IsNullOrWhiteSpace(s)
@@ -100,7 +100,7 @@ public static class OperatorLocator
                 ? Path.Combine(directory, "operator.js")
                 : null;
             if (sibling is not null && host.FileExists(sibling)) script = sibling;
-            else throw new OperatorException($"Drive It operator runtime is not installed: {script ?? "server\\operator.js"}");
+            else throw new OperatorException($"Drive-It operator runtime is not installed: {script ?? "server\\operator.js"}");
         }
 
         var data = host.GetEnvironmentVariable(DataDirectoryVariable) is { } d && !string.IsNullOrWhiteSpace(d)

@@ -54,7 +54,11 @@ public class OperatorClientTests
     {
         var runner = new FakeRunner().Fail("workspace get", "EACCES: permission denied\n");
         var error = await Assert.ThrowsAsync<OperatorException>(() => new OperatorClient(runner).GetWorkspaceAsync());
-        Assert.Equal("Drive It operator command failed (1): EACCES: permission denied", error.Message);
+        Assert.Equal("Drive-It could not finish that. EACCES: permission denied", error.Message);
+        // The catch-all code says nothing a person can use; with no reason at all, the exit code is what there is.
+        Assert.Equal("Drive-It could not finish that. mcp.json does not exist; reinstall Drive-It",
+            OperatorText.CommandFailed(1, "OPERATOR_COMMAND_FAILED: mcp.json does not exist; reinstall Drive-It\n"));
+        Assert.Equal("Drive-It could not finish that (exit code 2).", OperatorText.CommandFailed(2, " "));
     }
 
     [Fact]
@@ -151,9 +155,9 @@ public class OperatorClientTests
             """);
         var run = RunRecord.FromJson(json.RootElement, zone);
 
-        Assert.Equal("Renumber level 2 doors · succeeded · 2026-11-23 10:05", run.Label);
+        Assert.Equal("Renumber level 2 doors · Succeeded · 2026-11-23 10:05", run.Label);
         Assert.Equal("Renumber level 2 doors", run.Title);
-        Assert.Equal("succeeded · 2026-11-23 10:05", run.Meta);
+        Assert.Equal("Succeeded · 2026-11-23 10:05", run.Meta);
     }
 
     [Fact]
@@ -161,13 +165,31 @@ public class OperatorClientTests
     {
         var zone = TimeZoneInfo.CreateCustomTimeZone("Test+0", TimeSpan.Zero, "Test+0", "Test+0");
         using var json = JsonDocument.Parse("""
-            { "runId": "r", "status": "stopped", "startedAt": "2026-11-24T08:05:00.000Z", "displayName": "Place desks",
+            { "runId": "r", "status": "failed", "startedAt": "2026-11-24T08:05:00.000Z", "displayName": "Place desks",
+              "error": { "code": "stopped_by_user", "message": "Stopped from the Drive-It window; the run's changes were rolled back." },
               "held": { "ms": 20412, "calls": 310 } }
             """);
         var run = RunRecord.FromJson(json.RootElement, zone);
 
         Assert.Equal(TimeSpan.FromMilliseconds(20412), run.Held);
-        Assert.Equal("stopped · held Revit 20 s · 2026-11-24 08:05", run.Meta);
+        Assert.Equal("Stopped · held Revit 20 s · 2026-11-24 08:05", run.Meta);
+    }
+
+    [Theory]
+    [InlineData("succeeded", null, "Succeeded")]
+    [InlineData("failed", "SCRIPT_FAILED", "Failed")]
+    [InlineData("failed", "stopped_by_user", "Stopped")]
+    [InlineData("timed_out", "RUN_TIMEOUT", "Timed out")]
+    [InlineData("denied", null, "Denied")]
+    [InlineData("pending", null, "Pending")]
+    [InlineData("partially_applied", "SCRIPT_FAILED", "Partially applied")]
+    [InlineData("something_new", null, "something_new")]
+    public void HistoryMeta_SaysTheStatusInTheWordsStagedActionsUses(string status, string? code, string expected)
+    {
+        var error = code is null ? "null" : $$"""{ "code": "{{code}}" }""";
+        using var json = JsonDocument.Parse($$"""{ "runId": "r", "status": "{{status}}", "error": {{error}} }""");
+
+        Assert.Equal(expected, RunRecord.FromJson(json.RootElement).Meta);
     }
 
     [Theory]
@@ -179,7 +201,7 @@ public class OperatorClientTests
         using var json = JsonDocument.Parse(receipt);
         var run = RunRecord.FromJson(json.RootElement);
         Assert.Null(run.Held);
-        Assert.Equal("succeeded", run.Meta);
+        Assert.Equal("Succeeded", run.Meta);
     }
 
     [Fact]
@@ -193,8 +215,10 @@ public class OperatorClientTests
         var run = RunRecord.FromJson(json.RootElement, zone);
 
         Assert.True(run.DryRun);
-        Assert.Equal("Dry run · succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Meta);
-        Assert.Equal("Delete the old stair · Dry run · succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Label);
+        Assert.Equal("Dry run · Succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Meta);
+        // The row shows the label as a badge and the rest beside it.
+        Assert.Equal("Succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Detail);
+        Assert.Equal("Delete the old stair · Dry run · Succeeded · held Revit 1.2 s · 2026-11-24 08:05", run.Label);
     }
 
     [Theory]
@@ -206,15 +230,15 @@ public class OperatorClientTests
         using var json = JsonDocument.Parse(receipt);
         var run = RunRecord.FromJson(json.RootElement);
         Assert.False(run.DryRun);
-        Assert.Equal("succeeded", run.Meta);
+        Assert.Equal("Succeeded", run.Meta);
     }
 
     [Fact]
     public void HoldText_LabelsADryRun()
     {
         Assert.Equal("Drive-It · Dry run", HoldText.DryRunWindowTitle);
-        Assert.StartsWith("Dry run: Revit is paused until this finishes", HoldText.DryRunPauseSentence);
-        Assert.Contains("rolled back", HoldText.DryRunPauseSentence);
+        Assert.Equal("Dry run", HoldText.DryRunLabel);
+        Assert.Contains("rolled back", HoldText.DryRunNote);
     }
 
     [Fact]
@@ -243,7 +267,7 @@ public class OperatorClientTests
     public void HistoryLabel_FallsBackToTheRunId()
     {
         using var json = JsonDocument.Parse("""{ "runId": "7f3c", "status": "denied", "displayName": " " }""");
-        Assert.Equal("7f3c · denied", RunRecord.FromJson(json.RootElement).Label);
+        Assert.Equal("7f3c · Denied", RunRecord.FromJson(json.RootElement).Label);
     }
 
     [Fact]

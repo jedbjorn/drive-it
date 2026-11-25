@@ -57,8 +57,13 @@ export function callOf(fingerprint) {
 // Spec #13 "What Comes Back": fixed sentences for the model on every dry-run receipt.
 export const DRY_RUN_NOTES = Object.freeze({
   rolledBack: "This was a dry run. Revit applied the script's changes, then every change was rolled back: nothing was kept and nothing was saved.",
-  notRolledBack: "This was a dry run, but Revit could not roll back every change; the receipt's error names the documents that may have changed.",
-  ids: "Element ids in this receipt (created elements, created views, transactions) no longer exist. Read ids again after the real run.",
+  notRolledBack: "This was a dry run, but Revit could not roll back every change; the receipt's error names the documents that may have changed. Tell the user which ones before doing anything else.",
+  failed: "This dry run failed; whatever it changed before failing was rolled back: nothing was kept and nothing was saved.",
+  timedOut: "This dry run timed out; whatever it changed before timing out was rolled back: nothing was kept and nothing was saved.",
+  stopped: "This dry run was stopped; whatever it changed before being stopped was rolled back: nothing was kept and nothing was saved.",
+  denied: "This dry run was denied; whatever it changed before being denied was rolled back: nothing was kept and nothing was saved.",
+  pending: "This dry run is pending; whatever it changed before pausing was rolled back: nothing was kept and nothing was saved.",
+  ids: "Ids of elements and views this dry run created no longer exist: read them again after the real run. Elements it modified or deleted are in the model as they were, under the same ids.",
   realRun: "Running it for real is a second execution: call execute_script again with the same source or saved revision and the same arguments, without dryRun.",
   skippedFileWrites: "File writes were skipped and are listed in skippedFileWrites; a file the script wrote earlier in the dry run was not there to read. The real run writes them, and asks about the paths outside the workspace root.",
   devFiles: "Dev Mode: only files.* writes were skipped. Plain Python file I/O (open, os, pathlib) is not intercepted in Dev Mode and ran for real.",
@@ -66,10 +71,22 @@ export const DRY_RUN_NOTES = Object.freeze({
   notReleased: document => `Drive-It could not release the elements this dry run borrowed in ${document}; colleagues cannot edit them until you use Relinquish All Mine or Synchronize with Central in Revit.`,
 });
 
+// A dry-run receipt's first note, by outcome. Only a succeeded dry run applied the script's changes in
+// full; one that failed may have changed nothing, so it says what happened instead.
+export function dryRunOpening(receipt) {
+  if (!receipt.rolledBack) return DRY_RUN_NOTES.notRolledBack;
+  if (receipt.status === "succeeded") return DRY_RUN_NOTES.rolledBack;
+  if (receipt.error?.code === "stopped_by_user") return DRY_RUN_NOTES.stopped;
+  if (receipt.status === "timed_out") return DRY_RUN_NOTES.timedOut;
+  if (receipt.status === "denied") return DRY_RUN_NOTES.denied;
+  if (receipt.status === "pending") return DRY_RUN_NOTES.pending;
+  return DRY_RUN_NOTES.failed;
+}
+
 // Spec #13 "Require Dry Run": what each refusal tells the agent to do next.
 export const REQUIRE_DRY_RUN_MESSAGES = Object.freeze({
   // The add-in's wording (RequireDryRunRules.NotAllowedMessage), for the save-as the server refuses before Revit.
-  notAllowed: (what, reason) => `${what} is not allowed while Require dry run is on: ${reason}, and Drive-It leaves that to the person. Do not retry it. Tell the user which documents have unsaved changes and ask them to save in Revit, or to turn Require dry run off in the Drive-It window if they want you to save.`,
+  notAllowed: (what, reason) => `${what} is not allowed while Require dry run is on: ${reason}, and Drive-It leaves that to the person. Do not retry it. Tell the user which documents have unsaved changes and ask them to save in Revit, or to turn Require dry run off in the Drive-It window's Settings if they want you to save.`,
   fileWrite: what => `Require dry run is on and this run was not rehearsed, so ${what} is refused: nothing was written. Dry-run the same call first (execute_script with dryRun: true), compare the result with the request, then run the same call again without dryRun.`,
 });
 
@@ -730,7 +747,7 @@ export class Runtime {
     receipt.images ??= [];
     receipt.skippedFileWrites = context.skippedFileWrites;
     if (receipt.status === "succeeded") receipt.actions ??= [];
-    const notes = [receipt.rolledBack ? DRY_RUN_NOTES.rolledBack : DRY_RUN_NOTES.notRolledBack, DRY_RUN_NOTES.ids, DRY_RUN_NOTES.realRun];
+    const notes = [dryRunOpening(receipt), DRY_RUN_NOTES.ids, DRY_RUN_NOTES.realRun];
     if (receipt.skippedFileWrites.length) notes.push(DRY_RUN_NOTES.skippedFileWrites);
     if (receipt.mode === DEV) notes.push(DRY_RUN_NOTES.devFiles);
     for (const entry of receipt.worksharing ?? []) {
