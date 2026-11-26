@@ -1,7 +1,7 @@
 {
   "name": "drive-it",
   "version": "0.1.0",
-  "description": "A Model Context Protocol server and add-in for Autodesk Revit.",
+  "description": "A Model Context Protocol server and add-in for Autodesk Revit 2026 and 2027.",
   "license": "MIT",
   "author": "Designs/OS",
   "type": "module",
