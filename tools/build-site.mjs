@@ -25,6 +25,9 @@ const ALERTS = { NOTE: "Note", TIP: "Tip", IMPORTANT: "Important", WARNING: "War
 
 export class SiteBuildError extends Error {}
 
+// Ids the page layout uses (skip link and back-to-top); a doc heading may not produce them.
+const PAGE_IDS = new Set(["top", "main"]);
+
 export function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -58,9 +61,18 @@ function plainText(tokens = []) {
       if (token.tokens) return plainText(token.tokens);
       if (token.type === "br") return " ";
       if (token.type === "html") return "";
+      if (token.type === "codespan") return token.text ?? "";
       return decodeEntities(token.text ?? "");
     })
     .join("");
+}
+
+function safeDecode(decode, text) {
+  try {
+    return decode(text);
+  } catch {
+    return null;
+  }
 }
 
 function decodeEntities(text) {
@@ -74,17 +86,20 @@ function decodeEntities(text) {
 
 function createMarked() {
   const marked = new Marked({ gfm: true });
+  // The section a table sits in names its scrolling region for screen readers.
+  let section = "Table";
   marked.use({
     renderer: {
       heading(token) {
         const text = this.parser.parseInline(token.tokens);
         const id = token.anchor;
+        section = plainText(token.tokens).trim() || "Table";
         if (token.depth === 1) return `<h1 id="${id}">${text}</h1>\n`;
-        const label = escapeHtml(`Permalink: ${plainText(token.tokens)}`);
-        return `<h${token.depth} id="${id}">${text}<a class="heading-link" href="#${id}" aria-label="${label}">#</a></h${token.depth}>\n`;
+        // The permalink is a pointer convenience; hidden from assistive tech so the heading reads as its text alone.
+        return `<h${token.depth} id="${id}">${text}<a class="heading-link" href="#${id}" aria-hidden="true" tabindex="-1">#</a></h${token.depth}>\n`;
       },
       table(token) {
-        return `<div class="table-wrap" role="region" aria-label="Table" tabindex="0">\n${Renderer.prototype.table.call(this, token)}</div>\n`;
+        return `<div class="table-wrap" role="region" aria-label="${escapeHtml(`Table: ${section}`)}" tabindex="0">\n${Renderer.prototype.table.call(this, token)}</div>\n`;
       },
       code(token) {
         // Mermaid and every other language render as a plain code block; nothing runs in the browser.
@@ -148,6 +163,9 @@ function loadDoc(marked, root, relPath) {
     if (token.type === "blockquote") markAlert(marked, token);
     if (token.type === "heading") {
       token.anchor = slug(plainText(token.tokens));
+      if (relPath.startsWith(`${SOURCE_DIR}/`) && PAGE_IDS.has(token.anchor)) {
+        throw new SiteBuildError(`${relPath}: the heading anchor #${token.anchor} is reserved by the page layout; rename the heading`);
+      }
       anchors.add(token.anchor);
     }
   });
@@ -240,15 +258,17 @@ export function buildSite({ root, out, log = () => {} }) {
   const rewrite = (doc, href, kind) => {
     if (!href || isExternal(href)) return href;
     const hashAt = href.indexOf("#");
-    const target = decodeURI(hashAt === -1 ? href : href.slice(0, hashAt));
-    const anchor = hashAt === -1 ? null : href.slice(hashAt + 1);
     const fail = (why) => {
       errors.push(`${doc.relPath}: ${kind} "${href}": ${why}`);
       return href;
     };
+    const target = safeDecode(decodeURI, hashAt === -1 ? href : href.slice(0, hashAt));
+    const rawAnchor = hashAt === -1 ? null : href.slice(hashAt + 1);
+    const anchor = rawAnchor === null ? null : safeDecode(decodeURIComponent, rawAnchor);
+    if (target === null || (rawAnchor !== null && anchor === null)) return fail("malformed %-escape");
 
     if (target === "") {
-      if (anchor !== null && !doc.anchors.has(decodeURIComponent(anchor))) return fail(`no heading with the anchor #${anchor} in this doc`);
+      if (anchor !== null && !doc.anchors.has(anchor)) return fail(`no heading with the anchor #${anchor} in this doc`);
       return href;
     }
     if (target.startsWith("/")) return fail("absolute paths are not allowed; link relative to the doc");
@@ -260,9 +280,9 @@ export function buildSite({ root, out, log = () => {} }) {
     const isDir = statSync(file).isDirectory();
     if (anchor !== null) {
       if (isDir || !repoPath.endsWith(".md")) return fail("an #anchor is only checked on Markdown files");
-      if (!anchorsOf(repoPath).has(decodeURIComponent(anchor))) return fail(`${repoPath} has no heading with the anchor #${anchor}`);
+      if (!anchorsOf(repoPath).has(anchor)) return fail(`${repoPath} has no heading with the anchor #${anchor}`);
     }
-    const hash = anchor !== null ? `#${anchor}` : "";
+    const hash = rawAnchor !== null ? `#${rawAnchor}` : "";
 
     if (kind === "image") {
       if (!repoPath.startsWith(`${SOURCE_DIR}/`) || repoPath.endsWith(".md") || isDir) {

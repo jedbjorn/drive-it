@@ -158,3 +158,39 @@ test("a link to a missing file or anchor fails the build and names it", (t) => {
   });
   assert.ok(!existsSync(out), "nothing is written when a link is broken");
 });
+
+test("code spans keep their text in anchors, tables are named by their section, permalinks stay out of the heading's name", (t) => {
+  const root = fixture(t, {
+    "README.md": "# Project\n",
+    "docs/README.md": "# Docs\n\n- [First](first.md): one.\n",
+    "docs/first.md": "# First\n\nLead.\n\n## The `&amp;` code\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n[back](#the-amp-code)\n",
+  });
+  const out = path.join(root, "_site");
+  buildSite({ root, out });
+  const html = readFileSync(path.join(out, "docs", "first", "index.html"), "utf8");
+  assert.ok(ids(html).has("the-amp-code"), "GitHub keeps a code span's text as written when it slugs a heading");
+  assert.match(html, /role="region" aria-label="Table: The &amp;amp; code"/);
+  assert.match(html, /<a class="heading-link" href="#the-amp-code" aria-hidden="true" tabindex="-1">#<\/a>/);
+  assert.doesNotMatch(html, /Permalink:/);
+});
+
+test("a malformed %-escape is a broken link, and a heading may not take the page's own ids", (t) => {
+  const malformed = fixture(t, {
+    "README.md": "# Project\n",
+    "docs/README.md": "# Docs\n\n- [First](first.md): one.\n",
+    "docs/first.md": "# First\n\n[bad](b%ZZ.md) [bad anchor](#a%ZZ)\n",
+  });
+  assert.throws(() => buildSite({ root: malformed, out: path.join(malformed, "_site") }), (error) => {
+    assert.ok(error instanceof SiteBuildError);
+    assert.match(error.message, /link "b%ZZ\.md": malformed %-escape/);
+    assert.match(error.message, /link "#a%ZZ": malformed %-escape/);
+    return true;
+  });
+
+  const reserved = fixture(t, {
+    "README.md": "# Project\n",
+    "docs/README.md": "# Docs\n\n- [First](first.md): one.\n",
+    "docs/first.md": "# First\n\n## Main\n\nText.\n",
+  });
+  assert.throws(() => buildSite({ root: reserved, out: path.join(reserved, "_site") }), /docs\/first\.md: the heading anchor #main is reserved/);
+});
