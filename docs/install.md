@@ -63,6 +63,8 @@ Both installers place the application, private Node.js/Python runtimes, and loca
 
 With the script installer, pass `-McpConfigPath <path>` to merge the same entry into another MCP client configuration while preserving its other servers. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
 
+## The Drive-It window
+
 The Drive-It window opens from the Start Menu (`Drive-It`) and from the **Drive-It** panel on Revit's **Add-Ins** tab; inside Revit it follows Revit's light or dark theme, and from the Start Menu the Windows app theme. Use it for first-run root selection. The same window changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests. Its **Settings** button, top right, opens a drawer over the window with the Script time limit (10 to 600 seconds, applied to runs that start after it is saved), the [Require dry run](dry-run.md#require-dry-run) switch, and **Detect agents**, which adds Drive-It to Claude and ChatGPT installed after Drive-It; the drawer reads the stored settings each time it opens. While Require dry run is on, a **Staged Actions | Home** switcher at the top left shows the last dry run in the workspace.
 
 The window (`app\operator\DriveIt.Operator.exe`, and `DriveIt.UI.dll` in each year's add-in folder) uses the installed private Node runtime to call `server/operator.js` directly: `workspace get|set`, `decisions list|approve|deny`, `history list`, `settings get|set-time-limit|set-require-dry-run` (the Settings drawer), `staged get` (Staged Actions: the last dry run that completed in the workspace), and `clients detect [mcp.json]` (Detect agents: the installer's client registration for the current user). Runs and pending requests are listed by their display name when they carry one, with the run ID in the details. These commands are not MCP tools. The shared local state contract is:
@@ -89,7 +91,7 @@ foreach ($target in @(@{ Year = "2026"; Framework = "net8.0-windows" }, @{ Year 
 }
 ```
 
-Tagged releases also provide the compiled add-ins and MCP server as `DriveIt-<version>.zip`, with checksums for every asset in `SHA256SUMS.txt`. Extract the bundle, run `npm ci` in its directory, then copy the contents of its `2026` or `2027` folder (`DriveIt.addin` and the `DriveIt` folder) into `%APPDATA%\Autodesk\Revit\Addins\<year>` for that year.
+Tagged releases also provide the compiled add-ins and MCP server as `DriveIt-<version>.zip`, with checksums for every asset in `SHA256SUMS.txt`. Extract the bundle, run `npm ci --omit=dev` in its directory, then copy the contents of its `2026` or `2027` folder (`DriveIt.addin` and the `DriveIt` folder) into `%APPDATA%\Autodesk\Revit\Addins\<year>` for that year.
 
 Start Revit and allow the add-in to load. Configure your MCP client to launch the server over stdio, replacing the example path with your checkout or extracted release bundle:
 

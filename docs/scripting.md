@@ -39,7 +39,7 @@ Every primitive takes an optional `document`. Without one, it uses the script's 
 
 ### Document operations and model changes
 
-The same `revit` object opens, creates, saves and closes documents and makes a few typed model changes. Each returns the full broker response and takes the optional `document`:
+The same `revit` object opens, creates, saves and closes documents and makes a few typed model changes. Each returns the full broker response and takes the optional `document`. Pass every argument by keyword: a positional argument is taken as `document`.
 
 ```python
 revit.create_document(templatePath=args["template"], kind="rvt")    # unsaved; later calls target it
@@ -50,8 +50,8 @@ view = revit.create_3d_view(name="Check")                            # createdVi
 revit.save_as_document(destinationPath=args["projectPath"])          # an .rvt path in the workspace
 ```
 
-- **Documents.** `open_document(path, kind=None)` opens an RVT or RFA. `create_document(templatePath, kind)` creates an unsaved document from an RTE or RFT template; give it a path with `save_as_document`. `read_document()` reads a snapshot. `save_document()` saves to the existing path. `save_as_document(destinationPath, overwrite=False)` keeps the document's identity across the save-as. `close_document()` closes without saving further changes. `delete_document()` closes a saved document and deletes its file. Every path goes through the [outside-root policy](how-it-works.md#workspace-and-outside-root-decisions), and Revit's installed templates and libraries can be read without a decision.
-- **Model changes.** `create_level(name, elevation)` creates a level, `create_wall(start, end, baseLevelId, height)` a wall from `{x, y, z}` points, `create_3d_view(name=None)` an isometric 3D view, `create_family_type(name)` a type in an RFA, and `delete_element(elementId)` deletes an element and the elements that depend on it. Values are in Revit's internal units.
+- **Documents.** `open_document(path=..., kind=None)` opens an RVT or RFA. `create_document(templatePath=..., kind=...)` creates an unsaved document from an RTE or RFT template; give it a path with `save_as_document`. `read_document()` reads a snapshot. `save_document()` saves to the existing path. `save_as_document(destinationPath=..., overwrite=False)` keeps the document's identity across the save-as. `close_document()` closes without saving further changes. `delete_document()` closes a saved document and deletes its file. Every path goes through the [outside-root policy](how-it-works.md#workspace-and-outside-root-decisions), and Revit's installed templates and libraries can be read without a decision.
+- **Model changes.** `create_level(name=..., elevation=...)` creates a level, `create_wall(start=..., end=..., baseLevelId=..., height=...)` a wall from `{x, y, z}` points, `create_3d_view(name=None)` an isometric 3D view, `create_family_type(name=...)` a type in an RFA, and `delete_element(elementId=...)` deletes an element and the elements that depend on it. Values are in Revit's internal units.
 - **Batches.** `revit.execute([{"type": ..., "arguments": {...}}, ...])` sends several operations in one batch, and consecutive model changes in it share one Revit transaction.
 - **Files.** `files.read(path, encoding="utf-8")`, `files.write(path, content, encoding="utf-8")`, `files.rename(source, destination)`, `files.move(source, destination)` and `files.delete(path)` go through the same policy. In a standard install, plain `open()` and `os` file calls are mediated the same way.
 - **Checks.** `checks.record(name, passed, observed=None)` adds an observed check to the run receipt. Checks are how a run proves it did what was asked, and `promote_script` requires them.

@@ -399,7 +399,7 @@ try {
     # mcpServers, where no client reads it; a standard install removes it.
     $sshExampleName = '//drive-it-ssh'
     $sshExample = [ordered]@{
-        '//' = 'Dev Mode example: on the host, register this as the stdio server drive-it with your SSH login to this machine (README, Dev Mode).'
+        '//' = 'Dev Mode example: on the host, register this as the stdio server drive-it with your SSH login to this machine (https://drive-it.designs-os.com/docs/dev-mode/).'
         command = 'ssh'
         args = @('-T', '<user>@<host>', 'drive-it-stdio')
     }
