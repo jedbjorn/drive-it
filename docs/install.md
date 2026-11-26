@@ -67,6 +67,16 @@ With the script installer, pass `-McpConfigPath <path>` to merge the same entry 
 
 The Drive-It window opens from the Start Menu (`Drive-It`) and from the **Drive-It** panel on Revit's **Add-Ins** tab; inside Revit it follows Revit's light or dark theme, and from the Start Menu the Windows app theme. Use it for first-run root selection. The same window changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests. Its **Settings** button, top right, opens a drawer over the window with the Script time limit (10 to 600 seconds, applied to runs that start after it is saved), the [Require dry run](dry-run.md#require-dry-run) switch, and **Detect agents**, which adds Drive-It to Claude and ChatGPT installed after Drive-It; the drawer reads the stored settings each time it opens. While Require dry run is on, a **Staged Actions | Home** switcher at the top left shows the last dry run in the workspace.
 
+![The Drive-It window's Home view with numbered callouts: 1 the Staged Actions and Home switcher, 2 Settings, 3 Workspace root, 4 Outside-root requests, 5 Run history, 6 the selected run's receipt, 7 the MCP configuration path](images/annotated/drive-it-window.png)
+
+1. **Staged Actions | Home**: shown while [Require dry run](dry-run.md#require-dry-run) is on; Staged Actions shows the last dry run in the workspace.
+2. **Settings**: opens the drawer with the Script time limit, Require dry run and **Detect agents**.
+3. **Workspace root**: scripts read and change files inside it without asking. A new root applies to future runs.
+4. **Outside-root requests**: each pending request and its resolved path, to approve or deny once.
+5. **Run history**: runs by display name; a dry run carries a **Dry run** label.
+6. The selected run's receipt.
+7. **MCP configuration**: the path of `mcp.json`, the stdio entry you can copy into another MCP client.
+
 The window (`app\operator\DriveIt.Operator.exe`, and `DriveIt.UI.dll` in each year's add-in folder) uses the installed private Node runtime to call `server/operator.js` directly: `workspace get|set`, `decisions list|approve|deny`, `history list`, `settings get|set-time-limit|set-require-dry-run` (the Settings drawer), `staged get` (Staged Actions: the last dry run that completed in the workspace), and `clients detect [mcp.json]` (Detect agents: the installer's client registration for the current user). Runs and pending requests are listed by their display name when they carry one, with the run ID in the details. These commands are not MCP tools. The shared local state contract is:
 
 - `workspace.json`: the selected root used for future operations.

@@ -417,3 +417,11 @@
     grid-column: 1;
   }
 }
+
+/* Screenshots in a doc: fit the column, framed like the window they show. */
+.doc-content img {
+  display: block;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}

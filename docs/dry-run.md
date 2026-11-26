@@ -27,7 +27,22 @@ So after the rollback of a dry run that changed a workshared document, Drive-It 
 
 **Require dry run**, a switch in the Drive-It window's settings drawer, is extra protection against lasting changes. It ships off. While it is on, the agent must rehearse a script that changes your model, and see the result, before it runs for real, and the agent cannot save: you save in Revit. Reading and opening files work as usual. `node server/operator.js settings set-require-dry-run on|off` sets it too, and `settings get` reports it; it is `requireDryRun` in `settings.json`, and anything but `true` there reads as off. A change applies to runs that start after it, and nothing an agent can call through MCP changes it. It is a guardrail you set, not a lock: an agent with a shell of its own, or a Dev Mode script, can edit `settings.json`.
 
+![The Settings drawer with numbered callouts: 1 Script time limit, 2 the Require dry run switch, 3 Detect agents](images/annotated/settings-drawer.png)
+
+1. **Script time limit**: 10 to 600 seconds, for runs that start after it is saved.
+2. **Require dry run**: the switch, shown on.
+3. **Detect agents**: adds Drive-It to Claude and ChatGPT installed after Drive-It.
+
 - **What needs a rehearsal.** Model changes (built-ins, `revit.transaction`, and in Dev Mode a script's own transactions) and workspace file writes, including a bridge call that writes a file. A real run is rehearsed when run history holds an unused dry run of the same call (the same code or saved script revision, arguments, Revit process and target document) that succeeded and was rolled back. One dry run allows one real run, whatever its outcome; its receipt names the dry run in `rehearsedBy`. A real run that waits for an outside-root decision keeps its dry run when it is retried under the same idempotency key. There is no timer, but restarting Revit ends every unused dry run. In a run that was not rehearsed, the first change or file write fails with `dry_run_required` and nothing changes; reading, opening, creating documents, `edit_family` and closing an unchanged document need no dry run.
 - **What is refused in every run.** `save_document`, `save_as_document`, `delete_document` and closing a document with unsaved changes fail with `not_allowed_while_dry_run_required`, and so, in Dev Mode, do the bridge's direct save, save-as, close of a changed document, synchronize, reload latest and print. The agent's changes stay in the open documents, unsaved, until you save them.
 - **What the agent is told.** `get_revit_session` reports `requireDryRun`; the `execute_script` description, `get_api_reference` and each refusal say what to do next.
 - **Staged Actions.** While the setting is on, the Drive-It window has a switcher at its top left, **Staged Actions | Home**. Staged Actions gives the whole window to the last dry run that completed in the workspace, whatever its outcome: its name, time, document and outcome, then per document what it would create, modify (each value before and after, as `Mark: D12 → D14`) and delete, what Revit also touched (collapsed), its images and, on a workshared model, the release line. A failed, stopped or timed-out dry run shows its error instead. Once the same call has run for real and succeeded, it carries an **Applied** badge. A newer completed dry run replaces it; nothing else does. In Revit, the window opens itself in Staged Actions after each dry run, once Revit is free; a window opened from the Start Menu shows it when you switch to it. With the setting off there is no switcher and nothing opens by itself; run history still labels every dry run.
+
+![Staged Actions after a dry run that adds corridor walls and renumbers door D12, with numbered callouts: 1 name, time, document and outcome, 2 the document, 3 created, modified and deleted elements, 4 a value before and after, 5 what Revit also touched, 6 images from the dry run](images/annotated/staged-actions.png)
+
+1. The dry run's name, time, document and outcome.
+2. One card per document.
+3. What it would create, modify and delete.
+4. A modified value, before and after.
+5. What Revit also touched, collapsed.
+6. The dry run's images.
