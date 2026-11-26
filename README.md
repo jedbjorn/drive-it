@@ -1,7 +1,7 @@
 ---
 title: Drive-It
 tags: [drive-it, revit, mcp, dotnet]
-date: 2026-11-24
+date: 2026-11-26
 project: Drive-It
 purpose: MCP server and Revit add-in
 ---
@@ -27,12 +27,29 @@ purpose: MCP server and Revit add-in
 
 **[Project website →](https://drive-it.designs-os.com/)**
 
+## Capabilities
+
+- **Revit 2026 and 2027, side by side.** One install registers the add-in for both years. The agent finds the running Revit itself, or asks which one to use when several are open ([Use](#use)).
+- **Python scripts against the model.** `execute_script` runs the Python an agent writes in an isolated worker outside Revit, so a script that crashes or hangs does not take Revit down ([Overview](#overview)).
+- **Built-in primitives and operations.** Find elements; read and set instance, type and family parameters; read and set the selection; list types and views; edit families; open, create, save, close and delete documents; and create levels, walls, 3D views and family types. Each one checks its input before it changes anything ([Built-in primitives](#built-in-primitives)).
+- **The Revit API through a bridge.** Anything the primitives do not cover, such as placing families, sheets, schedules or family geometry, can call Revit's modeling API directly. Drive-It owns the transactions, rolls a failed run back, and makes a successful run one undo entry ([Revit API bridge](#revit-api-bridge)).
+- **Document targets.** A task changes only the documents it names, so switching windows in Revit while the agent works does not move the task to another model ([How it works](#how-it-works)).
+- **Dry run.** The agent can rehearse a script: Revit applies the changes, Drive-It records what would be created, modified and deleted (each value before and after) along with images of the affected views, and then everything is rolled back. On a workshared model it also releases the elements the rehearsal borrowed ([Dry run](#dry-run)).
+- **Require dry run and Staged Actions.** An optional setting makes the agent rehearse every change before it runs for real and stops the agent from saving. While it is on, the Drive-It window shows the latest dry run for you to review ([Require dry run](#require-dry-run)).
+- **View capture with element marks.** The agent exports a Revit view to a PNG to check its own work, optionally with numbered marks identifying elements ([View capture](#view-capture)).
+- **Script library.** Each workspace keeps a library of saved scripts with immutable revisions. A draft becomes active only after a checked, successful run ([Script library](#script-library)).
+- **Receipts and run history.** Every run leaves a durable receipt: its changes, affected elements and files, checks, and outcome. A retried request returns its original receipt instead of repeating the work ([Workspace and outside-root decisions](#workspace-and-outside-root-decisions)).
+- **A workspace boundary.** Work inside the workspace folder needs no prompt. A write outside it waits for your one-time approval in the Drive-It window ([Workspace and outside-root decisions](#workspace-and-outside-root-decisions)).
+- **The Drive-It window.** You can open it from the Start Menu or from Revit's Add-Ins tab. Use it to pick the workspace, approve or deny requests, browse run history, and review staged dry runs. Its settings cover the script time limit, Require dry run, and **Detect agents** ([Windows alpha](#windows-alpha-script-installer)).
+- **A one-step install.** A signed, per-user MSI that needs no administrator account brings its own Node.js and Python runtimes and registers Drive-It with Claude Desktop, Claude Code, Codex CLI and the ChatGPT desktop app ([Install](#install)).
+- **Dev Mode.** An administrator-installed mode with every guardrail off, for driving Revit on a disposable VM over SSH ([Dev Mode](#dev-mode)).
+
 ## Overview
 
 Drive-It connects a Model Context Protocol (MCP) client to Autodesk Revit 2026 or Revit 2027 through a small Node.js server and a native Revit add-in. The Unguided alpha exposes these stdio MCP tools:
 
 - `get_revit_session` finds the running Revit (when only one has Drive-It loaded, no process ID is needed) and returns its version, build, named-pipe identity, the workspace root, Revit's installed project templates, family template folders, and library folders, so the agent uses real paths instead of guessing, and the open documents (`openDocuments`), with the one in Revit's window marked.
-- `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker. Every call carries a required `displayName`: one plain-language line the agent writes for you, such as "Add Level 3 at 24 ft to the tower model". It is kept on the run receipt and on any outside-root request, and the operator surface lists runs and requests by it.
+- `execute_script` runs inline Python, or a saved script revision from the workspace library, in an isolated fixed Python worker. Every call carries a required `displayName`: one plain-language line the agent writes for you, such as "Add Level 3 at 24 ft to the tower model". It is kept on the run receipt and on any outside-root request, and the operator surface lists runs and requests by it. `targets` names the open documents the run may change (see [How it works](#how-it-works)), and `dryRun` rehearses the script and rolls it back (see [Dry run](#dry-run)).
 - `save_script`, `search_scripts`, `get_script`, `promote_script`, and `retire_script` manage the workspace script library (see [Script library](#script-library)).
 - `capture_revit_view` exports an existing Revit view to a PNG and returns the image so the agent can check its own work (see [View capture](#view-capture)).
 - `get_api_reference` returns local, versioned references for the callable Drive-It file, check, and Revit operations. The version names the selected Revit session's version (for example `revit-2027-alpha.4`); with no session selected it names both supported versions, whose built-in operations are the same. `get_guidance` is not registered.
@@ -124,6 +141,25 @@ revit.save_as_document(destinationPath=args["familyPath"])  # an .rfa path in th
 - `units.to_internal(value, unit)` and `units.from_internal(value, unit)` convert lengths (`mm`, `cm`, `m`, `in`, `ft`), areas (`mm2`, `m2`, `in2`, `ft2`), and angles (`deg`, `rad`) to and from Revit's internal feet, square feet, and radians.
 
 Every primitive takes an optional `document`. Without one, it uses the script's current document, which `get_active_document` and `edit_family` set. A script with no current document fails with `document_not_open`, and the message says to pass `targets` on the call, or to open or create a document in the script. With `targets`, the first is the current document and `revit.targets` lists them all, each `{uniqueId, title, path, kind}`. Read primitives (`find_elements`, `get_parameters`, `list_types`, `list_views`, `get_selection`, `get_family_parameters`) return their output directly. All other operations return the full broker response. Reads start no transaction and never change the model. `limit` is at most 2000, and so is the number of element ids per call. A larger request fails with `limit_exceeded` and is never silently cut. Element ids are integers. Linked models are not queried.
+
+### Document operations and model changes
+
+The same `revit` object opens, creates, saves and closes documents and makes a few typed model changes. Each returns the full broker response and takes the optional `document`:
+
+```python
+revit.create_document(templatePath=args["template"], kind="rvt")    # unsaved; later calls target it
+revit.create_level(name="Level 2", elevation=units.to_internal(3000, "mm"))
+revit.create_wall(start={"x": 0, "y": 0, "z": 0}, end={"x": 20, "y": 0, "z": 0},
+                  baseLevelId=args["levelId"], height=10.0)          # internal units (feet)
+view = revit.create_3d_view(name="Check")                            # createdViews[0]["id"] for capture_revit_view
+revit.save_as_document(destinationPath=args["projectPath"])          # an .rvt path in the workspace
+```
+
+- **Documents.** `open_document(path, kind=None)` opens an RVT or RFA. `create_document(templatePath, kind)` creates an unsaved document from an RTE or RFT template; give it a path with `save_as_document`. `read_document()` reads a snapshot. `save_document()` saves to the existing path. `save_as_document(destinationPath, overwrite=False)` keeps the document's identity across the save-as. `close_document()` closes without saving further changes. `delete_document()` closes a saved document and deletes its file. Every path goes through the [outside-root policy](#workspace-and-outside-root-decisions), and Revit's installed templates and libraries can be read without a decision.
+- **Model changes.** `create_level(name, elevation)` creates a level, `create_wall(start, end, baseLevelId, height)` a wall from `{x, y, z}` points, `create_3d_view(name=None)` an isometric 3D view, `create_family_type(name)` a type in an RFA, and `delete_element(elementId)` deletes an element and the elements that depend on it. Values are in Revit's internal units.
+- **Batches.** `revit.execute([{"type": ..., "arguments": {...}}, ...])` sends several operations in one batch, and consecutive model changes in it share one Revit transaction.
+- **Files.** `files.read(path, encoding="utf-8")`, `files.write(path, content, encoding="utf-8")`, `files.rename(source, destination)`, `files.move(source, destination)` and `files.delete(path)` go through the same policy. In a standard install, plain `open()` and `os` file calls are mediated the same way.
+- **Checks.** `checks.record(name, passed, observed=None)` adds an observed check to the run receipt. Checks are how a run proves it did what was asked, and `promote_script` requires them.
 
 ## Revit API bridge
 
@@ -312,7 +348,7 @@ Both installers place the application, private Node.js/Python runtimes, and loca
 
 With the script installer, pass `-McpConfigPath <path>` to merge the same entry into another MCP client configuration while preserving its other servers. Re-running the installer preserves the selected root and existing client settings. Use `-NoLaunch` for unattended installation.
 
-The Drive-It window opens from the Start Menu (`Drive-It`) and from the **Drive-It** panel on Revit's **Add-Ins** tab; inside Revit it follows Revit's light or dark theme, and from the Start Menu the Windows app theme. Use it for first-run root selection. The same window changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests. Its **Settings** button, top right, opens a drawer over the window with the Script time limit (10 to 600 seconds, applied to runs that start after it is saved) and **Detect agents**, which adds Drive-It to Claude and ChatGPT installed after Drive-It; the drawer reads the stored settings each time it opens.
+The Drive-It window opens from the Start Menu (`Drive-It`) and from the **Drive-It** panel on Revit's **Add-Ins** tab; inside Revit it follows Revit's light or dark theme, and from the Start Menu the Windows app theme. Use it for first-run root selection. The same window changes the root, shows each pending outside-root operation and resolved path, records a one-time approval or denial, and displays retained run receipts. Approval does not change the root or authorize later requests. Its **Settings** button, top right, opens a drawer over the window with the Script time limit (10 to 600 seconds, applied to runs that start after it is saved), the [Require dry run](#require-dry-run) switch, and **Detect agents**, which adds Drive-It to Claude and ChatGPT installed after Drive-It; the drawer reads the stored settings each time it opens. While Require dry run is on, a **Staged Actions | Home** switcher at the top left shows the last dry run in the workspace.
 
 The window (`app\operator\DriveIt.Operator.exe`, and `DriveIt.UI.dll` in each year's add-in folder) uses the installed private Node runtime to call `server/operator.js` directly: `workspace get|set`, `decisions list|approve|deny`, `history list`, `settings get|set-time-limit|set-require-dry-run` (the Settings drawer), `staged get` (Staged Actions: the last dry run that completed in the workspace), and `clients detect [mcp.json]` (Detect agents: the installer's client registration for the current user). Runs and pending requests are listed by their display name when they carry one, with the run ID in the details. These commands are not MCP tools. The shared local state contract is:
 
@@ -457,6 +493,8 @@ Build the self-contained installer package on a development machine with `instal
 - `server/runtime.js` owns execution, broker policy retries, receipts, and idempotent replay.
 - `server/worker.py` mediates Python file and typed Revit operations and blocks package/process installation paths.
 - `server/workspace.js`, `server/decisions.js`, and `server/history.js` persist policy and run evidence outside the selected workspace.
+- `server/library.js` is the script library; `server/capture.js` serves `capture_revit_view` and manages reference images; `server/reference.js` holds `get_api_reference` and the agent guidance; `server/session.js` finds Revit sessions and lists the supported versions; `server/content.js` lists Revit's installed content.
+- `server/settings.js` stores the time limit and Require dry run, `server/staged.js` derives Staged Actions from run history, `server/clients.js` registers MCP clients (installer and Detect agents), and `server/mode.js` resolves the install mode (standard or Dev Mode).
 - `src/DriveIt.Revit/App.cs` serves the session greeting and typed requests, and adds the **Drive-It** panel (button `DriveIt.OpenOperator`) to the Add-Ins tab. `Broker/RevitBroker.cs` raises an external event, and `Broker/DocumentDispatcher.cs` executes document and model operations in Revit's API context.
 - `npm test` exercises real stdio discovery, isolated Python execution, policy and failure paths, replay, operator commands, and temporary-file cleanup. Windows runs also exercise the named-pipe session, newline-JSON broker contract, operator state, approvals, and run history.
 - `dotnet build src/DriveIt.Revit -c Release` compiles the add-in for Revit 2026 (`net8.0-windows`, 2026 API) and Revit 2027 (`net10.0-windows`, 2027 API) from the same files; `REVIT2026` or `REVIT2027` is defined for `#if`, though no source file needs one today. `installer/Build-DriveItPackage.ps1` (`$revitTargets`) publishes each year to `app\addin\<year>` and records `revitYears` in the package, which the script installer and the MSI build read. The list is not single-source: adding a year also means updating `src/DriveIt.Revit/DriveIt.Revit.csproj`, `REVIT_VERSIONS` in `server/session.js`, `installer/inspect-msi.ps1`, and the year lists in `test/` and `acceptance/`. The operator window is `src/DriveIt.UI` (WPF, the family theme copied from Splash-It), hosted in Revit and by `src/DriveIt.Operator` (the Start Menu exe); its operator.js client and labels are in `src/DriveIt.Core`, tested by `dotnet test test/DriveIt.Core.Tests` on any OS.
@@ -474,7 +512,7 @@ To release, push a `v<major>.<minor>.<patch>` tag for a commit on `main`; see [R
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Include the Revit and Windows versions for add-in reports, and do not attach private models, credentials, or other sensitive data. Before submitting a change, run `npm test` and `dotnet build src/DriveIt.Revit -c Release` where your environment supports them.
+Issues and focused pull requests are welcome. Include the Revit and Windows versions for add-in reports, and do not attach private models, credentials, or other sensitive data. Before submitting a change, run `npm test`, `dotnet test test/DriveIt.Core.Tests`, and `dotnet build src/DriveIt.Revit -c Release` where your environment supports them.
 
 ## More projects
 
