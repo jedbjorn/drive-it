@@ -24,7 +24,7 @@ Watch **Actions › release**. When it finishes, the release is at `https://gith
 | `DriveIt-<version>.zip` | The add-in and server bundle. |
 | `SHA256SUMS.txt` | `sha256sum` output over every asset above, from the final (signed) bytes, verified with `sha256sum -c` before publishing. |
 
-The release fails unless the MSI passes `installer/inspect-msi.ps1` and `test/msi.Tests.ps1` (the RST companion contract, see the README's Development section), its ProductVersion and ProductName read back from the file match the tag and `Drive-It`, and it is at most 450 MB (the contract limit is 512 MB).
+The release fails unless the MSI passes `installer/inspect-msi.ps1` and `test/msi.Tests.ps1` (the RST companion contract, see [docs/development.md](docs/development.md)), its ProductVersion and ProductName read back from the file match the tag and `Drive-It`, and it is at most 450 MB (the contract limit is 512 MB).
 
 ## Code signing
 
