@@ -22,10 +22,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      # The static site in docs/ plus one page per docs/*.md and the sitemap, written to _site/.
+      - run: node tools/build-site.mjs --out _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: ./docs
+          path: ./_site
 
   deploy:
     needs: build
