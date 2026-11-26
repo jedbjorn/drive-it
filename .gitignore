@@ -50,3 +50,6 @@ obj/
 /.sc-state/map.db-shm
 /.sc-state/db_backups/
 # <<< subfloor managed ignores <<<
+
+# The website build (tools/build-site.mjs); generated at deploy time, never committed.
+/_site/
