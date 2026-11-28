@@ -138,46 +138,46 @@
       <div class="container">
         <div class="section-heading">
           <p class="eyebrow">One real run</p>
-          <h2 id="run-title">One request. A modeled house.</h2>
-          <p>We asked Claude to draw a simple New Orleans shotgun house, and later to open the files when it was done. About 23 minutes after the request, Revit had walls, a roof, a porch, doors and windows, and sheets with a door schedule.</p>
+          <h2 id="run-title">One prompt. The Eiffel Tower.</h2>
+          <p>We gave Claude Sonnet 5.5 one prompt: model the Eiffel Tower in the active document, using native Revit. 18 and a half minutes later, Revit held a 330 m tower with the Seine, roads, bridges and city blocks around it. The agent planned the model, set up levels and grids, built its own families, audited its work and saved the file. Nobody touched Revit along the way.</p>
         </div>
 
         <dl class="stat-grid">
           <div class="stat">
-            <dt>messages from the user</dt>
-            <dd class="stat-value">2</dd>
-            <dd class="stat-note">The request, and one more while the agent was working</dd>
+            <dt>prompt from the user</dt>
+            <dd class="stat-value">1</dd>
+            <dd class="stat-note">18 minutes 30 seconds from the prompt to a saved 46.9 MB file</dd>
           </div>
           <div class="stat">
-            <dt>script runs</dt>
-            <dd class="stat-value">70</dd>
-            <dd class="stat-note">55 succeeded, 4 partly applied, 11 failed. After a failure the agent read the error and tried again.</dd>
+            <dt>scripts run in Revit</dt>
+            <dd class="stat-value">37</dd>
+            <dd class="stat-note">4 failed. The agent fixed each one and ran it again. 104,957 Revit API calls in all.</dd>
           </div>
           <div class="stat">
-            <dt>Revit paused, in total</dt>
-            <dd class="stat-value">53<small>s</small></dd>
-            <dd class="stat-note">Out of a 23-minute run. Revit is free between scripts.</dd>
+            <dt>model elements</dt>
+            <dd class="stat-value">6,360</dd>
+            <dd class="stat-note">Framing, columns, walls and toposolids, plus 9 families the agent built itself. Not an imported mesh.</dd>
           </div>
           <div class="stat">
-            <dt>estimated API cost</dt>
-            <dd class="stat-value"><small>$</small>8</dd>
-            <dd class="stat-note">An estimate, likely $5–11. Claude Opus 5.5 with prompt caching.</dd>
+            <dt>Revit warnings at the end</dt>
+            <dd class="stat-value">0</dd>
+            <dd class="stat-note">The agent found 20 during the run and cleared them before it saved</dd>
           </div>
         </dl>
-        <p class="fine-print">The cost is an estimate, not a bill. The windows in the 3D view were fixed in a short follow-up after the run.</p>
+        <p class="fine-print">Every figure comes from Drive-It's run receipts. The images are frames from the video.</p>
 
         <div class="result-grid">
           <figure>
-            <img src="images/result-3d.jpg" alt="A 3D view of the house in Revit: a long clapboard side wall with three double-hung windows, on brick piers" width="1200" height="619" loading="lazy">
-            <figcaption>Walls, roof, porch, doors and windows</figcaption>
+            <img src="images/eiffel-structure.jpg" alt="The Eiffel Tower in Revit, modelled in structural framing and columns, with its platforms, summit and antenna" width="1200" height="692" loading="lazy">
+            <figcaption>The tower, in structural framing and columns</figcaption>
           </figure>
           <figure>
-            <img src="images/result-elevation.jpg" alt="The street elevation in colour: a porch with four posts, two doors, steps and rails" width="1200" height="705" loading="lazy">
-            <figcaption>The street elevation, in colour</figcaption>
+            <img src="images/eiffel-seine.jpg" alt="The tower beside the Seine, with roads, a bridge and blocks of buildings, while Drive-It's window over Revit names the running script and offers Stop" width="1200" height="692" loading="lazy">
+            <figcaption>The Seine and the city, while a script runs</figcaption>
           </figure>
           <figure>
-            <img src="images/result-cover-sheet.jpg" alt="Sheet G001 in Revit: a shaded 3D view of the house on a title block that reads Bywater Shotgun House" width="1200" height="619" loading="lazy">
-            <figcaption>A cover sheet on its own title block</figcaption>
+            <img src="images/eiffel-city.jpg" alt="An overview of the finished model: the tower, the river, streets, trees, buildings and river boats" width="1200" height="692" loading="lazy">
+            <figcaption>Trees, people, cars, buses and river boats</figcaption>
           </figure>
         </div>
       </div>
